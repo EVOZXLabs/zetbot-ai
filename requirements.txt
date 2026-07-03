@@ -1,0 +1,4 @@
+ccxt
+requests
+python-dotenv
+colorama
