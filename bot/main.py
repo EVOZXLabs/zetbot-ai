@@ -3,7 +3,7 @@ ZetBot AI
 
 Entry point — fetches live BTC/USDT data and displays
 price, EMA200, RSI(14), ADX(14), ATR(14), market state,
-trading signal, and reason breakdown.
+trading signal, position status, and reason breakdown.
 """
 
 import sys
@@ -12,7 +12,8 @@ from datetime import datetime
 from bot.config import CONFIG
 from bot.data import MarketData
 from bot.logger import logger
-from bot.strategy import StrategyEngine
+from bot.paper import PaperTrader
+from bot.strategy import BUY, StrategyEngine
 
 
 def banner() -> None:
@@ -50,9 +51,22 @@ def main() -> None:
             compression_lookback=CONFIG.get("price_compression_lookback", 20),
             compression_ratio=CONFIG.get("compression_ratio", 0.3),
         )
-        result = engine.evaluate(df, has_position=False)
+
+        paper = PaperTrader()
+
+        result = engine.evaluate(df, has_position=paper.has_position())
         signal = result["signal"]
         reasons = result["reason"]
+
+        if signal == BUY:
+            paper.open_position(
+                entry_price=price,
+                symbol=symbol,
+                timeframe=timeframe,
+                reasons=reasons,
+            )
+
+        position = paper.current_position()
 
         print()
         print("=" * 45)
@@ -70,13 +84,25 @@ def main() -> None:
         print(f" Signal   : {signal}")
         for r in reasons:
             print(f"            - {r}")
+        print("-" * 45)
+        print(" PAPER POSITION")
+        print("-" * 45)
+        if position:
+            print(f" Entry      : ${position['entry_price']:,.2f}")
+            print(f" Stop Loss  : ${position['stop_loss_price']:,.2f}")
+            print(f" Take Profit: ${position['take_profit_price']:,.2f}")
+            pct = position["position_size_percent"]
+            print(f" Size       : {pct}%")
+        else:
+            print(" No Paper Position")
         print("=" * 45)
         print()
 
         logger.info(
             "BTC/USDT price=%.2f EMA200=%.2f RSI=%.2f "
-            "ADX=%.2f ATR=%.2f Market=%s Signal=%s",
+            "ADX=%.2f ATR=%.2f Market=%s Signal=%s Position=%s",
             price, ema200, rsi14, adx14, atr14, market, signal,
+            "YES" if position else "NO",
         )
 
     except Exception as e:
