@@ -8,9 +8,12 @@ Version 0.1 Foundation
 ====================================
 """
 
+import sys
 from datetime import datetime
 
-from exchange import Exchange
+import ccxt
+
+from bot.exchange import Exchange
 
 
 def banner():
@@ -32,9 +35,9 @@ def main():
 
     banner()
 
-    from config import CONFIG
+    from bot.config import CONFIG
 
-    from logger import logger
+    from bot.logger import logger
 
     logger.info("Configuration Loaded")
 
@@ -64,6 +67,30 @@ def main():
 
         logger.info("Price Loaded")
 
+    except ccxt.NetworkError as e:
+
+        logger.error(f"Network error: {e}")
+
+        print()
+
+        print("CONNECTION ERROR")
+
+        print("Could not reach Binance. Check your internet connection.")
+
+        sys.exit(1)
+
+    except ccxt.ExchangeError as e:
+
+        logger.error(f"Exchange error: {e}")
+
+        print()
+
+        print("EXCHANGE ERROR")
+
+        print(e)
+
+        sys.exit(1)
+
     except Exception as e:
 
         logger.error(str(e))
@@ -73,3 +100,9 @@ def main():
         print("ERROR")
 
         print(e)
+
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

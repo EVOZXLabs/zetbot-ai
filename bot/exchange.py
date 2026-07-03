@@ -10,7 +10,7 @@ ZetBot AI
 
 import ccxt
 
-from config import CONFIG
+from bot.config import CONFIG
 
 
 class Exchange:
@@ -45,7 +45,8 @@ class Exchange:
 
         else:
 
-            raise Exception("Exchange tidak didukung.")
+            msg = f"Unsupported exchange: {exchange_name}"
+            raise ValueError(msg)
 
     def ticker(self):
 
