@@ -2,3 +2,5 @@ ccxt
 requests
 python-dotenv
 colorama
+pandas
+pytest
