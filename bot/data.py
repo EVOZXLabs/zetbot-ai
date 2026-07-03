@@ -213,3 +213,23 @@ class MarketData:
             Latest EMA200 value as a float.
         """
         return IndicatorEngine.ema200(df, column=column)
+
+    def rsi(
+        self,
+        df: pd.DataFrame,
+        column: str = "close",
+        period: int = 14,
+    ) -> float:
+        """Calculate the latest RSI value on fetched data.
+
+        Convenience method that delegates to ``IndicatorEngine.rsi``.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+            column: Price column to use (default ``"close"``).
+            period: RSI period (default 14).
+
+        Returns:
+            Latest RSI value as a float.
+        """
+        return IndicatorEngine.rsi(df[column], period=period)

@@ -1,9 +1,9 @@
 """
 Unit tests for IndicatorEngine.
 
-Covers: flat market, uptrend, downtrend, random prices,
-small dataset, large dataset, input validation, and a
-performance benchmark.
+Covers: input validation, EMA correctness, RSI correctness,
+market scenarios (flat, uptrend, downtrend, random),
+small/large datasets, MarketData integration, and performance.
 """
 
 import math
@@ -24,7 +24,7 @@ def _series(values: list[float]) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-#  Input validation
+#  Input validation  (shared by EMA and RSI)
 # ---------------------------------------------------------------------------
 
 class TestInputValidation:
@@ -52,6 +52,31 @@ class TestInputValidation:
         df = pd.DataFrame({"open": [1.0, 2.0]})
         with pytest.raises(ValueError, match="not found"):
             IndicatorEngine.ema200(df, column="close")
+
+    # --- RSI-specific validation ---
+
+    def test_rsi_empty_series_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            IndicatorEngine.rsi(_series([]))
+
+    def test_rsi_nan_series_raises(self) -> None:
+        with pytest.raises(ValueError, match="NaN"):
+            IndicatorEngine.rsi(_series([10.0, float("nan"), 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0]))
+
+    def test_rsi_period_below_2_raises(self) -> None:
+        with pytest.raises(ValueError, match="period"):
+            IndicatorEngine.rsi(_series([10.0] * 20), period=1)
+
+    def test_rsi_insufficient_candles_raises(self) -> None:
+        """Need at least period + 1 candles for RSI."""
+        with pytest.raises(ValueError, match="data points"):
+            IndicatorEngine.rsi(_series([10.0] * 14), period=14)
+
+    def test_rsi_exactly_minimum_candles(self) -> None:
+        """period + 1 candles should be sufficient."""
+        result = IndicatorEngine.rsi(_series([10.0] * 16), period=14)
+        assert isinstance(result, float)
+        assert 0 <= result <= 100
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +209,111 @@ class TestEMA200Scenarios:
 
 
 # ---------------------------------------------------------------------------
+#  RSI correctness
+# ---------------------------------------------------------------------------
+
+class TestRSICorrectness:
+
+    def test_rsi_period_3_known_values(self) -> None:
+        """RSI(3) on [10, 12, 11, 13, 15].
+
+        diff  = [NaN, 2, -1, 2, 2]
+        gains = [NaN, 2,  0, 2, 2]
+        losses= [NaN, 0,  1, 0, 0]
+
+        SMA gain = (2 + 0 + 2) / 3 = 1.333
+        SMA loss = (0 + 1 + 0) / 3 = 0.333
+
+        Wilder smooth next (gain=2, loss=0):
+        avg_gain = (1.333*2 + 2) / 3 = 1.555
+        avg_loss = (0.333*2 + 0) / 3 = 0.222
+
+        rs = 1.555 / 0.222 = 7.0
+        rsi = 100 - 100/(1+7) = 100 - 12.5 = 87.50
+        """
+        series = _series([10.0, 12.0, 11.0, 13.0, 15.0])
+        result = IndicatorEngine.rsi(series, period=3)
+        assert abs(result - 87.50) < 0.1, f"Expected ~87.50, got {result}"
+
+    def test_rsi_returns_float(self) -> None:
+        series = _series([float(i) for i in range(20)])
+        result = IndicatorEngine.rsi(series, period=14)
+        assert isinstance(result, float)
+        assert 0 <= result <= 100
+
+    def test_rsi_default_period_14(self) -> None:
+        series = _series([float(i) for i in range(50)])
+        result = IndicatorEngine.rsi(series)
+        assert isinstance(result, float)
+        assert 0 <= result <= 100
+
+
+# ---------------------------------------------------------------------------
+#  RSI market scenarios
+# ---------------------------------------------------------------------------
+
+class TestRSIScenarios:
+
+    def test_flat_market(self) -> None:
+        """Constant prices: RSI should be 50.0."""
+        close = [50_000.0] * 100
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert result == 50.0
+
+    def test_strong_uptrend(self) -> None:
+        """Consistent upward moves: RSI should be >= 80."""
+        close = [100.0 + i for i in range(50)]
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert result >= 80, f"Expected RSI >= 80 in uptrend, got {result}"
+
+    def test_strong_downtrend(self) -> None:
+        """Consistent downward moves: RSI should be <= 20."""
+        close = [200.0 - i for i in range(50)]
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert result <= 20, f"Expected RSI <= 20 in downtrend, got {result}"
+
+    def test_random_prices(self) -> None:
+        """Random prices: RSI should be between 0 and 100."""
+        import random
+        random.seed(42)
+        close = [random.uniform(100.0, 200.0) for _ in range(100)]
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert 0 <= result <= 100, f"RSI out of range: {result}"
+
+    def test_small_dataset(self) -> None:
+        """Exactly period + 1 candles should work."""
+        close = [100.0 + i for i in range(15)]  # 15 = 14 + 1
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert isinstance(result, float)
+        assert 0 <= result <= 100
+
+    def test_large_dataset(self) -> None:
+        """1000 points should not degrade precision."""
+        close = [float(i) for i in range(1000)]
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert isinstance(result, float)
+        assert 0 <= result <= 100
+
+    def test_almost_all_gains(self) -> None:
+        """One small loss among gains: RSI should be very high."""
+        close = [100.0]
+        for _ in range(30):
+            close.append(close[-1] + 1.0)
+        close[-3] = close[-4]  # one flat candle
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert result > 80
+
+    def test_almost_all_losses(self) -> None:
+        """One small gain among losses: RSI should be very low."""
+        close = [200.0]
+        for _ in range(30):
+            close.append(close[-1] - 1.0)
+        close[-3] = close[-4]  # one flat candle
+        result = IndicatorEngine.rsi(_series(close), period=14)
+        assert result < 20
+
+
+# ---------------------------------------------------------------------------
 #  MarketData integration
 # ---------------------------------------------------------------------------
 
@@ -204,8 +334,28 @@ class TestMarketDataEMA200Integration:
         df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=250)
         ema_val = md.ema200(df)
         latest = df["close"].iloc[-1]
-        # EMA200 should be within ~20% of the current price
         assert 0.8 * latest <= ema_val <= 1.2 * latest
+
+
+class TestMarketDataRSIIntegration:
+    """Verify that MarketData.rsi works after fetch_ohlcv."""
+
+    def test_rsi_after_fetch(self) -> None:
+        from bot.data import MarketData
+        md = MarketData(exchange_name="binance")
+        df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200)
+        rsi_val = md.rsi(df)
+        assert isinstance(rsi_val, float)
+        assert 0 <= rsi_val <= 100
+
+    def test_rsi_reasonable_value(self) -> None:
+        from bot.data import MarketData
+        md = MarketData(exchange_name="binance")
+        df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200)
+        rsi_val = md.rsi(df)
+        assert 20 <= rsi_val <= 80, (
+            f"Expected RSI in normal range, got {rsi_val}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +363,6 @@ class TestMarketDataEMA200Integration:
 # ---------------------------------------------------------------------------
 
 class TestPerformance:
-    """EMA(200) on 1000 points must complete quickly."""
 
     def test_ema_1000_points_under_100ms(self) -> None:
         close = [float(i) for i in range(1000)]
@@ -236,35 +385,57 @@ class TestPerformance:
             f"Fetch + EMA200 took {elapsed:.1f}s (limit 10s)"
         )
 
+    def test_rsi_1000_points_under_50ms(self) -> None:
+        close = [float(i) for i in range(1000)]
+        series = pd.Series(close)
+        start = time.perf_counter()
+        for _ in range(100):
+            IndicatorEngine.rsi(series, period=14)
+        elapsed = (time.perf_counter() - start) / 100
+        assert elapsed < 0.05, f"Average RSI took {elapsed*1000:.1f}ms (limit 50ms)"
+
+    def test_rsi_live_fetch_under_10s(self) -> None:
+        from bot.data import MarketData
+        md = MarketData(exchange_name="binance")
+        start = time.perf_counter()
+        df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=250)
+        rsi_val = md.rsi(df)
+        elapsed = time.perf_counter() - start
+        assert isinstance(rsi_val, float)
+        assert 0 <= rsi_val <= 100
+        assert elapsed < 10.0, (
+            f"Fetch + RSI took {elapsed:.1f}s (limit 10s)"
+        )
+
 
 # ---------------------------------------------------------------------------
 #  Demonstration
 # ---------------------------------------------------------------------------
 
-def demo_ema200() -> None:
-    """Fetch 250 hourly candles and display EMA200."""
+def demo_indicators() -> None:
+    """Fetch 250 hourly candles and display EMA200 + RSI14."""
     from bot.data import MarketData
 
     md = MarketData(exchange_name="binance")
     df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=250)
+    price = df["close"].iloc[-1]
     ema_val = md.ema200(df)
-    latest = df["close"].iloc[-1]
+    rsi_val = md.rsi(df)
+
+    trend = "Bullish" if price > ema_val else "Bearish"
 
     print(f"\n{'=' * 55}")
-    print("EMA200 DEMONSTRATION")
+    print("MARKET OVERVIEW")
     print(f"{'=' * 55}")
     print(f"Symbol      : BTC/USDT")
     print(f"Timeframe   : 1h")
     print(f"Candles     : {len(df)}")
-    print(f"Latest close: ${latest:,.2f}")
+    print(f"Price       : ${price:,.2f}")
     print(f"EMA200      : ${ema_val:,.2f}")
-    print(f"Difference  : ${latest - ema_val:+,.2f}")
-    gap_pct = (latest - ema_val) / ema_val * 100
-    print(f"Gap         : {gap_pct:+.2f}%")
-    signal = "BULLISH" if latest > ema_val else "BEARISH"
-    print(f"Signal      : {signal}")
+    print(f"RSI(14)     : {rsi_val:.2f}")
+    print(f"Trend       : {trend}")
     print(f"{'=' * 55}\n")
 
 
 if __name__ == "__main__":
-    demo_ema200()
+    demo_indicators()
