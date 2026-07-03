@@ -2,100 +2,156 @@
 
 Version: 1.0
 
+Status: LOCKED
+
 Owner: EVOZXLabs
 
-Status: Locked
+Document Type: Project Contract
+
+Last Updated: 2026
 
 ---
 
-# Mission
+# 1. Mission
 
-Develop a professional cryptocurrency Spot Trading Bot that is safe, modular, maintainable, and production-ready.
+Develop a professional cryptocurrency Spot Trading Bot that is:
 
-The project must evolve incrementally.
+- Safe
+- Modular
+- Maintainable
+- Testable
+- Production Ready
 
-Every commit must be executable.
+The bot must be suitable for real trading after passing paper trading and backtesting.
 
-No unfinished modules.
+This document is the single source of truth.
 
-No placeholder implementations.
+All implementations MUST follow this specification.
 
 ---
 
-# Supported Exchanges
+# 2. Core Principles
+
+The project MUST follow these principles.
+
+- Build incrementally.
+- Every milestone must be executable.
+- Never leave broken code.
+- Never create placeholder implementations.
+- Never create unused modules.
+- Never refactor architecture before Version 1.0.
+- Never implement future milestones.
+- One feature = One commit.
+- One milestone = Working software.
+
+---
+
+# 3. Supported Exchanges
+
+Required
 
 - Binance Spot
 - Bybit Spot
 - Tokocrypto Spot
 
-Architecture must allow adding new exchanges through CCXT.
+Implementation must use:
+
+CCXT
+
+The architecture must support adding new exchanges with minimal code changes.
 
 ---
 
-# Trading Strategy
+# 4. Trading Mode
+
+Supported
+
+- Paper Trading
+- Live Trading
+
+Forbidden
+
+- Margin
+- Futures
+- Leverage
+
+Spot Trading ONLY.
+
+---
+
+# 5. Trading Strategy
+
+Primary Strategy
 
 Trend Following with RSI Filter
 
-BUY only when:
+BUY Conditions
 
-- Price > EMA 200
+ALL conditions must be TRUE.
+
+- Current Price > EMA 200
 - RSI(14) < 30
+- ADX >= Configurable Threshold
 - Market is NOT Sideways
-- No active position
+- Volume Filter passed
+- No Active Position
+- Balance Available
+- Daily Loss Limit NOT reached
+- Maximum Daily Trade NOT reached
 
-SELL when:
+SELL Conditions
+
+Any of the following:
 
 - Take Profit reached
 - Stop Loss reached
-- Exit rule triggered
+- Exit Strategy triggered
+- Emergency Exit triggered
 
 ---
 
-# Indicators
+# 6. Indicators
 
 Required
 
-EMA 200
-
-RSI 14
-
-ADX 14
-
-ATR
-
-Volume Filter
+- EMA 200
+- RSI 14
+- ADX 14
+- ATR
+- Volume Filter
 
 Future
 
-MACD
+- MACD
+- Bollinger Bands
+- Multi-Timeframe Confirmation
 
-Bollinger Bands
+Indicators must never repaint.
 
-Multi Timeframe Confirmation
+Only closed candles may be used.
 
 ---
 
-# Sideways Detection
+# 7. Sideways Detection
 
-Bot must avoid trading during ranging markets.
+The bot MUST avoid trading during ranging markets.
 
 Possible methods
 
-ATR
+- ATR
+- ADX
+- Price Compression
+- Volatility Filter
 
-ADX
-
-Price Compression
-
-Volatility Filter
+Implementation may combine multiple methods.
 
 ---
 
-# Risk Management
+# 8. Risk Management
 
 Position Size
 
-10% USDT Balance
+10% of available USDT balance
 
 Maximum Open Position
 
@@ -109,161 +165,319 @@ Take Profit
 
 2.5%
 
-Daily Loss Limit
-
 Configurable
 
-Maximum Trades Per Day
+- Daily Loss Limit
+- Maximum Trades Per Day
+- Cooldown After Loss
+- Risk Percentage
 
-Configurable
-
-Cooldown after Loss
-
-Supported
-
----
-
-# Notifications
-
-Telegram
-
-Bot Started
-
-Bot Stopped
-
-BUY
-
-SELL
-
-Take Profit
-
-Stop Loss
-
-Errors
-
-Warnings
-
-Daily Summary
+The bot MUST reject invalid position sizes.
 
 ---
 
-# Logging
+# 9. Order Validation
 
-Every important event must be logged.
+Before placing any order:
 
-Trades
+Validate
 
-Errors
+- Exchange connection
+- Trading pair
+- Available balance
+- Minimum order size
+- Tick size
+- Precision
+- API response
 
-API Calls
-
-Warnings
-
-Execution Time
-
----
-
-# Paper Trading
-
-Must support paper trading before live trading.
+Never send invalid orders.
 
 ---
 
-# Live Trading
+# 10. Market Data Validation
 
-Spot Only
+Reject data if:
 
-Never Margin
-
-Never Futures
-
----
-
-# Backtesting
-
-Historical simulation
-
-Performance report
-
-Profit
-
-Loss
-
-Drawdown
-
-Win Rate
-
-Sharpe Ratio
+- Missing candles
+- Duplicate timestamps
+- Invalid OHLCV
+- Invalid prices
+- Corrupted exchange response
 
 ---
 
-# Statistics
+# 11. Notifications
 
-Daily Profit
+Telegram Required
 
-Weekly Profit
+Events
 
-Monthly Profit
-
-Win Rate
-
-Average Profit
-
-Average Loss
-
-Maximum Drawdown
-
-Trade History
+- Bot Started
+- Bot Stopped
+- BUY
+- SELL
+- Take Profit
+- Stop Loss
+- Errors
+- Warnings
+- Daily Summary
 
 ---
 
-# Dashboard
+# 12. Logging
+
+Every important action must be logged.
+
+Required
+
+- Trades
+- Errors
+- API Calls
+- Execution Time
+- Warnings
+- Strategy Decisions
+
+Logging Levels
+
+- INFO
+- WARNING
+- ERROR
+- DEBUG
+
+---
+
+# 13. Configuration
+
+All settings MUST be configurable.
+
+Examples
+
+- Exchange
+- Trading Pair
+- Timeframe
+- Position Size
+- Stop Loss
+- Take Profit
+- Telegram
+- API Keys
+- Paper Mode
+- Live Mode
+
+No hardcoded values.
+
+---
+
+# 14. Resume State
+
+If the application restarts:
+
+The bot MUST
+
+- Detect existing positions
+- Restore previous state
+- Continue TP monitoring
+- Continue SL monitoring
+- Prevent duplicate orders
+
+---
+
+# 15. Emergency Stop
+
+Immediately stop opening new positions if:
+
+- Exchange unavailable
+- Internet unavailable
+- Daily Loss Limit reached
+- Invalid balance detected
+- Consecutive API failures exceed threshold
+- Critical exception occurs
+
+---
+
+# 16. Backtesting
+
+Required
+
+Historical Simulation
+
+Performance Report
+
+Metrics
+
+- Profit
+- Loss
+- Win Rate
+- Drawdown
+- Profit Factor
+- Sharpe Ratio
+- Trade History
+
+---
+
+# 17. Statistics
+
+Generate
+
+- Daily Profit
+- Weekly Profit
+- Monthly Profit
+- Average Win
+- Average Loss
+- Win Rate
+- Drawdown
+- Total Trades
+
+---
+
+# 18. Dashboard
 
 Future Version
 
 Web Dashboard
 
-Live Status
+Features
 
-Charts
-
-Open Position
-
-Trade History
+- Live Status
+- Price
+- Indicators
+- Current Position
+- Open Orders
+- Trade History
+- Performance
 
 ---
 
-# AI Features
+# 19. AI Features
 
 Future Version
 
-Trade Analysis
+Provide
 
-Market Summary
+- Market Summary
+- Trade Explanation
+- Signal Explanation
+- Trade Journal Analysis
+- Performance Analysis
+- Strategy Suggestions
 
-Signal Explanation
-
-Trade Journal Analysis
-
----
-
-# Development Rules
-
-Every commit must run.
-
-Never leave broken code.
-
-Never create unused modules.
-
-Never refactor architecture before Version 1.0.
-
-Build small working milestones.
-
-Commit after every completed milestone.
+AI must never execute trades automatically without strategy approval.
 
 ---
 
-# Milestones
+# 20. Folder Structure
+
+Fixed
+
+bot/
+
+core/
+
+exchange/
+
+strategy/
+
+risk/
+
+notification/
+
+paper/
+
+live/
+
+backtest/
+
+analytics/
+
+config/
+
+tests/
+
+docs/
+
+logs/
+
+No unnecessary folders.
+
+---
+
+# 21. Code Quality
+
+Required
+
+- Python 3.x
+- PEP8
+- Type Hints
+- Docstrings
+- Meaningful Variable Names
+- No Magic Numbers
+- No Duplicate Code
+- Clear Exception Handling
+
+---
+
+# 22. Testing
+
+Every module must include testing where applicable.
+
+Required
+
+- Unit Test
+- Integration Test
+
+Every milestone must run successfully before merge.
+
+---
+
+# 23. Performance
+
+The bot must
+
+- Respect Exchange Rate Limits
+- Minimize API Calls
+- Cache reusable data
+- Recover from temporary failures
+
+---
+
+# 24. Development Rules
+
+Mandatory
+
+- Every commit must run.
+- Every milestone must work.
+- Never commit broken code.
+- Never skip milestones.
+- Never rewrite unrelated modules.
+- Never change architecture without approval.
+- Never add dependencies without approval.
+
+---
+
+# 25. Git Rules
+
+One Feature
+
+↓
+
+One Commit
+
+↓
+
+One Working State
+
+Examples
+
+GOOD
+
+v0.0.4 implement EMA200 calculation
+
+BAD
+
+Implemented everything
+
+---
+
+# 26. Milestones
 
 v0.0.1
 
@@ -281,31 +495,39 @@ EMA 200
 
 v0.0.4
 
-RSI
+RSI 14
 
 v0.0.5
 
-ADX
+ADX 14
 
 v0.0.6
 
-Sideways Filter
+Sideways Detection
 
 v0.0.7
 
-Paper Buy
+Paper BUY
 
 v0.0.8
 
-Paper Sell
+Paper SELL
 
 v0.0.9
 
-Telegram
+Telegram Notification
 
 v0.1
 
 Complete Paper Trading
+
+v0.2
+
+Risk Management
+
+v0.3
+
+Statistics
 
 v0.5
 
@@ -313,4 +535,31 @@ Backtesting
 
 v1.0
 
-Production Spot Trading
+Production Ready Spot Trading Bot
+
+---
+
+# 27. Definition of Done
+
+A milestone is considered COMPLETE only if:
+
+- Code runs successfully
+- No critical errors
+- Feature works as specified
+- Logs generated correctly
+- Tests pass (where applicable)
+- Ready to commit
+
+If these conditions are not met,
+
+the milestone is NOT complete.
+
+---
+
+END OF SPECIFICATION
+
+Status:
+
+LOCKED
+
+Any modification requires explicit approval from the project owner.
