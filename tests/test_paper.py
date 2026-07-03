@@ -583,3 +583,670 @@ class TestStrategyIntegration:
         result = engine.evaluate(df, has_position=trader.has_position())
         assert result["signal"] == HOLD
         assert not trader.has_position()
+
+
+# ---------------------------------------------------------------------------
+#  close_position – Take Profit
+# ---------------------------------------------------------------------------
+
+class TestCloseTakeProfit:
+
+    def _open_and_close(self, entry: float, exit_: float) -> dict:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=entry,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        result = trader.close_position(exit_, "Take Profit")
+        assert result is not None
+        return result
+
+    def test_tp_has_required_keys(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        required = {
+            "entry_time", "exit_time", "entry_price", "exit_price",
+            "quantity", "position_size_percent", "stop_loss_price",
+            "take_profit_price", "gross_pnl", "net_pnl", "pnl_pct",
+            "holding_time", "exit_reason", "balance_after",
+            "symbol", "timeframe",
+        }
+        missing = required - set(trade.keys())
+        assert not missing, f"Closed trade missing keys: {missing}"
+
+    def test_tp_profit_correct(self) -> None:
+        trade = self._open_and_close(50_000.0, 52_000.0)
+        expected_pnl = (52_000.0 - 50_000.0) * 0.02
+        assert trade["gross_pnl"] == pytest.approx(expected_pnl)
+        assert trade["net_pnl"] == pytest.approx(expected_pnl)
+
+    def test_tp_pnl_pct_correct(self) -> None:
+        trade = self._open_and_close(50_000.0, 52_000.0)
+        expected_pct = ((52_000.0 / 50_000.0) - 1.0) * 100.0
+        assert trade["pnl_pct"] == pytest.approx(expected_pct)
+
+    def test_tp_balance_updated(self) -> None:
+        trade = self._open_and_close(50_000.0, 52_000.0)
+        expected_balance = 10_000.0 + (52_000.0 - 50_000.0) * 0.02
+        assert trade["balance_after"] == pytest.approx(expected_balance)
+
+    def test_tp_stores_exit_reason(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert trade["exit_reason"] == "Take Profit"
+
+    def test_tp_clears_position(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        assert trader.has_position()
+        trader.close_position(51_250.0, "Take Profit")
+        assert not trader.has_position()
+
+    def test_tp_is_profitable(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert trade["net_pnl"] > 0
+        assert trade["gross_pnl"] > 0
+
+    def test_tp_entry_time_is_datetime(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert isinstance(trade["entry_time"], datetime)
+
+    def test_tp_exit_time_is_datetime(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert isinstance(trade["exit_time"], datetime)
+
+    def test_tp_holding_time_is_timedelta(self) -> None:
+        from datetime import timedelta
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert isinstance(trade["holding_time"], timedelta)
+
+
+# ---------------------------------------------------------------------------
+#  close_position – Stop Loss
+# ---------------------------------------------------------------------------
+
+class TestCloseStopLoss:
+
+    def test_sl_exit_reason(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(48_000.0, "Stop Loss")
+        assert trade is not None
+        assert trade["exit_reason"] == "Stop Loss"
+
+    def test_sl_net_pnl_negative(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(49_000.0, "Stop Loss")
+        assert trade["net_pnl"] < 0
+        assert trade["gross_pnl"] < 0
+
+    def test_sl_pnl_pct_negative(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(49_000.0, "Stop Loss")
+        assert trade["pnl_pct"] < 0
+
+    def test_sl_balance_decreases(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(49_000.0, "Stop Loss")
+        assert trade is not None
+        assert trade["balance_after"] < 10_000.0
+
+    def test_sl_clears_position(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(49_000.0, "Stop Loss")
+        assert not trader.has_position()
+
+
+# ---------------------------------------------------------------------------
+#  close_position – Strategy Exit / Manual Close
+# ---------------------------------------------------------------------------
+
+class TestCloseStrategyExit:
+
+    def test_strategy_exit_reason(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(51_000.0, "Strategy Exit")
+        assert trade is not None
+        assert trade["exit_reason"] == "Strategy Exit"
+
+    def test_manual_close_reason(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(50_500.0, "Manual Close")
+        assert trade is not None
+        assert trade["exit_reason"] == "Manual Close"
+
+    def test_zero_pnl_when_exit_equals_entry(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(50_000.0, "Manual Close")
+        assert trade["net_pnl"] == pytest.approx(0.0)
+        assert trade["pnl_pct"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+#  close_position – invalid / edge cases
+# ---------------------------------------------------------------------------
+
+class TestCloseInvalid:
+
+    def test_close_no_position_returns_none(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        result = trader.close_position(50_000.0, "Manual Close")
+        assert result is None
+
+    def test_close_after_close_returns_none(self) -> None:
+        """Double close must return None on second call."""
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        first = trader.close_position(52_000.0, "Take Profit")
+        assert first is not None
+        second = trader.close_position(53_000.0, "Take Profit")
+        assert second is None
+
+    def test_close_zero_price_raises(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        with pytest.raises(ValueError, match="positive"):
+            trader.close_position(0.0, "Manual Close")
+
+    def test_close_negative_price_raises(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        with pytest.raises(ValueError, match="positive"):
+            trader.close_position(-100.0, "Manual Close")
+
+
+# ---------------------------------------------------------------------------
+#  Trade history
+# ---------------------------------------------------------------------------
+
+class TestTradeHistory:
+
+    def test_history_empty_initially(self) -> None:
+        trader = PaperTrader()
+        assert trader.trade_history() == []
+
+    def test_history_contains_closed_trade(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        history = trader.trade_history()
+        assert len(history) == 1
+        assert history[0]["exit_reason"] == "Take Profit"
+
+    def test_history_multiple_trades(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        trader.open_position(
+            entry_price=51_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(53_000.0, "Take Profit")
+        assert len(trader.trade_history()) == 2
+
+    def test_history_ordered_oldest_first(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        trader.open_position(
+            entry_price=55_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(57_000.0, "Take Profit")
+        hist = trader.trade_history()
+        assert hist[0]["entry_price"] == 50_000.0
+        assert hist[1]["entry_price"] == 55_000.0
+
+    def test_history_not_mutable(self) -> None:
+        """trade_history() must return a copy."""
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        h1 = trader.trade_history()
+        h2 = trader.trade_history()
+        assert h1 is not h2
+
+    def test_history_after_reset_empty(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        trader.reset()
+        assert trader.trade_history() == []
+
+
+# ---------------------------------------------------------------------------
+#  last_trade
+# ---------------------------------------------------------------------------
+
+class TestLastTrade:
+
+    def test_last_trade_none_initially(self) -> None:
+        trader = PaperTrader()
+        assert trader.last_trade() is None
+
+    def test_last_trade_returns_most_recent(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(51_000.0, "Strategy Exit")
+        trader.open_position(
+            entry_price=52_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(54_000.0, "Take Profit")
+        last = trader.last_trade()
+        assert last is not None
+        assert last["entry_price"] == 52_000.0
+        assert last["exit_price"] == 54_000.0
+
+    def test_last_trade_is_copy(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(51_000.0, "Strategy Exit")
+        l1 = trader.last_trade()
+        l2 = trader.last_trade()
+        assert l1 is not None and l2 is not None
+        assert l1 is not l2
+
+    def test_last_trade_after_reset_none(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        trader.reset()
+        assert trader.last_trade() is None
+
+
+# ---------------------------------------------------------------------------
+#  total_profit / win_count / loss_count
+# ---------------------------------------------------------------------------
+
+class TestProfitStats:
+
+    def test_total_profit_zero_initially(self) -> None:
+        trader = PaperTrader()
+        assert trader.total_profit() == 0.0
+
+    def test_total_profit_one_trade(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        expected = (52_000.0 - 50_000.0) * 0.02
+        assert trader.total_profit() == pytest.approx(expected)
+
+    def test_total_profit_multiple_trades(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        t1 = trader.close_position(52_000.0, "Take Profit")
+        pnl1 = t1["net_pnl"]
+        trader.open_position(
+            entry_price=55_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        t2 = trader.close_position(53_000.0, "Stop Loss")
+        pnl2 = t2["net_pnl"]
+        assert trader.total_profit() == pytest.approx(pnl1 + pnl2)
+
+    def test_win_count(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")  # win
+        trader.open_position(
+            entry_price=55_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(53_000.0, "Stop Loss")   # loss
+        assert trader.win_count() == 1
+        assert trader.loss_count() == 1
+
+    def test_win_count_zero(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        assert trader.win_count() == 0
+        assert trader.loss_count() == 0
+
+    def test_loss_on_zero_pnl(self) -> None:
+        """Zero PnL counts as loss (not win)."""
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(50_000.0, "Manual Close")
+        assert trader.win_count() == 0
+        assert trader.loss_count() == 1
+
+    def test_all_wins(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        for _ in range(3):
+            trader.open_position(
+                entry_price=50_000.0,
+                symbol="BTC/USDT",
+                timeframe="1h",
+                reasons=["Test"],
+            )
+            trader.close_position(52_000.0, "Take Profit")
+        assert trader.win_count() == 3
+        assert trader.loss_count() == 0
+
+
+# ---------------------------------------------------------------------------
+#  Balance update
+# ---------------------------------------------------------------------------
+
+class TestBalanceUpdate:
+
+    def test_balance_increases_on_profit(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(52_000.0, "Take Profit")
+        assert trade["balance_after"] > 10_000.0
+        assert trade["balance_after"] == pytest.approx(trader._balance)
+
+    def test_balance_decreases_on_loss(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(48_000.0, "Stop Loss")
+        assert trade["balance_after"] < 10_000.0
+
+    def test_balance_persists_across_trades(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trader.close_position(52_000.0, "Take Profit")
+        bal1 = trader._balance
+        trader.open_position(
+            entry_price=51_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        # position_value uses updated balance
+        pos = trader.current_position()
+        assert pos is not None
+        expected_qty = (bal1 * 0.1) / 51_000.0
+        assert pos["quantity"] == pytest.approx(expected_qty)
+
+
+# ---------------------------------------------------------------------------
+#  close_position symbol / timeframe stored
+# ---------------------------------------------------------------------------
+
+class TestCloseMetadata:
+
+    def test_symbol_preserved(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="ETH/USDT",
+            timeframe="4h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(52_000.0, "Take Profit")
+        assert trade is not None
+        assert trade["symbol"] == "ETH/USDT"
+        assert trade["timeframe"] == "4h"
+
+    def test_all_fields_are_correct_types(self) -> None:
+        from datetime import datetime, timedelta
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        trade = trader.close_position(52_000.0, "Take Profit")
+        assert trade is not None
+        assert isinstance(trade["entry_time"], datetime)
+        assert isinstance(trade["exit_time"], datetime)
+        assert isinstance(trade["holding_time"], timedelta)
+        assert isinstance(trade["entry_price"], float)
+        assert isinstance(trade["exit_price"], float)
+        assert isinstance(trade["quantity"], float)
+        assert isinstance(trade["gross_pnl"], float)
+        assert isinstance(trade["net_pnl"], float)
+        assert isinstance(trade["pnl_pct"], float)
+        assert isinstance(trade["exit_reason"], str)
+        assert isinstance(trade["balance_after"], float)
+
+
+# ---------------------------------------------------------------------------
+#  End-to-end StrategyEngine + close
+# ---------------------------------------------------------------------------
+
+class TestStrategySellIntegration:
+
+    def test_sell_signal_closes_position(self) -> None:
+        """SELL signal with position open → close with Strategy Exit."""
+        import pandas as pd
+        from bot.strategy import HOLD, SELL, StrategyEngine
+
+        n = 250
+        highs, lows, close = [], [], []
+        for i in range(n):
+            if i < 220:
+                c = 50_000.0 + i * 30.0
+            else:
+                c = 50_000.0 + 220 * 30.0 - (i - 220) * 25.0
+            close.append(c)
+            highs.append(c + 200.0)
+            lows.append(c - 200.0)
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+
+        engine = StrategyEngine(rsi_oversold=40)
+        trader = PaperTrader(initial_balance=10_000.0)
+
+        result = engine.evaluate(df, has_position=trader.has_position())
+        trader.open_position(
+            entry_price=float(df["close"].iloc[-1]),
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=result["reason"],
+        )
+        assert trader.has_position()
+
+        df2 = _downtrend_df()
+        result2 = engine.evaluate(df2, has_position=trader.has_position())
+        pos = trader.current_position()
+        assert pos is not None
+        price = float(df2["close"].iloc[-1])
+        if result2["signal"] == SELL:
+            trade = trader.close_position(price, "Strategy Exit")
+            assert trade is not None
+            assert trade["exit_reason"] == "Strategy Exit"
+            assert not trader.has_position()
+
+    def test_hold_with_position_does_not_close(self) -> None:
+        """When signal is HOLD but position exists — leave open."""
+        import pandas as pd
+        from bot.strategy import HOLD, StrategyEngine
+
+        df = _uptrend_flat_df()
+        engine = StrategyEngine()
+        trader = PaperTrader(initial_balance=10_000.0)
+
+        trader.open_position(
+            entry_price=float(df["close"].iloc[-1]),
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        assert trader.has_position()
+
+        result = engine.evaluate(df, has_position=trader.has_position())
+        assert result["signal"] == HOLD
+        assert trader.has_position()
+
+
+# ---------------------------------------------------------------------------
+#  Helpers (shared)
+# ---------------------------------------------------------------------------
+
+def _downtrend_df(n: int = 250) -> pd.DataFrame:
+    import pandas as pd
+    highs = []
+    lows = []
+    close = []
+    for i in range(n):
+        c = 60_000.0 - i * 50.0
+        close.append(c)
+        highs.append(c + 100.0)
+        lows.append(c - 100.0)
+    return pd.DataFrame({"high": highs, "low": lows, "close": close})
+
+
+def _uptrend_flat_df(n: int = 250) -> pd.DataFrame:
+    """Uptrend that ends flat — evaluates to HOLD."""
+    import pandas as pd
+    base = 50_000.0
+    return pd.DataFrame({
+        "high": [base + 100.0] * n,
+        "low":  [base - 100.0] * n,
+        "close":[base] * n,
+    })

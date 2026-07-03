@@ -3,7 +3,8 @@ ZetBot AI
 
 Entry point — fetches live BTC/USDT data and displays
 price, EMA200, RSI(14), ADX(14), ATR(14), market state,
-trading signal, position status, and reason breakdown.
+trading signal, position status, trade result,
+and reason breakdown.
 """
 
 import sys
@@ -13,7 +14,19 @@ from bot.config import CONFIG
 from bot.data import MarketData
 from bot.logger import logger
 from bot.paper import PaperTrader
-from bot.strategy import BUY, StrategyEngine
+from bot.strategy import BUY, SELL, StrategyEngine
+
+
+def _print_trade(trade: dict) -> None:
+    direction = "LONG"
+    pnl = trade["net_pnl"]
+    pnl_str = f"${pnl:+,.2f}"
+    print(f" Trade     : {direction}")
+    print(f" Entry     : ${trade['entry_price']:,.2f}")
+    print(f" Exit      : ${trade['exit_price']:,.2f}")
+    print(f" PnL       : {pnl_str} ({trade['pnl_pct']:+.2f}%)")
+    print(f" Exit      : {trade['exit_reason']}")
+    print(f" Balance   : ${trade['balance_after']:,.2f}")
 
 
 def banner() -> None:
@@ -58,6 +71,20 @@ def main() -> None:
         signal = result["signal"]
         reasons = result["reason"]
 
+        position = paper.current_position()
+
+        if position:
+            if price >= position["take_profit_price"]:
+                trade = paper.close_position(price, "Take Profit")
+            elif price <= position["stop_loss_price"]:
+                trade = paper.close_position(price, "Stop Loss")
+            elif signal == SELL:
+                trade = paper.close_position(price, "Strategy Exit")
+            else:
+                trade = None
+        else:
+            trade = None
+
         if signal == BUY:
             paper.open_position(
                 entry_price=price,
@@ -85,6 +112,11 @@ def main() -> None:
         for r in reasons:
             print(f"            - {r}")
         print("-" * 45)
+        if trade:
+            print(" TRADE RESULT")
+            print("-" * 45)
+            _print_trade(trade)
+            print("-" * 45)
         print(" PAPER POSITION")
         print("-" * 45)
         if position:
@@ -98,11 +130,11 @@ def main() -> None:
         print("=" * 45)
         print()
 
+        pos_flag = "YES" if position else "NO"
         logger.info(
             "BTC/USDT price=%.2f EMA200=%.2f RSI=%.2f "
             "ADX=%.2f ATR=%.2f Market=%s Signal=%s Position=%s",
-            price, ema200, rsi14, adx14, atr14, market, signal,
-            "YES" if position else "NO",
+            price, ema200, rsi14, adx14, atr14, market, signal, pos_flag,
         )
 
     except Exception as e:

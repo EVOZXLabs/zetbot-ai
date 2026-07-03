@@ -18,8 +18,12 @@ _INITIAL_BALANCE = 10_000.0
 class PaperTrader:
     """Virtual paper trader — no real orders or exchange interaction.
 
-    Tracks a single open position with virtual balance, stop loss,
-    and take profit levels computed from config.
+    Supports the full trade lifecycle:
+
+    - Open a long position via :meth:`open_position`.
+    - Close it via :meth:`close_position` (take-profit, stop-loss,
+      strategy exit, or manual close).
+    - Inspect the current position, trade history, and P&L stats.
     """
 
     def __init__(
@@ -28,9 +32,10 @@ class PaperTrader:
     ) -> None:
         self._balance: float = initial_balance
         self._position: dict[str, Any] | None = None
+        self._trades: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API – position lifecycle
     # ------------------------------------------------------------------
 
     def open_position(
@@ -97,6 +102,90 @@ class PaperTrader:
 
         return dict(self._position)
 
+    def close_position(
+        self,
+        exit_price: float,
+        exit_reason: str,
+    ) -> dict[str, Any] | None:
+        """Close the currently open position.
+
+        Calculates realised P&L, updates the virtual balance, and
+        stores the completed trade in the history log.
+
+        Args:
+            exit_price: Price at which the position is closed.
+            exit_reason: Why the position was closed.  One of
+                ``"Take Profit"``, ``"Stop Loss"``, ``"Strategy Exit"``,
+                or ``"Manual Close"``.
+
+        Returns:
+            A dict with the closed position (including P&L fields),
+            or ``None`` if no position is open.
+
+        Raises:
+            ValueError: If ``exit_price`` is not positive.
+        """
+        if self._position is None:
+            logger.warning("Paper SELL rejected — no open position")
+            return None
+
+        if exit_price <= 0:
+            msg = f"exit_price must be positive, got {exit_price}"
+            raise ValueError(msg)
+
+        pos = self._position
+
+        gross_pnl = (exit_price - pos["entry_price"]) * pos["quantity"]
+        net_pnl = gross_pnl  # no fees in paper trading
+        pnl_pct = ((exit_price / pos["entry_price"]) - 1.0) * 100.0
+
+        balance_after = pos["balance_before"] + net_pnl
+        self._balance = balance_after
+
+        exit_time = datetime.now(timezone.utc)
+        holding_time = exit_time - pos["entry_time"]
+
+        closed = {
+            "entry_time": pos["entry_time"],
+            "exit_time": exit_time,
+            "entry_price": pos["entry_price"],
+            "exit_price": exit_price,
+            "quantity": pos["quantity"],
+            "position_size_percent": pos["position_size_percent"],
+            "stop_loss_price": pos["stop_loss_price"],
+            "take_profit_price": pos["take_profit_price"],
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "pnl_pct": pnl_pct,
+            "holding_time": holding_time,
+            "exit_reason": exit_reason,
+            "balance_after": balance_after,
+            "symbol": pos["symbol"],
+            "timeframe": pos["timeframe"],
+        }
+
+        self._trades.append(closed)
+        self._position = None
+
+        logger.info(
+            "Paper SELL closed | %s | "
+            "Entry=%.2f Exit=%.2f PnL=%+.2f (%+.2f%%) "
+            "Balance=%.2f | Held=%s",
+            exit_reason,
+            pos["entry_price"],
+            exit_price,
+            net_pnl,
+            pnl_pct,
+            balance_after,
+            _format_timedelta(holding_time),
+        )
+
+        return dict(closed)
+
+    # ------------------------------------------------------------------
+    # Public API – position queries
+    # ------------------------------------------------------------------
+
     def has_position(self) -> bool:
         """Check whether a paper position is currently open.
 
@@ -115,8 +204,66 @@ class PaperTrader:
             return None
         return dict(self._position)
 
+    # ------------------------------------------------------------------
+    # Public API – trade history
+    # ------------------------------------------------------------------
+
+    def trade_history(self) -> list[dict[str, Any]]:
+        """Return all completed trades.
+
+        Returns:
+            A list of closed-position dicts, oldest first.
+        """
+        return list(self._trades)
+
+    def last_trade(self) -> dict[str, Any] | None:
+        """Return the most recently closed trade, or ``None``.
+
+        Returns:
+            A closed-position dict, or ``None`` if no trades.
+        """
+        if not self._trades:
+            return None
+        return dict(self._trades[-1])
+
+    def total_profit(self) -> float:
+        """Sum of net P&L across all closed trades.
+
+        Returns:
+            Total realised profit in USDT.
+        """
+        return sum(t["net_pnl"] for t in self._trades)
+
+    def win_count(self) -> int:
+        """Number of profitable closed trades.
+
+        Returns:
+            Count of trades where ``net_pnl > 0``.
+        """
+        return sum(1 for t in self._trades if t["net_pnl"] > 0)
+
+    def loss_count(self) -> int:
+        """Number of unprofitable closed trades.
+
+        Returns:
+            Count of trades where ``net_pnl <= 0``.
+        """
+        return sum(1 for t in self._trades if t["net_pnl"] <= 0)
+
+    # ------------------------------------------------------------------
+    # Public API – lifecycle
+    # ------------------------------------------------------------------
+
     def reset(self) -> None:
-        """Clear the position and restore the initial balance."""
+        """Clear the position, trade history, and restore balance."""
         self._position = None
+        self._trades.clear()
         self._balance = _INITIAL_BALANCE
         logger.info("Paper trader reset")
+
+
+def _format_timedelta(td: Any) -> str:
+    total_sec = int(td.total_seconds())
+    hours, remainder = divmod(total_sec, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
