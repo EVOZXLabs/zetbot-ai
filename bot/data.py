@@ -11,7 +11,9 @@ from typing import Any, Optional
 import ccxt
 import pandas as pd
 
+from bot.config import CONFIG
 from bot.indicators import IndicatorEngine
+from bot.state import MarketStateDetector
 
 logger = logging.getLogger("ZetBot")
 
@@ -269,3 +271,32 @@ class MarketData:
             Latest -DI value as a float.
         """
         return IndicatorEngine.minus_di(df, period=period)
+
+    def atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate the latest ATR value on fetched data.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+            period: ATR period (default 14).
+
+        Returns:
+            Latest ATR value as a float.
+        """
+        return IndicatorEngine.atr(df, period=period)
+
+    def market_state(self, df: pd.DataFrame) -> str:
+        """Classify market state as trending or sideways.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+
+        Returns:
+            ``"TRENDING"`` or ``"SIDEWAYS"``.
+        """
+        return MarketStateDetector(
+            adx_threshold=CONFIG.get("adx_threshold", 25),
+            atr_multiplier=CONFIG.get("atr_multiplier", 0.5),
+            volatility_period=CONFIG.get("volatility_lookback", 14),
+            compression_lookback=CONFIG.get("price_compression_lookback", 20),
+            compression_ratio=CONFIG.get("compression_ratio", 0.3),
+        ).detect(df)

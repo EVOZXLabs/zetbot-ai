@@ -314,6 +314,177 @@ class TestRSIScenarios:
 
 
 # ---------------------------------------------------------------------------
+#  ATR validation
+# ---------------------------------------------------------------------------
+
+class TestATRValidation:
+    """ATR input validation."""
+
+    def _ohlc_df(self, n: int, base: float = 50_000.0) -> pd.DataFrame:
+        return pd.DataFrame({
+            "high": [base + i + 1.0 for i in range(n)],
+            "low":  [base - i - 1.0 for i in range(n)],
+            "close":[base + float(i) for i in range(n)],
+        })
+
+    def test_empty_df_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            IndicatorEngine.atr(pd.DataFrame())
+
+    def test_missing_high_column_raises(self) -> None:
+        df = pd.DataFrame({"close": [1.0], "low": [1.0]})
+        with pytest.raises(ValueError, match="high"):
+            IndicatorEngine.atr(df)
+
+    def test_missing_low_column_raises(self) -> None:
+        df = pd.DataFrame({"close": [1.0], "high": [1.0]})
+        with pytest.raises(ValueError, match="low"):
+            IndicatorEngine.atr(df)
+
+    def test_missing_close_column_raises(self) -> None:
+        df = pd.DataFrame({"high": [1.0], "low": [1.0]})
+        with pytest.raises(ValueError, match="close"):
+            IndicatorEngine.atr(df)
+
+    def test_period_below_2_raises(self) -> None:
+        df = self._ohlc_df(20)
+        with pytest.raises(ValueError, match="period"):
+            IndicatorEngine.atr(df, period=1)
+
+    def test_insufficient_candles_raises(self) -> None:
+        """ATR(14) needs at least 15 candles (period + 1)."""
+        df = self._ohlc_df(14)
+        with pytest.raises(ValueError, match="at least"):
+            IndicatorEngine.atr(df, period=14)
+
+    def test_exactly_minimum_candles(self) -> None:
+        """ATR(14) works with exactly 15 candles."""
+        df = self._ohlc_df(15)
+        result = IndicatorEngine.atr(df, period=14)
+        assert isinstance(result, float)
+        assert result >= 0.0
+
+    def test_atr_returns_float(self) -> None:
+        df = self._ohlc_df(50)
+        result = IndicatorEngine.atr(df)
+        assert isinstance(result, float)
+
+
+# ---------------------------------------------------------------------------
+#  ATR correctness
+# ---------------------------------------------------------------------------
+
+class TestATRCorrectness:
+    """ATR must match manual calculations."""
+
+    def test_flat_market_atr_constant(self) -> None:
+        """Constant high/low spread: ATR equals the spread."""
+        n = 30
+        df = pd.DataFrame({
+            "high": [100.0] * n,
+            "low":  [90.0] * n,
+            "close":[95.0] * n,
+        })
+        result = IndicatorEngine.atr(df, period=14)
+        assert abs(result - 10.0) < 0.01, f"Expected ~10.0, got {result}"
+
+    def test_constant_range(self) -> None:
+        """Constant high-low range produces constant ATR."""
+        n = 30
+        df = pd.DataFrame({
+            "high": [110.0] * n,
+            "low":  [90.0] * n,
+            "close":[100.0] * n,
+        })
+        result = IndicatorEngine.atr(df, period=14)
+        assert abs(result - 20.0) < 0.01, f"Expected ~20.0, got {result}"
+
+    def test_increasing_range(self) -> None:
+        """Expanding range: ATR should increase."""
+        n = 30
+        highs = [100.0 + i for i in range(n)]
+        lows  = [90.0 - i for i in range(n)]
+        close = [95.0 + i * 0.5 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.atr(df, period=14)
+        assert result > 10.0
+
+    def test_atr_default_period_14(self) -> None:
+        df = TestATRValidation()._ohlc_df(50)
+        result = IndicatorEngine.atr(df)
+        assert isinstance(result, float)
+
+    def test_atr_period_7(self) -> None:
+        df = TestATRValidation()._ohlc_df(30)
+        result = IndicatorEngine.atr(df, period=7)
+        assert isinstance(result, float)
+        assert result >= 0.0
+
+
+# ---------------------------------------------------------------------------
+#  ATR market scenarios
+# ---------------------------------------------------------------------------
+
+class TestATRScenarios:
+    """ATR on realistic market scenarios."""
+
+    def test_high_volatility(self) -> None:
+        """Large candles → high ATR."""
+        n = 30
+        highs = [100.0 + i * 5.0 for i in range(n)]
+        lows  = [90.0 - i * 5.0 for i in range(n)]
+        close = [95.0 + i * 3.0 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.atr(df, period=14)
+        assert result > 20.0
+
+    def test_low_volatility(self) -> None:
+        """Small candles → low ATR."""
+        n = 30
+        highs = [100.0 + i * 0.1 for i in range(n)]
+        lows  = [99.0 - i * 0.1 for i in range(n)]
+        close = [99.5 + i * 0.05 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.atr(df, period=14)
+        assert result < 5.0
+
+    def test_random_prices(self) -> None:
+        """ATR should be non-negative for random data."""
+        import random
+        random.seed(42)
+        n = 50
+        highs = [100.0 + random.uniform(0, 10) for _ in range(n)]
+        lows  = [90.0 - random.uniform(0, 10) for _ in range(n)]
+        close = [(highs[i] + lows[i]) / 2 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.atr(df, period=14)
+        assert isinstance(result, float)
+        assert result >= 0.0
+
+    def test_small_dataset(self) -> None:
+        """Exactly 15 candles works for ATR(14)."""
+        n = 15
+        highs = [100.0 + i for i in range(n)]
+        lows  = [90.0 + i for i in range(n)]
+        close = [95.0 + i for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.atr(df, period=14)
+        assert isinstance(result, float)
+        assert result >= 0.0
+
+    def test_large_dataset(self) -> None:
+        """500 points should not degrade precision."""
+        n = 500
+        highs = [100.0 + i * 0.5 for i in range(n)]
+        lows  = [90.0 + i * 0.45 for i in range(n)]
+        close = [95.0 + i * 0.5 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.atr(df, period=14)
+        assert isinstance(result, float)
+        assert result >= 0.0
+
+
+# ---------------------------------------------------------------------------
 #  ADX validation
 # ---------------------------------------------------------------------------
 

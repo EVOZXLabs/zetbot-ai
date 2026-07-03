@@ -32,6 +32,16 @@ CONFIG = {
 
     "stop_loss": float(os.getenv("STOP_LOSS", 1.5)),
 
-    "take_profit": float(os.getenv("TAKE_PROFIT", 2.5))
+    "take_profit": float(os.getenv("TAKE_PROFIT", 2.5)),
+
+    "adx_threshold": float(os.getenv("ADX_THRESHOLD", 25)),
+
+    "atr_multiplier": float(os.getenv("ATR_MULTIPLIER", 0.5)),
+
+    "volatility_lookback": int(os.getenv("VOLATILITY_LOOKBACK", 14)),
+
+    "price_compression_lookback": int(os.getenv("PRICE_COMPRESSION_LOOKBACK", 20)),
+
+    "compression_ratio": float(os.getenv("COMPRESSION_RATIO", 0.3)),
 
 }

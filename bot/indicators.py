@@ -23,6 +23,7 @@ class IndicatorEngine:
     Currently implemented:
         - EMA (Exponential Moving Average)
         - RSI (Relative Strength Index)
+        - ATR (Average True Range)
         - ADX (Average Directional Index) with +DI / -DI
     """
 
@@ -282,6 +283,78 @@ class IndicatorEngine:
         tail.iloc[0] = first_avg
         alpha = 1.0 / period
         return tail.ewm(alpha=alpha, adjust=False).mean()
+
+    # ------------------------------------------------------------------ #
+    #  ATR  (Average True Range)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate the full ATR series using Wilder's method.
+
+        Args:
+            df: DataFrame with ``high``, ``low``, ``close``.
+            period: Smoothing period (>= 2). Default 14.
+
+        Returns:
+            pd.Series: ATR values aligned from index ``period`` onward.
+
+        Raises:
+            ValueError: If validation fails.
+        """
+        period = IndicatorEngine._validate_period(period)
+        IndicatorEngine._validate_ohlc_df(df, f"ATR({period})")
+
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return IndicatorEngine._wilder_smooth(tr, period)
+
+    @staticmethod
+    def atr(df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate the latest ATR (Average True Range) value.
+
+        True Range is the greatest of::
+
+            current_high - current_low
+            |current_high - previous_close|
+            |current_low  - previous_close|
+
+        The first ATR is the mean of the first ``period`` TR values.
+        Subsequent values use Wilder's smoothing.
+
+        Args:
+            df: DataFrame with ``high``, ``low``, ``close``.
+            period: Smoothing period (>= 2). Default 14.
+
+        Returns:
+            Latest ATR value as a float.
+
+        Raises:
+            ValueError: If data is invalid or insufficient.
+        """
+        period = IndicatorEngine._validate_period(period)
+        IndicatorEngine._validate_ohlc_df(df, f"ATR({period})")
+
+        min_rows = period + 1
+        if len(df) < min_rows:
+            msg = (
+                f"need at least {min_rows} rows for "
+                f"ATR({period}), got {len(df)}"
+            )
+            raise ValueError(msg)
+
+        atr_series = IndicatorEngine._atr_series(df, period)
+        result = float(atr_series.iloc[-1])
+
+        logger.info("ATR(%d) = %.2f", period, result)
+        return result
 
     # ------------------------------------------------------------------ #
     #  ADX  (Average Directional Index)

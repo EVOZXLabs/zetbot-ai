@@ -2,7 +2,8 @@
 ZetBot AI
 
 Entry point — fetches live BTC/USDT data and displays
-price, EMA200, RSI(14), ADX(14), +DI(14), -DI(14).
+price, EMA200, RSI(14), ADX(14), ATR(14), +DI(14), -DI(14),
+and market state (TRENDING / SIDEWAYS).
 """
 
 import sys
@@ -38,10 +39,8 @@ def main() -> None:
         ema200 = md.ema200(df)
         rsi14 = md.rsi(df)
         adx14 = md.adx(df)
-        di_plus = md.plus_di(df)
-        di_minus = md.minus_di(df)
-
-        trend = "Bullish" if price > ema200 else "Bearish"
+        atr14 = md.atr(df)
+        market = md.market_state(df)
 
         print()
         print("=" * 45)
@@ -54,16 +53,15 @@ def main() -> None:
         print(f" EMA200   : ${ema200:,.2f}")
         print(f" RSI(14)  : {rsi14:.2f}")
         print(f" ADX(14)  : {adx14:.2f}")
-        print(f" +DI(14)  : {di_plus:.2f}")
-        print(f" -DI(14)  : {di_minus:.2f}")
-        print(f" Trend    : {trend}")
+        print(f" ATR(14)  : ${atr14:,.2f}")
+        print(f" Market   : {market}")
         print("=" * 45)
         print()
 
         logger.info(
             "BTC/USDT price=%.2f EMA200=%.2f RSI=%.2f "
-            "ADX=%.2f +DI=%.2f -DI=%.2f Trend=%s",
-            price, ema200, rsi14, adx14, di_plus, di_minus, trend,
+            "ADX=%.2f ATR=%.2f Market=%s",
+            price, ema200, rsi14, adx14, atr14, market,
         )
 
     except Exception as e:
