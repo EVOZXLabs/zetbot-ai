@@ -44,4 +44,12 @@ CONFIG = {
 
     "compression_ratio": float(os.getenv("COMPRESSION_RATIO", 0.3)),
 
+    "loop_enabled": os.getenv("LOOP_ENABLED", "true").lower() == "true",
+
+    "loop_interval_seconds": int(os.getenv("LOOP_INTERVAL_SECONDS", 60)),
+
+    "max_retry": int(os.getenv("MAX_RETRY", 3)),
+
+    "retry_delay": int(os.getenv("RETRY_DELAY", 5)),
+
 }
