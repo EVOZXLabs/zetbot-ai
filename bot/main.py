@@ -30,23 +30,21 @@ def main():
 
     banner()
 
-    print()
+    from config import CONFIG
+    from logger import logger
 
-    print("Loading Configuration...")
+    logger.info("Configuration Loaded")
 
-    print("Loading Logger...")
-
-    print("Loading Exchange Module...")
-
-    print()
-
-    print("Ready.")
+    logger.info("Logger Loaded")
 
     print()
 
-    print("Next Step : Connect Exchange")
+    print("Exchange :", CONFIG["exchange"])
 
+    print("Symbol   :", CONFIG["symbol"])
 
-if __name__ == "__main__":
+    print("Timeframe:", CONFIG["timeframe"])
 
-    main()
+    print()
+
+    print("Foundation Ready.")
