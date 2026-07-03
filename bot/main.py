@@ -2,8 +2,8 @@
 ZetBot AI
 
 Entry point — fetches live BTC/USDT data and displays
-price, EMA200, RSI(14), ADX(14), ATR(14), +DI(14), -DI(14),
-and market state (TRENDING / SIDEWAYS).
+price, EMA200, RSI(14), ADX(14), ATR(14), market state,
+trading signal, and reason breakdown.
 """
 
 import sys
@@ -12,6 +12,7 @@ from datetime import datetime
 from bot.config import CONFIG
 from bot.data import MarketData
 from bot.logger import logger
+from bot.strategy import StrategyEngine
 
 
 def banner() -> None:
@@ -42,6 +43,17 @@ def main() -> None:
         atr14 = md.atr(df)
         market = md.market_state(df)
 
+        engine = StrategyEngine(
+            adx_threshold=CONFIG.get("adx_threshold", 25),
+            atr_multiplier=CONFIG.get("atr_multiplier", 0.5),
+            volatility_period=CONFIG.get("volatility_lookback", 14),
+            compression_lookback=CONFIG.get("price_compression_lookback", 20),
+            compression_ratio=CONFIG.get("compression_ratio", 0.3),
+        )
+        result = engine.evaluate(df, has_position=False)
+        signal = result["signal"]
+        reasons = result["reason"]
+
         print()
         print("=" * 45)
         print(" MARKET OVERVIEW")
@@ -55,13 +67,16 @@ def main() -> None:
         print(f" ADX(14)  : {adx14:.2f}")
         print(f" ATR(14)  : ${atr14:,.2f}")
         print(f" Market   : {market}")
+        print(f" Signal   : {signal}")
+        for r in reasons:
+            print(f"            - {r}")
         print("=" * 45)
         print()
 
         logger.info(
             "BTC/USDT price=%.2f EMA200=%.2f RSI=%.2f "
-            "ADX=%.2f ATR=%.2f Market=%s",
-            price, ema200, rsi14, adx14, atr14, market,
+            "ADX=%.2f ATR=%.2f Market=%s Signal=%s",
+            price, ema200, rsi14, adx14, atr14, market, signal,
         )
 
     except Exception as e:
