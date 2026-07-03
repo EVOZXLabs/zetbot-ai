@@ -10,6 +10,8 @@ Version 0.1 Foundation
 
 from datetime import datetime
 
+from exchange import Exchange
+
 
 def banner():
 
@@ -31,11 +33,14 @@ def main():
     banner()
 
     from config import CONFIG
+
     from logger import logger
 
     logger.info("Configuration Loaded")
 
     logger.info("Logger Loaded")
+
+    logger.info("Exchange Loaded")
 
     print()
 
@@ -43,8 +48,28 @@ def main():
 
     print("Symbol   :", CONFIG["symbol"])
 
-    print("Timeframe:", CONFIG["timeframe"])
-
     print()
 
-    print("Foundation Ready.")
+    try:
+
+        ex = Exchange()
+
+        price = ex.last_price()
+
+        print()
+
+        print("BTC PRICE")
+
+        print(price)
+
+        logger.info("Price Loaded")
+
+    except Exception as e:
+
+        logger.error(str(e))
+
+        print()
+
+        print("ERROR")
+
+        print(e)
