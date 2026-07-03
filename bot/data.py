@@ -11,6 +11,8 @@ from typing import Any, Optional
 import ccxt
 import pandas as pd
 
+from bot.indicators import IndicatorEngine
+
 logger = logging.getLogger("ZetBot")
 
 EXCHANGE_MAP: dict[str, type[ccxt.Exchange]] = {
@@ -197,3 +199,17 @@ class MarketData:
             )
             logger.error(msg)
             raise ValueError(msg)
+
+    def ema200(self, df: pd.DataFrame, column: str = "close") -> float:
+        """Calculate the latest EMA200 value on fetched data.
+
+        Convenience method that delegates to ``IndicatorEngine.ema200``.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+            column: Price column to use (default ``"close"``).
+
+        Returns:
+            Latest EMA200 value as a float.
+        """
+        return IndicatorEngine.ema200(df, column=column)
