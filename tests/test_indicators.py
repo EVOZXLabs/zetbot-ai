@@ -314,6 +314,215 @@ class TestRSIScenarios:
 
 
 # ---------------------------------------------------------------------------
+#  ADX validation
+# ---------------------------------------------------------------------------
+
+class TestADXValidation:
+    """ADX input validation."""
+
+    def _ohlc_df(self, n: int, base: float = 50_000.0) -> pd.DataFrame:
+        df = pd.DataFrame({
+            "high": [base + i + 1.0 for i in range(n)],
+            "low":  [base - i - 1.0 for i in range(n)],
+            "close":[base + float(i) for i in range(n)],
+        })
+        return df
+
+    def test_empty_df_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            IndicatorEngine.adx(pd.DataFrame())
+
+    def test_missing_high_column_raises(self) -> None:
+        df = pd.DataFrame({"close": [1.0, 2.0], "low": [1.0, 2.0]})
+        with pytest.raises(ValueError, match="high"):
+            IndicatorEngine.adx(df)
+
+    def test_missing_low_column_raises(self) -> None:
+        df = pd.DataFrame({"close": [1.0, 2.0], "high": [1.0, 2.0]})
+        with pytest.raises(ValueError, match="low"):
+            IndicatorEngine.adx(df)
+
+    def test_missing_close_column_raises(self) -> None:
+        df = pd.DataFrame({"high": [1.0, 2.0], "low": [1.0, 2.0]})
+        with pytest.raises(ValueError, match="close"):
+            IndicatorEngine.adx(df)
+
+    def test_period_below_2_raises(self) -> None:
+        df = self._ohlc_df(30)
+        with pytest.raises(ValueError, match="period"):
+            IndicatorEngine.adx(df, period=1)
+
+    def test_insufficient_candles_raises(self) -> None:
+        """ADX(14) needs at least 29 candles."""
+        df = self._ohlc_df(28)
+        with pytest.raises(ValueError, match="at least.*29"):
+            IndicatorEngine.adx(df, period=14)
+
+    def test_exactly_minimum_candles(self) -> None:
+        """ADX(14) works with exactly 29 candles."""
+        df = self._ohlc_df(29)
+        result = IndicatorEngine.adx(df, period=14)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 100.0
+
+    def test_adx_returns_float(self) -> None:
+        df = self._ohlc_df(50)
+        result = IndicatorEngine.adx(df)
+        assert isinstance(result, float)
+
+    def test_plus_di_returns_float(self) -> None:
+        df = self._ohlc_df(50)
+        result = IndicatorEngine.plus_di(df)
+        assert isinstance(result, float)
+
+    def test_minus_di_returns_float(self) -> None:
+        df = self._ohlc_df(50)
+        result = IndicatorEngine.minus_di(df)
+        assert isinstance(result, float)
+
+
+# ---------------------------------------------------------------------------
+#  ADX correctness
+# ---------------------------------------------------------------------------
+
+class TestADXCorrectness:
+    """ADX must match manual/known calculations."""
+
+    def test_flat_market_adx_zero(self) -> None:
+        """Constant high/low/close should produce ADX of 0."""
+        n = 50
+        df = pd.DataFrame({
+            "high": [100.0] * n,
+            "low":  [90.0] * n,
+            "close":[95.0] * n,
+        })
+        result = IndicatorEngine.adx(df, period=14)
+        assert result == 0.0, f"Expected ADX=0 for flat market, got {result}"
+
+    def test_flat_market_di_equal(self) -> None:
+        """Flat market: +DI and -DI should both be near 0."""
+        n = 50
+        df = pd.DataFrame({
+            "high": [100.0] * n,
+            "low":  [90.0] * n,
+            "close":[95.0] * n,
+        })
+        dp = IndicatorEngine.plus_di(df, period=14)
+        dm = IndicatorEngine.minus_di(df, period=14)
+        assert dp == 0.0
+        assert dm == 0.0
+
+    def test_strong_uptrend_adx_high(self) -> None:
+        """Consistent higher highs/lower highs: ADX should be high."""
+        n = 60
+        highs = [100.0 + i * 2.0 for i in range(n)]
+        lows  = [90.0 + i * 1.8 for i in range(n)]
+        close = [95.0 + i * 2.0 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.adx(df, period=14)
+        assert result > 20.0, f"Expected ADX > 20 in uptrend, got {result}"
+
+    def test_strong_downtrend_adx_high(self) -> None:
+        """Consistent lower lows: ADX should be high."""
+        n = 60
+        highs = [200.0 - i * 2.0 for i in range(n)]
+        lows  = [190.0 - i * 2.0 for i in range(n)]
+        close = [195.0 - i * 2.0 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.adx(df, period=14)
+        assert result > 20.0, f"Expected ADX > 20 in downtrend, got {result}"
+
+    def test_uptrend_plus_di_above_minus_di(self) -> None:
+        """In uptrend, +DI should be > -DI."""
+        n = 60
+        highs = [100.0 + i * 2.0 for i in range(n)]
+        lows  = [90.0 + i * 1.5 for i in range(n)]
+        close = [95.0 + i * 2.0 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        dp = IndicatorEngine.plus_di(df, period=14)
+        dm = IndicatorEngine.minus_di(df, period=14)
+        assert dp > dm, f"Expected +DI ({dp}) > -DI ({dm}) in uptrend"
+
+    def test_downtrend_minus_di_above_plus_di(self) -> None:
+        """In downtrend, -DI should be > +DI."""
+        n = 60
+        highs = [200.0 - i * 1.5 for i in range(n)]
+        lows  = [190.0 - i * 2.0 for i in range(n)]
+        close = [195.0 - i * 2.0 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        dp = IndicatorEngine.plus_di(df, period=14)
+        dm = IndicatorEngine.minus_di(df, period=14)
+        assert dm > dp, f"Expected -DI ({dm}) > +DI ({dp}) in downtrend"
+
+    def test_random_prices_bounded(self) -> None:
+        """ADX should be between 0 and 100."""
+        import random
+        random.seed(42)
+        n = 100
+        base = 100.0
+        highs = [base + random.uniform(0, 5) for _ in range(n)]
+        lows  = [base - random.uniform(0, 5) for _ in range(n)]
+        close = [(highs[i] + lows[i]) / 2 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.adx(df, period=14)
+        assert 0.0 <= result <= 100.0, f"ADX out of range: {result}"
+
+    def test_small_dataset(self) -> None:
+        """Exactly 29 candles should work for ADX(14)."""
+        n = 29
+        highs = [100.0 + i for i in range(n)]
+        lows  = [90.0 + i for i in range(n)]
+        close = [95.0 + i for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.adx(df, period=14)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 100.0
+
+    def test_large_dataset_stability(self) -> None:
+        """500 points should produce stable ADX."""
+        n = 500
+        highs = [100.0 + i * 0.5 for i in range(n)]
+        lows  = [90.0 + i * 0.45 for i in range(n)]
+        close = [95.0 + i * 0.5 for i in range(n)]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": close})
+        result = IndicatorEngine.adx(df, period=14)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 100.0
+
+
+# ---------------------------------------------------------------------------
+#  MarketData ADX integration
+# ---------------------------------------------------------------------------
+
+class TestMarketDataADXIntegration:
+    """Verify that MarketData.adx/plus_di/minus_di work after fetch_ohlcv."""
+
+    def test_adx_after_fetch(self) -> None:
+        from bot.data import MarketData
+        md = MarketData(exchange_name="binance")
+        df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=100)
+        result = md.adx(df)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 100.0
+
+    def test_plus_di_after_fetch(self) -> None:
+        from bot.data import MarketData
+        md = MarketData(exchange_name="binance")
+        df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=100)
+        result = md.plus_di(df)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 100.0
+
+    def test_minus_di_after_fetch(self) -> None:
+        from bot.data import MarketData
+        md = MarketData(exchange_name="binance")
+        df = md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=100)
+        result = md.minus_di(df)
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 100.0
+
+
+# ---------------------------------------------------------------------------
 #  MarketData integration
 # ---------------------------------------------------------------------------
 

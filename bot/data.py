@@ -233,3 +233,39 @@ class MarketData:
             Latest RSI value as a float.
         """
         return IndicatorEngine.rsi(df[column], period=period)
+
+    def adx(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate the latest ADX value on fetched data.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+            period: ADX period (default 14).
+
+        Returns:
+            Latest ADX value as a float.
+        """
+        return IndicatorEngine.adx(df, period=period)
+
+    def plus_di(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate the latest +DI value on fetched data.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+            period: DI period (default 14).
+
+        Returns:
+            Latest +DI value as a float.
+        """
+        return IndicatorEngine.plus_di(df, period=period)
+
+    def minus_di(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate the latest -DI value on fetched data.
+
+        Args:
+            df: DataFrame returned by ``fetch_ohlcv()``.
+            period: DI period (default 14).
+
+        Returns:
+            Latest -DI value as a float.
+        """
+        return IndicatorEngine.minus_di(df, period=period)
