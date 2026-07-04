@@ -23,6 +23,15 @@ Professional Spot Trading Bot for:
 
 v0.1 Complete Paper Trading
 
+## Hotfix — v0.1.4.1
+
+- Fix: duplicate BUY notification guard (`_notified_buy_entry` tracking)
+- Fix: state validation now matches actual save format (`paper.*` nesting)
+- Fix: integration test no longer blocks on real Telegram API calls
+- Regression: repeated cycles never send duplicate BUY notifications
+- Regression: repeated cycles never create duplicate BUY positions
+- All 345 tests pass (zero failures)
+
 ## Notification
 
 - Telegram integration (TelegramNotifier)

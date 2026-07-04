@@ -7,6 +7,7 @@ balance updates, duplicate BUY prevention, state transitions.
 """
 
 import math
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -416,6 +417,54 @@ class TestDuplicateBuyPrevention:
 
         engine.run_once(df=_uptrend_buy_df())
         assert engine.current_position() is not None
+
+    def test_repeated_cycles_no_duplicate_buy_position(self) -> None:
+        """Many cycles with a position open must never open a second."""
+        engine = PaperTradingEngine(initial_balance=10_000.0)
+        engine.run_once(df=_uptrend_buy_df())
+        pos = engine.current_position()
+        assert pos is not None
+        entry_price = pos["entry_price"]
+        qty = pos["quantity"]
+
+        for _ in range(10):
+            engine.run_once(df=_uptrend_buy_df())
+            p = engine.current_position()
+            assert p is not None
+            assert p["entry_price"] == entry_price
+            assert p["quantity"] == qty
+        assert len(engine.trade_history()) == 0
+
+    def test_repeated_cycles_no_duplicate_buy_notification(self) -> None:
+        """Must not send duplicate BUY notifications for the same position."""
+        engine = PaperTradingEngine(initial_balance=10_000.0)
+        engine._notifier = MagicMock()
+        engine._notifier.buy_opened = MagicMock()
+
+        engine.run_once(df=_uptrend_buy_df())
+        engine._notifier.buy_opened.assert_called_once()
+
+        for _ in range(5):
+            engine.run_once(df=_uptrend_buy_df())
+        engine._notifier.buy_opened.assert_called_once()
+
+    def test_buy_notification_after_tp_resends(self) -> None:
+        """After TP close, a NEW BUY should send a new notification."""
+        engine = PaperTradingEngine(initial_balance=10_000.0)
+        engine._notifier = MagicMock()
+        engine._notifier.buy_opened = MagicMock()
+        engine._notifier.trade_closed = MagicMock()
+
+        engine.run_once(df=_uptrend_buy_df())
+        engine._notifier.buy_opened.assert_called_once()
+
+        pos = engine.current_position()
+        assert pos is not None
+        engine.run_once(df=_tp_hit_df(pos["entry_price"]))
+        engine._notifier.trade_closed.assert_called_once()
+
+        engine.run_once(df=_uptrend_buy_df())
+        assert engine._notifier.buy_opened.call_count == 2
 
 
 # ---------------------------------------------------------------------------

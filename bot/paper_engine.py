@@ -74,6 +74,7 @@ class PaperTradingEngine:
         self._auto_save: bool = bool(CONFIG.get("auto_save", True))
 
         self._notifier: TelegramNotifier = TelegramNotifier()
+        self._notified_buy_entry: datetime | None = None
 
         logger.info("PaperTradingEngine initialised (balance=%.2f)", initial_balance)
 
@@ -140,6 +141,7 @@ class PaperTradingEngine:
                 self._state = SELL_SIGNAL
                 self._last_trade = trade
                 self._last_trade["market_state"] = market_state
+                self._notified_buy_entry = None
                 self._notifier.trade_closed(
                     exit_price=trade["exit_price"],
                     pnl_usd=trade["net_pnl"],
@@ -163,7 +165,8 @@ class PaperTradingEngine:
                     timeframe=timeframe,
                     reasons=result["reason"],
                 )
-                if pos is not None:
+                if pos is not None and pos["entry_time"] != self._notified_buy_entry:
+                    self._notified_buy_entry = pos["entry_time"]
                     size = pos["balance_before"] * (pos["position_size_percent"] / 100.0)
                     self._notifier.buy_opened(
                         symbol=pos["symbol"],

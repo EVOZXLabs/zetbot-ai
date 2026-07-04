@@ -214,7 +214,10 @@ class TestTradingLoopIntegration:
     def test_integration_engine_accepts_result(self) -> None:
         """Run loop with a real engine whose run_once is patched."""
         engine = PaperTradingEngine(initial_balance=10_000.0)
-        original_run_once = engine.run_once
+        # Prevent real Telegram HTTP calls during loop.run()
+        engine._notifier.bot_started = MagicMock()
+        engine._notifier.bot_stopped = MagicMock()
+        engine._notifier.state_restored = MagicMock()
 
         with patch.object(engine, "run_once") as mock_run:
             mock_run.return_value = _mock_result(price=50_000.0)

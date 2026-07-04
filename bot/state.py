@@ -366,12 +366,17 @@ class StateManager:
             self._handle_corrupted()
             return None
 
-        if "balance" not in raw:
+        # Support both top-level (legacy) and nested paper.* (current) layouts
+        paper = raw.get("paper", {})
+        balance = raw.get("balance", paper.get("balance"))
+        trades = raw.get("trades", paper.get("trades"))
+
+        if balance is None:
             logger.warning("Corrupted state: missing balance")
             self._handle_corrupted()
             return None
 
-        if "trades" not in raw or not isinstance(raw["trades"], list):
+        if trades is None or not isinstance(trades, list):
             logger.warning("Corrupted state: missing or invalid trades")
             self._handle_corrupted()
             return None
