@@ -269,3 +269,43 @@ class TestTradingLoopSideEffects:
             _run_loop_in_thread(loop, duration=0.3)
         except Exception:
             pytest.fail("Loop raised an unexpected exception")
+
+
+class TestTradingLoopDailySummary:
+    """Daily summary scheduling in TradingLoop."""
+
+    def test_maybe_send_daily_summary_sends_once_per_day(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_500.0
+        engine.statistics.return_value = {
+            "total_trades": 5,
+            "win_count": 3,
+            "loss_count": 2,
+            "win_rate": 60.0,
+            "total_profit": 500.0,
+            "profit_factor": 1.5,
+            "average_win": 200.0,
+            "average_loss": -50.0,
+        }
+
+        notifier = MagicMock()
+        loop = TradingLoop(engine=engine, interval=60)
+        loop._engine._notifier = notifier
+
+        loop._maybe_send_daily_summary()
+        notifier.daily_summary.assert_called_once()
+
+        loop._maybe_send_daily_summary()
+        notifier.daily_summary.assert_called_once()
+
+    def test_maybe_send_daily_summary_no_notifier(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+        engine.statistics.return_value = {"total_trades": 0}
+
+        loop = TradingLoop(engine=engine, interval=60)
+        loop._engine._notifier = None
+
+        loop._maybe_send_daily_summary()

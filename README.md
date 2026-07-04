@@ -21,8 +21,17 @@ Professional Spot Trading Bot for:
 
 ## Version
 
-v0.1 Foundation
+v0.1 Complete Paper Trading
 
-Author
+## Notification
+
+- Telegram integration (TelegramNotifier)
+- Bot start / stop
+- BUY and SELL (TP / SL / Strategy Exit) trade alerts
+- Exchange / API errors
+- Daily trading summary
+- Silent graceful degradation when disabled
+
+## Author
 
 EVOZXLabs

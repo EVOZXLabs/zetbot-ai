@@ -11,7 +11,7 @@ import logging
 import signal
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from bot.config import CONFIG
@@ -52,6 +52,7 @@ class TradingLoop:
         self._stop_requested: bool = False
         self._stop_event: threading.Event = threading.Event()
         self._signal_installed: bool = False
+        self._last_summary_date: date | None = None
 
         # Install SIGINT handler for graceful shutdown (main thread only)
         if threading.current_thread() is threading.main_thread():
@@ -123,6 +124,8 @@ class TradingLoop:
                 "Cycle %d complete — %.2fs elapsed",
                 self._cycle_count, elapsed,
             )
+
+            self._maybe_send_daily_summary()
 
             if self._running:
                 self._sleep()
@@ -244,6 +247,17 @@ class TradingLoop:
             notifier.error_occurred(
                 f"Cycle {self._cycle_count} failed after {self._max_retry} retries: {exc}",
             )
+
+    def _maybe_send_daily_summary(self) -> None:
+        """Send a daily summary if the day has changed."""
+        today = date.today()
+        if self._last_summary_date == today:
+            return
+        self._last_summary_date = today
+        notifier = getattr(self._engine, "_notifier", None)
+        if notifier:
+            stats = self._engine.statistics()
+            notifier.daily_summary(stats, self._engine.current_balance())
 
     def _handle_signal(self, signum: int, _frame: Any) -> None:
         """Signal handler for graceful shutdown."""

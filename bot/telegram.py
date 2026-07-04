@@ -205,3 +205,27 @@ class TelegramNotifier:
             f"`{message}`"
         )
         self._send(text)
+
+    def daily_summary(self, stats: dict, balance: float) -> None:
+        """Send a daily trading summary."""
+        emoji = "\U0001f4c5"
+        if stats.get("total_trades", 0) == 0:
+            text = (
+                f"{emoji} *Daily Summary*\n"
+                f"No trades completed today.\n"
+                f"Balance: `{balance:.2f}` USDT\n"
+                f"UTC: `{self._utc_now()}`"
+            )
+        else:
+            text = (
+                f"{emoji} *Daily Summary*\n"
+                f"Trades: `{stats['total_trades']}`\n"
+                f"Wins / Losses: `{stats['win_count']}` / `{stats['loss_count']}`\n"
+                f"Win Rate: `{stats['win_rate']:.1f}%`\n"
+                f"Total PnL: `{stats['total_profit']:+.2f}` USDT\n"
+                f"Profit Factor: `{stats['profit_factor']:.2f}`\n"
+                f"Avg Win / Avg Loss: `{stats['average_win']:+.2f}` / `{stats['average_loss']:+.2f}` USDT\n"
+                f"Balance: `{balance:.2f}` USDT\n"
+                f"UTC: `{self._utc_now()}`"
+            )
+        self._send(text)

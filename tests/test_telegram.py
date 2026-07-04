@@ -277,6 +277,55 @@ class TestNotificationMethods:
         assert "Error" in text
         assert "API connection failed" in text
 
+    def test_daily_summary_with_trades(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        stats = {
+            "total_trades": 10,
+            "win_count": 7,
+            "loss_count": 3,
+            "win_rate": 70.0,
+            "total_profit": 250.0,
+            "profit_factor": 2.5,
+            "average_win": 50.0,
+            "average_loss": -16.67,
+        }
+        with patch.object(n, "_send") as mock_send:
+            n.daily_summary(stats, balance=10_250.0)
+        mock_send.assert_called_once()
+        text = mock_send.call_args[0][0]
+        assert "Daily Summary" in text
+        assert "10" in text
+        assert "7" in text
+        assert "3" in text
+        assert "70.0%" in text
+        assert "+250.00" in text
+        assert "2.50" in text
+        assert "+50.00" in text
+        assert "-16.67" in text
+        assert "10250" in text
+
+    def test_daily_summary_no_trades(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        stats = {
+            "total_trades": 0,
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate": 0.0,
+            "total_profit": 0.0,
+            "profit_factor": 0.0,
+            "average_win": 0.0,
+            "average_loss": 0.0,
+        }
+        with patch.object(n, "_send") as mock_send:
+            n.daily_summary(stats, balance=10_000.0)
+        mock_send.assert_called_once()
+        text = mock_send.call_args[0][0]
+        assert "Daily Summary" in text
+        assert "No trades completed" in text
+        assert "10000" in text
+
 
 # ---------------------------------------------------------------------------
 #  Graceful degradation
@@ -300,6 +349,7 @@ class TestGracefulDegradation:
         )
         n.state_restored(balance=0, has_position=False, trades=0)
         n.error_occurred(message="X")
+        n.daily_summary(stats={"total_trades": 0}, balance=0)
 
     def test_no_http_request_when_disabled(self) -> None:
         _disable_telegram()
