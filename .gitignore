@@ -10,6 +10,9 @@ __pycache__/
 # Logs
 logs/*.log
 
+# Runtime data (auto-saved state)
+data/
+
 # VSCode
 .vscode/
 
