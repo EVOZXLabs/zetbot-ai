@@ -87,6 +87,10 @@ class TradingLoop:
 
         The loop sleeps for ``loop_interval_seconds`` between cycles.
         """
+        if self._running:
+            logger.warning("TradingLoop is already running — ignoring duplicate start")
+            return
+
         self._running = True
         self._stop_requested = False
         logger.info("TradingLoop started")
@@ -103,34 +107,38 @@ class TradingLoop:
         if restored:
             logger.info("Previous state restored — resuming monitoring")
 
-        while self._running:
-            self._cycle_count += 1
-            cycle_start = time.time()
+        try:
+            while self._running:
+                self._cycle_count += 1
+                cycle_start = time.time()
 
-            try:
-                self._execute_cycle()
-            except KeyboardInterrupt:
-                logger.info("KeyboardInterrupt received — shutting down")
-                self._running = False
-                break
-            except Exception as exc:
-                logger.error("Cycle %d failed: %s", self._cycle_count, exc)
-                self._handle_error(exc)
-                if not self._running:
+                try:
+                    self._execute_cycle()
+                except KeyboardInterrupt:
+                    logger.info("KeyboardInterrupt received — shutting down")
+                    self._running = False
                     break
+                except Exception as exc:
+                    logger.error("Cycle %d failed: %s", self._cycle_count, exc)
+                    self._handle_error(exc)
+                    if not self._running:
+                        break
 
-            elapsed = time.time() - cycle_start
-            logger.info(
-                "Cycle %d complete — %.2fs elapsed",
-                self._cycle_count, elapsed,
-            )
+                elapsed = time.time() - cycle_start
+                logger.info(
+                    "Cycle %d complete — %.2fs elapsed",
+                    self._cycle_count, elapsed,
+                )
 
-            self._maybe_send_daily_summary()
+                self._maybe_send_daily_summary()
 
-            if self._running:
-                self._sleep()
+                if self._running:
+                    self._sleep()
+        finally:
+            self._save_state_on_shutdown()
+            self._restore_signal_handler()
+            self._running = False
 
-        self._restore_signal_handler()
         logger.info(
             "TradingLoop stopped — cycles=%d", self._cycle_count,
         )
@@ -165,6 +173,15 @@ class TradingLoop:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
+
+    def _save_state_on_shutdown(self) -> None:
+        """Persist engine state during shutdown so the next start can
+        recover without data loss."""
+        try:
+            self._engine._save_auto_state()
+            logger.debug("State saved on shutdown")
+        except Exception:
+            logger.exception("Failed to save state on shutdown")
 
     def _execute_cycle(self) -> None:
         """Execute one complete paper trading cycle."""

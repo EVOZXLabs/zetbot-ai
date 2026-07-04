@@ -312,3 +312,106 @@ class TestTradingLoopDailySummary:
         loop._engine._notifier = None
 
         loop._maybe_send_daily_summary()
+
+
+class TestTradingLoopDuplicateRun:
+    """Duplicate run prevention."""
+
+    def test_run_twice_ignored(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        t = threading.Thread(target=loop.run, daemon=True)
+        t.start()
+        time.sleep(0.05)
+
+        # Second run should be a no-op
+        assert loop.run() is None
+        t.join(timeout=2)
+
+    def test_run_after_stop_works(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        first_count = loop.cycle_count
+
+        # Start again after stop
+        _run_loop_in_thread(loop, duration=0.1)
+        assert loop.cycle_count > first_count
+
+
+class TestTradingLoopShutdown:
+    """State save on shutdown."""
+
+    def test_state_saved_on_shutdown(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        # _save_auto_state should have been called at least once
+        assert engine._save_auto_state.call_count >= 1
+
+    def test_stop_sets_running_false_after_run(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        assert not loop.is_running
+
+
+class TestTradingLoopStateRestore:
+    """State restore on start."""
+
+    def test_restore_state_called_on_start(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        engine.restore_state.assert_called_once()
+
+    def test_restore_state_logged_when_found(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+        engine.restore_state.return_value = True
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        engine.restore_state.assert_called_once()
+
+
+class TestTradingLoopNotifications:
+    """Telegram notifications on loop start/stop."""
+
+    def test_bot_started_notification_sent(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+        notifier = MagicMock()
+        engine._notifier = notifier
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        notifier.bot_started.assert_called_once()
+
+    def test_bot_stopped_notification_sent(self) -> None:
+        engine = MagicMock(spec=PaperTradingEngine)
+        engine.run_once.return_value = _mock_result()
+        engine.current_balance.return_value = 10_000.0
+        notifier = MagicMock()
+        engine._notifier = notifier
+
+        loop = TradingLoop(engine=engine, interval=0.01)
+        _run_loop_in_thread(loop, duration=0.1)
+        notifier.bot_stopped.assert_called_once()
