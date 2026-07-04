@@ -66,4 +66,6 @@ CONFIG = {
 
     "backup_corrupted_state": os.getenv("BACKUP_CORRUPTED_STATE", "true").lower() == "true",
 
+    "testing": os.getenv("TESTING", "false").lower() == "true",
+
 }

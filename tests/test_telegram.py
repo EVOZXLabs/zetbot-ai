@@ -28,6 +28,7 @@ def _reset_config():
         "telegram_chat_id": cfg.CONFIG.get("telegram_chat_id"),
         "telegram_timeout": cfg.CONFIG.get("telegram_timeout"),
         "telegram_retry": cfg.CONFIG.get("telegram_retry"),
+        "testing": cfg.CONFIG.get("testing"),
     }
     yield
     for k, v in saved.items():
@@ -150,6 +151,38 @@ class TestSend:
         mock_post.assert_called()
         assert mock_post.call_args[1]["timeout"] == 5
 
+    def test_send_no_http_when_testing(self) -> None:
+        import bot.config as cfg
+        cfg.CONFIG["testing"] = True
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch("bot.telegram.requests.post") as mock_post:
+            result = n._send("test message")
+        assert result is True
+        mock_post.assert_not_called()
+
+    def test_send_no_http_when_testing_on_public_methods(self) -> None:
+        import bot.config as cfg
+        cfg.CONFIG["testing"] = True
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch("bot.telegram.requests.post") as mock_post:
+            n.bot_started(symbol="X", timeframe="1h", exchange="X")
+            n.bot_stopped(cycles=0, balance=0)
+            n.buy_opened(
+                symbol="X", timeframe="1h", exchange="X",
+                entry_price=0, quantity=0, position_size=0,
+                stop_loss=0, take_profit=0, reasons=[],
+            )
+            n.trade_closed(
+                exit_price=0, pnl_usd=0, pnl_pct=0, balance=0,
+                exit_reason="Take Profit", holding_time=timedelta(),
+            )
+            n.state_restored(balance=0, has_position=False, trades=0)
+            n.error_occurred(message="X")
+            n.daily_summary(stats={"total_trades": 0}, balance=0)
+        mock_post.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 #  Notification methods
@@ -197,7 +230,7 @@ class TestNotificationMethods:
             )
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "BUY Opened" in text
+        assert "BUY OPENED" in text
         assert "50000" in text
         assert "0.002000" in text
         assert "100.00" in text
@@ -205,6 +238,9 @@ class TestNotificationMethods:
         assert "51250" in text
         assert "EMA200_BULLISH" in text
         assert "RSI_OVERSOLD" in text
+        assert "Position Size" in text
+        assert "Stop Loss" in text
+        assert "Take Profit" in text
 
     def test_trade_closed_win(self) -> None:
         _enable_telegram()
@@ -220,8 +256,7 @@ class TestNotificationMethods:
             )
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Trade Closed" in text
-        assert "Take Profit" in text
+        assert "*Take Profit*" in text
         assert "+150.00" in text
         assert "+3.00%" in text
         assert "10150" in text
@@ -242,10 +277,27 @@ class TestNotificationMethods:
             )
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Stop Loss" in text
+        assert "*Stop Loss*" in text
         assert "-200.00" in text
         assert "-2.00%" in text
         assert "LOSS" in text
+
+    def test_trade_closed_strategy_exit(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=50_000.0,
+                pnl_usd=0.0,
+                pnl_pct=0.0,
+                balance=10_000.0,
+                exit_reason="Strategy Exit",
+                holding_time=timedelta(hours=1, minutes=15),
+            )
+        mock_send.assert_called_once()
+        text = mock_send.call_args[0][0]
+        assert "*Strategy Exit*" in text
+        assert "01:15:00" in text
 
     def test_state_restored(self) -> None:
         _enable_telegram()

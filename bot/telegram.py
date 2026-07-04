@@ -57,9 +57,16 @@ class TelegramNotifier:
 
         Retries on failure up to ``_max_retry`` times.
         Returns ``True`` on success, ``False`` otherwise.
+
+        When ``TESTING=true`` the method returns ``True`` without making
+        any HTTP request so that unit tests never hit the live API.
         """
         if not self._enabled:
             return False
+
+        if bool(CONFIG.get("testing", False)):
+            logger.debug("Testing mode — Telegram send suppressed")
+            return True
 
         url = self.API_BASE.format(token=self._token)
         payload: dict[str, Any] = {
@@ -143,15 +150,15 @@ class TelegramNotifier:
     ) -> None:
         """Notify that a BUY position was opened."""
         text = (
-            f"\U0001f7e2 *BUY Opened*\n"
+            f"\U0001f7e2 *BUY OPENED*\n"
             f"Exchange: `{exchange}`\n"
             f"Symbol: `{symbol}`\n"
             f"Timeframe: `{timeframe}`\n"
             f"Entry: `{entry_price:.2f}`\n"
             f"Qty: `{quantity:.6f}`\n"
-            f"Size: `{position_size:.2f}` USDT\n"
-            f"SL: `{stop_loss:.2f}`\n"
-            f"TP: `{take_profit:.2f}`\n"
+            f"Position Size: `{position_size:.2f}` USDT\n"
+            f"Stop Loss: `{stop_loss:.2f}`\n"
+            f"Take Profit: `{take_profit:.2f}`\n"
             f"Reasons: `{ ' | '.join(reasons) }`\n"
             f"UTC: `{self._utc_now()}`"
         )
@@ -167,16 +174,23 @@ class TelegramNotifier:
         holding_time: timedelta,
     ) -> None:
         """Notify that a trade was closed."""
-        emoji = "\U0001f7e2" if pnl_usd >= 0 else "\U0001f534"
+        reason_emoji = {
+            "Take Profit": "\U0001f7e2",
+            "Stop Loss": "\U0001f534",
+            "Strategy Exit": "\u26aa",
+        }
+        emoji = reason_emoji.get(exit_reason, "\u2753")
         result_tag = "WIN" if pnl_usd >= 0 else "LOSS"
         holding_str = self._format_timedelta(holding_time)
         text = (
-            f"{emoji} *Trade Closed \\u2014 {exit_reason}*\n"
+            f"{emoji} *{exit_reason}*\n"
             f"Exit Price: `{exit_price:.2f}`\n"
-            f"PnL: `{pnl_usd:+.2f}` USDT (`{pnl_pct:+.2f}%`)\n"
+            f"PnL: `{pnl_usd:+.2f}` USDT\n"
+            f"PnL %: `{pnl_pct:+.2f}%`\n"
             f"Balance: `{balance:.2f}` USDT\n"
             f"Held: `{holding_str}`\n"
-            f"Result: `{result_tag}`"
+            f"Result: `{result_tag}`\n"
+            f"UTC: `{self._utc_now()}`"
         )
         self._send(text)
 

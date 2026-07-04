@@ -7,6 +7,7 @@ balance updates, duplicate BUY prevention, state transitions.
 """
 
 import math
+from datetime import timezone
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -316,6 +317,34 @@ class TestTakeProfit:
         assert pos is not None
         engine.run_once(df=_tp_hit_df(pos["entry_price"]))
         assert len(engine.trade_history()) == 1
+
+    def test_tp_holding_time_positive(self) -> None:
+        engine = PaperTradingEngine(initial_balance=10_000.0)
+        engine.run_once(df=_uptrend_buy_df())
+        pos = engine.current_position()
+        assert pos is not None
+        result = engine.run_once(df=_tp_hit_df(pos["entry_price"]))
+        assert result["trade"] is not None
+        assert result["trade"]["holding_time"].total_seconds() > 0
+
+    def test_tp_entry_time_is_timezone_aware(self) -> None:
+        engine = PaperTradingEngine(initial_balance=10_000.0)
+        engine.run_once(df=_uptrend_buy_df())
+        pos = engine.current_position()
+        assert pos is not None
+        assert pos["entry_time"].tzinfo is not None
+        assert pos["entry_time"].tzinfo == timezone.utc
+
+    def test_tp_closed_trade_entry_time_is_timezone_aware(self) -> None:
+        engine = PaperTradingEngine(initial_balance=10_000.0)
+        engine.run_once(df=_uptrend_buy_df())
+        pos = engine.current_position()
+        assert pos is not None
+        result = engine.run_once(df=_tp_hit_df(pos["entry_price"]))
+        trade = result["trade"]
+        assert trade is not None
+        assert trade["entry_time"].tzinfo is not None
+        assert trade["entry_time"].tzinfo == timezone.utc
 
 
 # ---------------------------------------------------------------------------

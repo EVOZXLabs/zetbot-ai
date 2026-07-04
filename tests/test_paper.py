@@ -665,6 +665,61 @@ class TestCloseTakeProfit:
         trade = self._open_and_close(50_000.0, 51_250.0)
         assert isinstance(trade["holding_time"], timedelta)
 
+    def test_tp_holding_time_positive(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert trade["holding_time"].total_seconds() > 0
+
+    def test_tp_entry_time_is_timezone_aware(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert trade["entry_time"].tzinfo is not None
+        assert trade["entry_time"].tzinfo == timezone.utc
+
+    def test_tp_exit_time_is_timezone_aware(self) -> None:
+        trade = self._open_and_close(50_000.0, 51_250.0)
+        assert trade["exit_time"].tzinfo is not None
+        assert trade["exit_time"].tzinfo == timezone.utc
+
+
+class TestOpenPositionEntryTime:
+    """Entry timestamp persistence."""
+
+    def test_open_position_stores_entry_time(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        pos = trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        assert pos is not None
+        assert "entry_time" in pos
+        assert isinstance(pos["entry_time"], datetime)
+
+    def test_open_position_entry_time_utc(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        pos = trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        assert pos is not None
+        assert pos["entry_time"].tzinfo is not None
+        assert pos["entry_time"].tzinfo == timezone.utc
+
+    def test_current_position_includes_entry_time(self) -> None:
+        trader = PaperTrader(initial_balance=10_000.0)
+        trader.open_position(
+            entry_price=50_000.0,
+            symbol="BTC/USDT",
+            timeframe="1h",
+            reasons=["Test"],
+        )
+        pos = trader.current_position()
+        assert pos is not None
+        assert isinstance(pos["entry_time"], datetime)
+        assert pos["entry_time"].tzinfo == timezone.utc
+
 
 # ---------------------------------------------------------------------------
 #  close_position – Stop Loss
