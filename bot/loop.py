@@ -89,6 +89,13 @@ class TradingLoop:
         self._running = True
         self._stop_requested = False
         logger.info("TradingLoop started")
+        notifier = getattr(self._engine, "_notifier", None)
+        if notifier:
+            notifier.bot_started(
+                symbol=self._symbol,
+                timeframe=self._timeframe,
+                exchange=self._exchange,
+            )
 
         # Restore persistent state if available
         restored = self._engine.restore_state()
@@ -124,6 +131,12 @@ class TradingLoop:
         logger.info(
             "TradingLoop stopped — cycles=%d", self._cycle_count,
         )
+        notifier = getattr(self._engine, "_notifier", None)
+        if notifier:
+            notifier.bot_stopped(
+                cycles=self._cycle_count,
+                balance=self._engine.current_balance(),
+            )
 
     def stop(self) -> None:
         """Request the loop to stop after the current cycle."""
@@ -226,6 +239,11 @@ class TradingLoop:
             "All %d retries exhausted — skipping cycle %d",
             self._max_retry, self._cycle_count,
         )
+        notifier = getattr(self._engine, "_notifier", None)
+        if notifier:
+            notifier.error_occurred(
+                f"Cycle {self._cycle_count} failed after {self._max_retry} retries: {exc}",
+            )
 
     def _handle_signal(self, signum: int, _frame: Any) -> None:
         """Signal handler for graceful shutdown."""

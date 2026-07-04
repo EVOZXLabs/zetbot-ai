@@ -18,6 +18,7 @@ from bot.data import MarketData
 from bot.paper import PaperTrader
 from bot.state import STATE_VERSION, StateManager
 from bot.strategy import BUY, SELL, StrategyEngine
+from bot.telegram import TelegramNotifier
 
 logger = logging.getLogger("ZetBot")
 
@@ -71,6 +72,8 @@ class PaperTradingEngine:
         self._last_trade: dict[str, Any] | None = None
         self._state_manager: StateManager = StateManager()
         self._auto_save: bool = bool(CONFIG.get("auto_save", True))
+
+        self._notifier: TelegramNotifier = TelegramNotifier()
 
         logger.info("PaperTradingEngine initialised (balance=%.2f)", initial_balance)
 
@@ -137,6 +140,14 @@ class PaperTradingEngine:
                 self._state = SELL_SIGNAL
                 self._last_trade = trade
                 self._last_trade["market_state"] = market_state
+                self._notifier.trade_closed(
+                    exit_price=trade["exit_price"],
+                    pnl_usd=trade["net_pnl"],
+                    pnl_pct=trade["pnl_pct"],
+                    balance=self._paper._balance,
+                    exit_reason=trade["exit_reason"],
+                    holding_time=trade["holding_time"],
+                )
                 logger.info(
                     "Trade closed — %s PnL=%+.2f (%+.2f%%)",
                     trade["exit_reason"], trade["net_pnl"], trade["pnl_pct"],
@@ -146,12 +157,25 @@ class PaperTradingEngine:
             self._last_signal = result
             if result["signal"] == BUY:
                 self._state = BUY_SIGNAL
-                self._paper.open_position(
+                pos = self._paper.open_position(
                     entry_price=price,
                     symbol=symbol,
                     timeframe=timeframe,
                     reasons=result["reason"],
                 )
+                if pos is not None:
+                    size = pos["balance_before"] * (pos["position_size_percent"] / 100.0)
+                    self._notifier.buy_opened(
+                        symbol=pos["symbol"],
+                        timeframe=pos["timeframe"],
+                        exchange=str(CONFIG.get("exchange", "binance")),
+                        entry_price=pos["entry_price"],
+                        quantity=pos["quantity"],
+                        position_size=size,
+                        stop_loss=pos["stop_loss_price"],
+                        take_profit=pos["take_profit_price"],
+                        reasons=result["reason"],
+                    )
                 logger.info(
                     "BUY signal executed — entry=%.2f reasons=%s",
                     price, " | ".join(result["reason"]),
@@ -329,6 +353,11 @@ class PaperTradingEngine:
             balance=float(paper_state.get("balance", self._paper._balance)),
             position=paper_state.get("position"),
             trades=list(paper_state.get("trades", [])),
+        )
+        self._notifier.state_restored(
+            balance=self._paper._balance,
+            has_position=self._paper._position is not None,
+            trades=len(self._paper._trades),
         )
         logger.info(
             "Engine state restored — balance=%.2f position=%s trades=%d",

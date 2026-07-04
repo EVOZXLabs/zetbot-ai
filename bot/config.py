@@ -24,6 +24,12 @@ CONFIG = {
 
     "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
 
+    "telegram_enabled": os.getenv("TELEGRAM_ENABLED", "false").lower() == "true",
+
+    "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", 10)),
+
+    "telegram_retry": int(os.getenv("TELEGRAM_RETRY", 3)),
+
     "symbol": os.getenv("SYMBOL", "BTC/USDT"),
 
     "timeframe": os.getenv("TIMEFRAME", "1h"),
