@@ -90,6 +90,11 @@ class TradingLoop:
         self._stop_requested = False
         logger.info("TradingLoop started")
 
+        # Restore persistent state if available
+        restored = self._engine.restore_state()
+        if restored:
+            logger.info("Previous state restored — resuming monitoring")
+
         while self._running:
             self._cycle_count += 1
             cycle_start = time.time()

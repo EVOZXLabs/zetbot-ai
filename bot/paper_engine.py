@@ -8,7 +8,7 @@ ZetBot AI
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -16,6 +16,7 @@ import pandas as pd
 from bot.config import CONFIG
 from bot.data import MarketData
 from bot.paper import PaperTrader
+from bot.state import STATE_VERSION, StateManager
 from bot.strategy import BUY, SELL, StrategyEngine
 
 logger = logging.getLogger("ZetBot")
@@ -68,6 +69,8 @@ class PaperTradingEngine:
         self._last_market_state: str | None = None
         self._last_price: float | None = None
         self._last_trade: dict[str, Any] | None = None
+        self._state_manager: StateManager = StateManager()
+        self._auto_save: bool = bool(CONFIG.get("auto_save", True))
 
         logger.info("PaperTradingEngine initialised (balance=%.2f)", initial_balance)
 
@@ -161,6 +164,7 @@ class PaperTradingEngine:
 
         # ── 3. Return to IDLE ─────────────────────────────────────────
         self._state = IDLE
+        self._save_auto_state()
 
         return {
             "state": self._state,
@@ -296,6 +300,70 @@ class PaperTradingEngine:
             "longest_loss_streak": longest_loss_streak,
             "average_holding_time": avg_holding,
         }
+
+    # ------------------------------------------------------------------
+    #  State persistence
+    # ------------------------------------------------------------------
+
+    def restore_state(self) -> bool:
+        """Restore engine state from the last saved state file.
+
+        If a saved state exists and is valid, the engine's paper trader
+        (balance, position, trade history) is restored.
+
+        Returns:
+            ``True`` if state was successfully restored, ``False`` if
+            no saved state exists or restoration failed.
+        """
+        if not self._state_manager.state_exists():
+            logger.info("No saved state — starting fresh")
+            return False
+
+        data = self._state_manager.load()
+        if data is None:
+            logger.info("State load returned None — starting fresh")
+            return False
+
+        paper_state = data.get("paper", {})
+        self._paper.set_state(
+            balance=float(paper_state.get("balance", self._paper._balance)),
+            position=paper_state.get("position"),
+            trades=list(paper_state.get("trades", [])),
+        )
+        logger.info(
+            "Engine state restored — balance=%.2f position=%s trades=%d",
+            self._paper._balance,
+            "YES" if self._paper._position else "NO",
+            len(self._paper._trades),
+        )
+        return True
+
+    def _build_save_state(self) -> dict[str, Any]:
+        """Build a serialisable dict of the current engine state.
+
+        Returns:
+            Dict suitable for ``StateManager.save()``.
+        """
+        paper_state = self._paper.get_state()
+        stats = self.statistics()
+        return {
+            "state_version": STATE_VERSION,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "exchange": str(CONFIG.get("exchange", "binance")),
+            "symbol": str(CONFIG.get("symbol", "BTC/USDT")),
+            "timeframe": str(CONFIG.get("timeframe", "1h")),
+            "paper": paper_state,
+            "statistics": stats,
+        }
+
+    def _save_auto_state(self) -> None:
+        """Automatically save state if ``auto_save`` is enabled."""
+        if not self._auto_save:
+            return
+        try:
+            self._state_manager.save(self._build_save_state())
+        except Exception:
+            logger.exception("Auto-save failed")
 
     # ------------------------------------------------------------------
     #  Internal helpers

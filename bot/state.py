@@ -1,14 +1,18 @@
 """
-Market State Detector Module
+Market State Detector Module & Persistent State Manager
 
 ZetBot AI
 """
 
+import json
 import logging
-from typing import Optional
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 import pandas as pd
 
+from bot.config import CONFIG
 from bot.indicators import IndicatorEngine
 
 logger = logging.getLogger("ZetBot")
@@ -190,3 +194,203 @@ class MarketStateDetector:
         # 4. Conservative default
         logger.info("Market state -> SIDEWAYS (default, no strong trend)")
         return SIDEWAYS
+
+
+# ---------------------------------------------------------------------------
+#  State Manager – persistent paper-trading state
+# ---------------------------------------------------------------------------
+
+STATE_VERSION = 1
+
+
+def _json_serialize(obj: Any) -> str:
+    """JSON serializer that handles ``datetime`` and ``timedelta``."""
+    from datetime import datetime, timedelta
+
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, timedelta):
+        return int(obj.total_seconds())
+    msg = f"Object of type {type(obj)} is not JSON serializable"
+    raise TypeError(msg)
+
+
+def _parse_state(data: dict) -> dict:
+    """Convert ISO datetime strings back to ``datetime`` objects.
+
+    Mutates the dict in-place.
+    """
+    from datetime import timedelta
+
+    def _fix(obj: Any) -> Any:
+        if isinstance(obj, str):
+            try:
+                return datetime.fromisoformat(obj)
+            except (ValueError, TypeError):
+                return obj
+        if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+            return obj
+        return obj
+
+    # Position is nested under paper.position
+    paper = data.get("paper", {})
+    pos = paper.get("position")
+    if pos:
+        for key in ("entry_time",):
+            if key in pos and isinstance(pos[key], str):
+                pos[key] = _fix(pos[key])
+
+    # Trades are nested under paper.trades
+    trades = paper.get("trades", [])
+    for t in trades:
+        for key in ("entry_time", "exit_time"):
+            if key in t and isinstance(t[key], str):
+                t[key] = _fix(t[key])
+        if "holding_time" in t and isinstance(t["holding_time"], (int, float)):
+            t["holding_time"] = timedelta(seconds=int(t["holding_time"]))
+    return data
+
+
+class StateManager:
+    """Persistent state management for paper trading.
+
+    Saves and restores the full paper trading engine state to/from a
+    JSON file, enabling safe recovery after restart.
+
+    Usage::
+
+        mgr = StateManager()
+        mgr.save(engine_state_dict)
+        loaded = mgr.load()
+    """
+
+    def __init__(
+        self,
+        state_path: str | None = None,
+        backup_corrupted: bool | None = None,
+    ) -> None:
+        self._state_path: str = (
+            state_path
+            if state_path is not None
+            else str(CONFIG.get("state_path", "data/state.json"))
+        )
+        self._backup_corrupted: bool = (
+            backup_corrupted
+            if backup_corrupted is not None
+            else bool(CONFIG.get("backup_corrupted_state", True))
+        )
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self._state_path), exist_ok=True)
+
+        logger.info("StateManager initialised — path=%s", self._state_path)
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+
+    def state_exists(self) -> bool:
+        """Check if a saved state file exists."""
+        return os.path.isfile(self._state_path)
+
+    def save(self, state: dict) -> None:
+        """Atomically write *state* to the JSON state file.
+
+        Args:
+            state: A dict containing the full engine state.
+        """
+        tmp_path = self._state_path + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(state, f, default=_json_serialize, indent=2)
+            os.replace(tmp_path, self._state_path)
+            logger.info("State saved to %s", self._state_path)
+        except Exception:
+            # Clean up temp file on failure
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    def load(self) -> dict | None:
+        """Load saved state from disk.
+
+        Returns:
+            Parsed state dict, or ``None`` if the file does not exist or
+            is corrupted (a backup is created if configured).
+        """
+        if not self.state_exists():
+            logger.info("No saved state found at %s", self._state_path)
+            return None
+
+        try:
+            with open(self._state_path) as f:
+                raw = json.load(f)
+
+            validated = self._validate(raw)
+            if validated is None:
+                return None
+
+            return _parse_state(validated)
+
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning("Failed to load state: %s", exc)
+            self._handle_corrupted()
+            return None
+
+    def clear(self) -> None:
+        """Delete the saved state file, if it exists."""
+        if self.state_exists():
+            os.remove(self._state_path)
+            logger.info("State file removed — %s", self._state_path)
+
+    # ------------------------------------------------------------------
+    #  Internal helpers
+    # ------------------------------------------------------------------
+
+    def _validate(self, raw: Any) -> dict | None:
+        """Validate the loaded state dict.
+
+        Args:
+            raw: The deserialized JSON content.
+
+        Returns:
+            The validated dict, or ``None`` if invalid.
+        """
+        if not isinstance(raw, dict):
+            logger.warning("Corrupted state: expected dict, got %s", type(raw).__name__)
+            self._handle_corrupted()
+            return None
+
+        if "state_version" not in raw or not isinstance(raw["state_version"], int):
+            logger.warning("Corrupted state: missing or invalid state_version")
+            self._handle_corrupted()
+            return None
+
+        if "balance" not in raw:
+            logger.warning("Corrupted state: missing balance")
+            self._handle_corrupted()
+            return None
+
+        if "trades" not in raw or not isinstance(raw["trades"], list):
+            logger.warning("Corrupted state: missing or invalid trades")
+            self._handle_corrupted()
+            return None
+
+        return raw
+
+    def _handle_corrupted(self) -> None:
+        """Backup the corrupted file and log a warning."""
+        if not self._backup_corrupted:
+            logger.warning("Removing corrupted state file (backup disabled)")
+            self.clear()
+            return
+
+        backup_path = self._state_path + ".corrupted"
+        try:
+            os.replace(self._state_path, backup_path)
+            logger.warning(
+                "Corrupted state backed up to %s — creating clean state",
+                backup_path,
+            )
+        except OSError as exc:
+            logger.error("Failed to backup corrupted state: %s", exc)

@@ -52,4 +52,12 @@ CONFIG = {
 
     "retry_delay": int(os.getenv("RETRY_DELAY", 5)),
 
+    "state_enabled": os.getenv("STATE_ENABLED", "true").lower() == "true",
+
+    "state_path": os.getenv("STATE_PATH", "data/state.json"),
+
+    "auto_save": os.getenv("AUTO_SAVE", "true").lower() == "true",
+
+    "backup_corrupted_state": os.getenv("BACKUP_CORRUPTED_STATE", "true").lower() == "true",
+
 }

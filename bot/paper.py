@@ -251,6 +251,45 @@ class PaperTrader:
         return sum(1 for t in self._trades if t["net_pnl"] <= 0)
 
     # ------------------------------------------------------------------
+    # Public API – state serialization
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> dict[str, Any]:
+        """Export current state for persistence.
+
+        Returns:
+            A dict with ``balance``, ``position``, and ``trades``.
+        """
+        return {
+            "balance": self._balance,
+            "position": dict(self._position) if self._position else None,
+            "trades": list(self._trades),
+        }
+
+    def set_state(
+        self,
+        balance: float,
+        position: dict[str, Any] | None,
+        trades: list[dict[str, Any]],
+    ) -> None:
+        """Restore internal state from previously saved data.
+
+        Args:
+            balance: Virtual balance to restore.
+            position: Open position dict, or ``None``.
+            trades: Completed trades list.
+        """
+        self._balance = balance
+        self._position = dict(position) if position else None
+        self._trades = list(trades)
+        logger.info(
+            "Paper trader state restored — balance=%.2f position=%s trades=%d",
+            self._balance,
+            "YES" if self._position else "NO",
+            len(self._trades),
+        )
+
+    # ------------------------------------------------------------------
     # Public API – lifecycle
     # ------------------------------------------------------------------
 
