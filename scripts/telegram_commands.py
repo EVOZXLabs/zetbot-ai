@@ -8,6 +8,10 @@ Usage::
 
     python -m scripts.telegram_commands
 
+TEST_MODE (no Telegram credentials required)::
+
+    TEST_MODE=true python -m scripts.telegram_commands
+
 Commands::
 
     /status     — Bot status, balance, positions overview
@@ -42,6 +46,23 @@ POLL_REQUEST_TIMEOUT = 35  # HTTP request timeout (must exceed POLL_TIMEOUT)
 PAUSE_FILE = "data/.paused"
 DATA_DIR = "data"
 
+MAX_BACKOFF = 120   # maximum sleep between poll retries (seconds)
+BASE_DELAY = 2.0    # initial retry delay
+
+# Test-mode simulated command sequence
+_TEST_COMMANDS = [
+    "/help",
+    "/status",
+    "/balance",
+    "/positions",
+    "/summary",
+    "/pause",
+    "/status",
+    "/resume",
+    "/status",
+    "/unknown",
+]
+
 # ---------------------------------------------------------------------------
 #  Logger helpers
 # ---------------------------------------------------------------------------
@@ -73,7 +94,7 @@ def _read_json(path: str) -> dict[str, Any]:
 class TelegramCommandCenter:
     """Long-poll Telegram and dispatch commands to the ZetBot pipeline."""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, test_mode: bool = False) -> None:
         self._config = config
         self._token: str = config.telegram_token
         self._chat_id: str = config.telegram_chat_id
@@ -81,6 +102,10 @@ class TelegramCommandCenter:
         self._last_update_id: int = 0
         self._start_time: float = time.time()
         self._running: bool = True
+        self._test_mode: bool = test_mode
+
+        self._test_index: int = 0
+        self._consecutive_errors: int = 0
 
         self._command_handlers: dict[str, Any] = {
             "/status":    self._cmd_status,
@@ -95,44 +120,89 @@ class TelegramCommandCenter:
             "/start":     self._cmd_help,
         }
 
+        _log("Telegram Command Center started.")
+        if self._test_mode:
+            _log(f"TEST MODE — simulating {len(_TEST_COMMANDS)} commands")
+        else:
+            _log(f"Listening for commands on chat {self._chat_id}")
+
     # ------------------------------------------------------------------
     #  Public
     # ------------------------------------------------------------------
 
     def run(self) -> None:
         """Start the polling loop (blocks forever)."""
-        _log(f"Command Center started — chat {self._chat_id}")
-
-        if not self._token or not self._chat_id:
-            _log("ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing — exiting")
-            return
-
-        while self._running:
-            try:
-                updates = self._poll()
-                for update in updates:
-                    self._process_update(update)
-            except KeyboardInterrupt:
-                _log("Shutting down")
-                self._running = False
-            except requests.Timeout:
-                pass
-            except requests.RequestException as exc:
-                _log(f"Network error: {exc}")
-                time.sleep(5)
-            except Exception as exc:
-                _log(f"Unexpected error: {exc}")
-                time.sleep(5)
+        try:
+            while self._running:
+                try:
+                    updates = self._poll()
+                    self._consecutive_errors = 0
+                    for update in updates:
+                        self._process_update(update)
+                except requests.Timeout:
+                    pass
+                except Exception as exc:
+                    self._consecutive_errors += 1
+                    delay = self._backoff_delay()
+                    _log(
+                        f"Poll error ({self._consecutive_errors}x): {exc}"
+                        f"  retry in {delay:.0f}s"
+                    )
+                    time.sleep(delay)
+        except KeyboardInterrupt:
+            _log("Shutting down")
+            self._running = False
 
     def stop(self) -> None:
         """Signal the polling loop to exit."""
         self._running = False
 
     # ------------------------------------------------------------------
+    #  Backoff
+    # ------------------------------------------------------------------
+
+    def _backoff_delay(self) -> float:
+        """Compute exponential backoff with jitter."""
+        delay = min(MAX_BACKOFF, BASE_DELAY * (2 ** (self._consecutive_errors - 1)))
+        # Add ±25% jitter
+        import random
+        jitter = 1.0 + (random.random() - 0.5) * 0.5
+        return round(delay * jitter, 1)
+
+    # ------------------------------------------------------------------
     #  Polling
     # ------------------------------------------------------------------
 
     def _poll(self) -> list[dict[str, Any]]:
+        if self._test_mode:
+            return self._poll_test()
+        return self._poll_telegram()
+
+    def _poll_test(self) -> list[dict[str, Any]]:
+        """Return canned updates in test mode."""
+        time.sleep(1.5)
+        if self._test_index >= len(_TEST_COMMANDS):
+            _log("Test sequence complete — restarting")
+            self._test_index = 0
+            return []
+
+        cmd = _TEST_COMMANDS[self._test_index]
+        self._test_index += 1
+        self._last_update_id += 1
+        return [
+            {
+                "update_id": self._last_update_id,
+                "message": {
+                    "message_id": self._last_update_id,
+                    "chat": {"id": int(self._chat_id) if self._chat_id else 0},
+                    "text": cmd,
+                    "date": int(time.time()),
+                },
+            }
+        ]
+
+    def _poll_telegram(self) -> list[dict[str, Any]]:
+        """Get updates from Telegram via long-polling."""
         url = API_BASE.format(token=self._token, method="getUpdates")
         params: dict[str, Any] = {
             "offset": self._last_update_id + 1,
@@ -141,10 +211,19 @@ class TelegramCommandCenter:
         }
         resp = requests.get(url, params=params, timeout=POLL_REQUEST_TIMEOUT)
         resp.raise_for_status()
-        data = resp.json()
-        if data.get("ok") and data.get("result"):
-            return data["result"]
-        return []
+
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            _log(f"Telegram returned invalid JSON: {resp.text[:300]}")
+            return []
+
+        if not data.get("ok"):
+            desc = data.get("description", "no description")
+            _log(f"Telegram API error (getUpdates): {desc}")
+            return []
+
+        return data.get("result", [])
 
     def _process_update(self, update: dict[str, Any]) -> None:
         update_id = update.get("update_id", 0)
@@ -158,7 +237,8 @@ class TelegramCommandCenter:
         if not text or not text.startswith("/"):
             return
 
-        if str(chat_id) != self._chat_id:
+        # Authenticate chat before logging the command
+        if not self._test_mode and str(chat_id) != self._chat_id:
             _log(f"Ignored message from unauthorized chat {chat_id}")
             return
 
@@ -185,6 +265,10 @@ class TelegramCommandCenter:
     # ------------------------------------------------------------------
 
     def _send(self, text: str) -> bool:
+        if self._test_mode:
+            _log(f"Replied successfully ({len(text)} chars)")
+            return True
+
         url = API_BASE.format(token=self._token, method="sendMessage")
         payload: dict[str, Any] = {
             "chat_id": self._chat_id,
@@ -196,11 +280,22 @@ class TelegramCommandCenter:
             try:
                 resp = requests.post(url, json=payload, timeout=self._timeout)
                 resp.raise_for_status()
+                _log("Replied successfully")
                 return True
             except requests.RequestException as exc:
-                _log(f"Send attempt {attempt}/{self._config.telegram_retry}: {exc}")
+                resp_body = (
+                    exc.response.text[:300]
+                    if exc.response is not None
+                    else "no response"
+                )
+                _log(
+                    f"Telegram API error (attempt {attempt}/"
+                    f"{self._config.telegram_retry}): {exc}"
+                    f"  body={resp_body}"
+                )
                 if attempt < self._config.telegram_retry:
-                    time.sleep(1)
+                    time.sleep(1 * attempt)
+
         _log("Send failed after all retries")
         return False
 
@@ -262,7 +357,6 @@ class TelegramCommandCenter:
             lines.append(f"{icon} `{r.name:>10s}` {r.duration:.1f}s{detail}")
         lines.append(f"Total: `{total:.1f}s`")
 
-        # Check success
         failed = [r for r in results if not r.success]
         if failed:
             lines.append("")
@@ -282,12 +376,15 @@ class TelegramCommandCenter:
         data = _read_json(f"{DATA_DIR}/scanner_results.json")
         total = data.get("total_pairs", 0)
         results_list = data.get("results", data.get("sorted", []))
-        top_count = min(5, len(results_list) if isinstance(results_list, list) else 0)
+        top_count = min(
+            5, len(results_list) if isinstance(results_list, list) else 0
+        )
         top_pairs: list[str] = []
-        for i, s in enumerate(results_list[:top_count] if isinstance(results_list, list) else [], 1):
-            sym = s.get("symbol", "?")
-            score = s.get("overall_score", 0)
-            top_pairs.append(f"  `{i}. {sym}` score={score:.1f}")
+        if isinstance(results_list, list):
+            for i, s in enumerate(results_list[:top_count], 1):
+                sym = s.get("symbol", "?")
+                score = s.get("overall_score", 0)
+                top_pairs.append(f"  `{i}. {sym}` score={score:.1f}")
 
         lines = [
             f"\U0001f50d *Scan Complete*",
@@ -431,19 +528,23 @@ class TelegramCommandCenter:
 
 
 def main() -> None:
-    config = load_config()
-    if not config.telegram_enabled:
-        _log("Telegram disabled — set TELEGRAM_ENABLED=true in .env")
-        return
-    if not config.telegram_token or not config.telegram_chat_id:
-        _log("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set — exiting")
-        return
+    test_mode = os.getenv("TEST_MODE", "").lower() in ("1", "true", "yes")
 
-    center = TelegramCommandCenter(config)
-    try:
-        center.run()
-    except KeyboardInterrupt:
-        center.stop()
+    config = load_config()
+
+    if not test_mode:
+        if not config.telegram_enabled:
+            _log("Telegram disabled — set TELEGRAM_ENABLED=true in .env")
+            return
+        if not config.telegram_token:
+            _log("TELEGRAM_TOKEN not set in .env — exiting")
+            return
+        if not config.telegram_chat_id:
+            _log("TELEGRAM_CHAT_ID not set in .env — exiting")
+            return
+
+    center = TelegramCommandCenter(config, test_mode=test_mode)
+    center.run()
 
 
 if __name__ == "__main__":
