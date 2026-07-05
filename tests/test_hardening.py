@@ -271,6 +271,56 @@ class TestHealthMonitor:
         health_lines = [l for l in logged if "HEALTH" in l]
         assert len(health_lines) >= 1, f"Expected HEALTH log lines, got {logged}"
 
+    def test_snapshot_returns_cached_metrics(self) -> None:
+        from scripts.health import HealthMonitor
+        monitor = HealthMonitor(logger=_FakeLogger(), interval=60.0)
+        snap = monitor.snapshot()
+        assert "uptime_sec" in snap
+        assert "rss_kb" in snap
+        assert "thread_count" in snap
+        assert "process_cpu_sec" in snap
+        assert snap["thread_count"] >= 1
+
+    def test_snapshot_returns_copy(self) -> None:
+        from scripts.health import HealthMonitor
+        monitor = HealthMonitor(logger=_FakeLogger(), interval=60.0)
+        snap1 = monitor.snapshot()
+        snap2 = monitor.snapshot()
+        assert snap1 == snap2
+
+    def test_snapshot_updated_by_background_thread(self) -> None:
+        from scripts.health import HealthMonitor
+        logger = _FakeLogger()
+        monitor = HealthMonitor(logger=logger, interval=0.2)
+        snap_before = monitor.snapshot()
+        monitor.start()
+        time.sleep(0.5)
+        snap_after = monitor.snapshot()
+        monitor.stop()
+        assert snap_after["uptime_sec"] >= snap_before["uptime_sec"]
+
+    def test_snapshot_no_health_monitor(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = AppConfig(
+            account_balance=10000, exchange="binance", timeframe="1h",
+            max_positions=3, max_risk_per_trade_pct=2,
+            scanner_threads=5, scanner_top_n=50,
+            telegram_timeout=10, telegram_retry=3,
+            min_rr=1.5, max_rr=5, min_probability=50,
+            max_atr_pct=8, tp1_sell_pct=30, tp2_sell_pct=30,
+            tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
+            slippage_bps=3,
+        )
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=None)
+        result = center._cmd_health("/health")
+        assert result is not None
+        assert "Health Score" in result
+        assert "System" in result
+        assert "Resources" in result
+        assert "Components" in result
+        assert "Trading" in result
+        assert "Timestamps" in result
+
     def test_format_metrics(self) -> None:
         from scripts.health import _format_metrics
         result = _format_metrics({
@@ -283,6 +333,115 @@ class TestHealthMonitor:
         assert "100.0MB" in result
         assert "threads=5" in result
         assert "cpu=12.5s" in result
+
+
+# ---------------------------------------------------------------------------
+#  /health command tests
+# ---------------------------------------------------------------------------
+
+class TestHealthCommand:
+    """Telegram /health command formatting and content."""
+
+    def _make_config(self) -> AppConfig:
+        return AppConfig(
+            account_balance=10000, exchange="binance", timeframe="1h",
+            max_positions=3, max_risk_per_trade_pct=2,
+            scanner_threads=5, scanner_top_n=50,
+            telegram_timeout=10, telegram_retry=3,
+            min_rr=1.5, max_rr=5, min_probability=50,
+            max_atr_pct=8, tp1_sell_pct=30, tp2_sell_pct=30,
+            tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
+            slippage_bps=3,
+        )
+
+    def _make_health_monitor(self) -> Any:
+        from scripts.health import HealthMonitor
+        return HealthMonitor(logger=_FakeLogger(), interval=60.0)
+
+    def test_health_contains_all_required_sections(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        health = self._make_health_monitor()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
+        result = center._cmd_health("/health")
+        assert "ZetBot Health Status" in result
+        assert "Health Score:" in result
+        assert "*System*" in result
+        assert "*Resources*" in result
+        assert "*Components*" in result
+        assert "*Trading*" in result
+        assert "*Timestamps*" in result
+
+    def test_health_contains_required_fields(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        health = self._make_health_monitor()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
+        result = center._cmd_health("/health")
+        assert "Uptime:" in result
+        assert "Mode:" in result
+        assert "Exchange:" in result
+        assert "Timeframe:" in result
+        assert "CPU:" in result
+        assert "Memory:" in result
+        assert "Threads:" in result
+        assert "Internet:" in result
+        assert "Telegram:" in result
+        assert "Scanner:" in result
+        assert "Open Positions:" in result
+        assert "Total Trades:" in result
+        assert "Balance:" in result
+        assert "Last Scan:" in result
+        assert "Last API Call:" in result
+
+    def test_health_shows_correct_mode(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        health = self._make_health_monitor()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
+        result = center._cmd_health("/health")
+        assert "PAPER" in result
+        assert "binance" in result
+        assert "1h" in result
+
+    def test_health_includes_status_icons(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        health = self._make_health_monitor()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
+        result = center._cmd_health("/health")
+        status_icons = {"\U0001f7e2", "\U0001f7e1", "\U0001f534", "\u26aa"}
+        found = {icon for icon in status_icons if icon in result}
+        assert len(found) >= 2, f"Expected at least 2 status icons, found {found}"
+
+    def test_health_score_in_range(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        health = self._make_health_monitor()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
+        result = center._cmd_health("/health")
+        import re
+        match = re.search(r"Health Score:.*?`(\d+)/100`", result)
+        assert match is not None, f"Could not find Health Score in:\n{result}"
+        score = int(match.group(1))
+        assert 0 <= score <= 100
+
+    def test_health_disabled_telegram_shows_disabled(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        cfg = AppConfig(**{**cfg.__dict__, "telegram_enabled": False})
+        health = self._make_health_monitor()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
+        result = center._cmd_health("/health")
+        assert "Disabled" in result or "\u26aa" in result
+
+    def test_health_no_health_monitor_graceful(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
+        center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=None)
+        result = center._cmd_health("/health")
+        assert "Health Score:" in result
+        assert "0/100" in result or "/100" in result
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ BASE_DELAY = 2.0    # initial retry delay
 _TEST_COMMANDS = [
     "/help",
     "/status",
+    "/health",
     "/balance",
     "/positions",
     "/summary",
@@ -94,8 +95,14 @@ def _read_json(path: str) -> dict[str, Any]:
 class TelegramCommandCenter:
     """Long-poll Telegram and dispatch commands to the ZetBot pipeline."""
 
-    def __init__(self, config: AppConfig, test_mode: bool = False) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        test_mode: bool = False,
+        health_monitor: Any = None,
+    ) -> None:
         self._config = config
+        self._health_monitor = health_monitor
         self._token: str = config.telegram_token
         self._chat_id: str = config.telegram_chat_id
         self._timeout: int = config.telegram_timeout
@@ -114,6 +121,7 @@ class TelegramCommandCenter:
             "/positions": self._cmd_positions,
             "/balance":   self._cmd_balance,
             "/summary":   self._cmd_summary,
+            "/health":    self._cmd_health,
             "/pause":     self._cmd_pause,
             "/resume":    self._cmd_resume,
             "/help":      self._cmd_help,
@@ -491,6 +499,150 @@ class TelegramCommandCenter:
 
         return "\n".join(lines)
 
+    def _cmd_health(self, _text: str) -> str:
+        """System health overview using HealthMonitor snapshot."""
+        import os
+        now = time.time()
+
+        snapshot: dict[str, Any] = {}
+        if self._health_monitor:
+            try:
+                snapshot = self._health_monitor.snapshot()
+            except Exception as exc:
+                _log(f"HealthMonitor snapshot failed: {exc}")
+
+        uptime_sec = snapshot.get("uptime_sec", 0)
+        rss_kb = snapshot.get("rss_kb", 0)
+        thread_count = snapshot.get("thread_count", 0)
+        process_cpu_sec = snapshot.get("process_cpu_sec", 0)
+
+        # Derived system metrics
+        hours, rem = divmod(int(uptime_sec), 3600)
+        minutes, seconds = divmod(rem, 60)
+        uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        cpu_pct = (process_cpu_sec / uptime_sec * 100) if uptime_sec > 0 else 0.0
+        rss_mb = rss_kb / 1024.0
+
+        # File-freshness helper
+        def _freshness(path: str) -> tuple[str, str]:
+            try:
+                age = now - os.path.getmtime(path)
+            except OSError:
+                return "Critical", "\U0001f534"
+            if age < 7200:
+                return "Healthy", "\U0001f7e2"
+            if age < 86400:
+                return "Warning", "\U0001f7e1"
+            return "Critical", "\U0001f534"
+
+        # Component statuses from data-file freshness
+        scanner_status, scanner_icon = _freshness(f"{DATA_DIR}/scanner_results.json")
+        api_status, api_icon = _freshness(f"{DATA_DIR}/paper_balance.json")
+
+        # Internet & Exchange status follow scanner (requires connectivity)
+        internet_icon = scanner_icon
+        internet_status = scanner_status
+        exchange_icon = scanner_icon
+        exchange_status = scanner_status
+
+        # Telegram status
+        has_creds = bool(self._config.telegram_token and self._config.telegram_chat_id)
+        if self._config.telegram_enabled and has_creds:
+            telegram_icon = "\U0001f7e2"
+            telegram_status = "Healthy"
+        elif self._config.telegram_enabled:
+            telegram_icon = "\U0001f7e1"
+            telegram_status = "Warning"
+        else:
+            telegram_icon = "\u26aa"
+            telegram_status = "Disabled"
+
+        # Resource thresholds
+        cpu_icon = "\U0001f7e2" if cpu_pct < 80 else ("\U0001f7e1" if cpu_pct < 95 else "\U0001f534")
+        cpu_label = "Healthy" if cpu_pct < 80 else ("Warning" if cpu_pct < 95 else "Critical")
+        mem_icon = "\U0001f7e2" if rss_mb < 200 else ("\U0001f7e1" if rss_mb < 500 else "\U0001f534")
+        mem_label = "Healthy" if rss_mb < 200 else ("Warning" if rss_mb < 500 else "Critical")
+        thr_icon = "\U0001f7e2" if thread_count < 30 else ("\U0001f7e1" if thread_count < 50 else "\U0001f534")
+        thr_label = "Healthy" if thread_count < 30 else ("Warning" if thread_count < 50 else "Critical")
+
+        # Health Score (0-100)
+        score = 100
+        for s in (internet_status, exchange_status, scanner_status):
+            if s == "Critical":
+                score -= 15
+            elif s == "Warning":
+                score -= 5
+        if telegram_status == "Critical":
+            score -= 10
+        elif telegram_status == "Warning":
+            score -= 3
+        if cpu_label == "Critical":
+            score -= 10
+        elif cpu_label == "Warning":
+            score -= 5
+        if mem_label == "Critical":
+            score -= 10
+        elif mem_label == "Warning":
+            score -= 5
+        if thr_label == "Critical":
+            score -= 5
+        elif thr_label == "Warning":
+            score -= 3
+        score = max(0, min(100, score))
+
+        # Score icon
+        score_icon = "\U0001f7e2" if score >= 80 else ("\U0001f7e1" if score >= 50 else "\U0001f534")
+
+        # Trading data from files
+        pb = _read_json(f"{DATA_DIR}/paper_balance.json")
+        pos_data = _read_json(f"{DATA_DIR}/positions.json")
+        pos_list = pos_data.get("positions", [])
+        open_pos = sum(1 for p in pos_list if p.get("status") == "OPEN")
+        total_trades = pb.get("total_trades", 0)
+        balance = pb.get("final_balance", 0.0)
+
+        # Last scan time
+        scan_time = "N/A"
+        try:
+            scan_mtime = os.path.getmtime(f"{DATA_DIR}/scanner_results.json")
+            scan_time = datetime.fromtimestamp(scan_mtime, tz=timezone.utc).strftime("%H:%M:%S UTC")
+        except OSError:
+            pass
+
+        # Last API call time
+        api_time = "N/A"
+        try:
+            api_mtime = os.path.getmtime(f"{DATA_DIR}/paper_balance.json")
+            api_time = datetime.fromtimestamp(api_mtime, tz=timezone.utc).strftime("%H:%M:%S UTC")
+        except OSError:
+            pass
+
+        return (
+            f"{score_icon} *ZetBot Health Status*\n\n"
+            f"*Health Score:* `{score}/100`\n\n"
+            f"*System*\n"
+            f"Uptime:     `{uptime_str}`\n"
+            f"Mode:       `{'PAPER' if self._config.paper_mode else 'LIVE'}`\n"
+            f"Exchange:   `{self._config.exchange}`\n"
+            f"Timeframe:  `{self._config.timeframe}`\n\n"
+            f"*Resources*\n"
+            f"CPU:        `{cpu_pct:.1f}%`  {cpu_icon} {cpu_label}\n"
+            f"Memory:     `{rss_mb:.1f}MB`  {mem_icon} {mem_label}\n"
+            f"Threads:    `{thread_count}`  {thr_icon} {thr_label}\n\n"
+            f"*Components*\n"
+            f"Internet:   {internet_icon} {internet_status}\n"
+            f"Exchange:   {exchange_icon} {exchange_status}\n"
+            f"Telegram:   {telegram_icon} {telegram_status}\n"
+            f"Scanner:    {scanner_icon} {scanner_status}\n\n"
+            f"*Trading*\n"
+            f"Open Positions: `{open_pos}`\n"
+            f"Total Trades:   `{total_trades}`\n"
+            f"Balance:        `${balance:,.2f}`\n\n"
+            f"*Timestamps*\n"
+            f"Last Scan:      `{scan_time}`\n"
+            f"Last API Call:  `{api_time}`"
+        )
+
     def _cmd_pause(self, _text: str) -> str:
         """Disable new trade openings."""
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -518,6 +670,7 @@ class TelegramCommandCenter:
             "/summary \u2014 Today's trading statistics\n"
             "/pause \u2014 Disable new trades\n"
             "/resume \u2014 Enable new trades\n"
+            "/health \u2014 System health & status overview\n"
             "/help \u2014 Show this message"
         )
 

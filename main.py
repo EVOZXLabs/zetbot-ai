@@ -278,6 +278,14 @@ def main() -> None:
         logger.info("Pipeline did not produce results — skipping summary")
 
     # ------------------------------------------------------------------
+    #  Health Monitor — background thread
+    # ------------------------------------------------------------------
+
+    health = HealthMonitor(logger, interval=60.0)
+    health.start()
+    logger.info("Health Monitor started (every 60s)")
+
+    # ------------------------------------------------------------------
     #  Telegram Command Center — background daemon thread
     # ------------------------------------------------------------------
 
@@ -290,7 +298,11 @@ def main() -> None:
     if test_mode or (config.telegram_enabled and has_creds):
         from scripts.telegram_commands import TelegramCommandCenter
 
-        center = TelegramCommandCenter(config, test_mode=test_mode)
+        center = TelegramCommandCenter(
+            config,
+            test_mode=test_mode,
+            health_monitor=health,
+        )
         tg_thread = _start_worker(
             "TelegramCmd",
             center.run,
@@ -308,14 +320,6 @@ def main() -> None:
             )
         else:
             logger.info("Telegram disabled — command center not started")
-
-    # ------------------------------------------------------------------
-    #  Health Monitor — background thread
-    # ------------------------------------------------------------------
-
-    health = HealthMonitor(logger, interval=60.0)
-    health.start()
-    logger.info("Health Monitor started (every 60s)")
 
     # ------------------------------------------------------------------
     #  Keep alive — monitor workers, health, shutdown
@@ -336,7 +340,11 @@ def main() -> None:
                 )
                 from scripts.telegram_commands import TelegramCommandCenter
 
-                center = TelegramCommandCenter(config, test_mode=test_mode)
+                center = TelegramCommandCenter(
+                    config,
+                    test_mode=test_mode,
+                    health_monitor=health,
+                )
                 new_thread = _start_worker(
                     "TelegramCmd",
                     center.run,

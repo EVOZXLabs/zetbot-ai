@@ -36,6 +36,7 @@ class HealthMonitor:
         self._start_time: float = time.time()
         self._running: bool = False
         self._thread: threading.Thread | None = None
+        self._last_snapshot: dict[str, Any] | None = None
 
     def start(self) -> None:
         if self._running:
@@ -53,13 +54,23 @@ class HealthMonitor:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return the latest health metrics snapshot.
+
+        Gathers metrics on first call, returns cached data thereafter
+        (updated every *interval* seconds by the background thread).
+        """
+        if self._last_snapshot is None:
+            self._last_snapshot = self._gather()
+        return dict(self._last_snapshot)
+
     def _run(self) -> None:
         while self._running:
             time.sleep(self._interval)
             if not self._running:
                 break
-            metrics = self._gather()
-            self._logger.info(f"HEALTH  {_format_metrics(metrics)}")
+            self._last_snapshot = self._gather()
+            self._logger.info(f"HEALTH  {_format_metrics(self._last_snapshot)}")
 
     def _gather(self) -> dict[str, Any]:
         uptime_sec = time.time() - self._start_time
