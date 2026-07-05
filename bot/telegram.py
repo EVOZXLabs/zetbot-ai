@@ -87,8 +87,10 @@ class TelegramNotifier:
                     attempt, self._max_retry, exc,
                 )
                 if attempt < self._max_retry:
+                    import random
                     import time
-                    time.sleep(1)
+                    delay = min(30, 2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(delay)
 
         logger.error("Telegram send failed after %d attempts", self._max_retry)
         return False

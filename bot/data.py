@@ -107,11 +107,30 @@ class MarketData:
             limit, timeframe, symbol, self.exchange_name,
         )
 
-        raw: list[list[Any]] = self.exchange.fetch_ohlcv(
-            symbol=symbol,
-            timeframe=timeframe,
-            limit=limit,
-        )
+        raw: list[list[Any]] = []
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                raw = self.exchange.fetch_ohlcv(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    limit=limit,
+                )
+                last_error = None
+                break
+            except (ccxt.NetworkError, ccxt.ExchangeError) as exc:
+                last_error = exc
+                logger.warning(
+                    "Exchange fetch attempt %d/3 failed for %s %s: %s",
+                    attempt, symbol, timeframe, exc,
+                )
+                if attempt < 3:
+                    import random
+                    import time
+                    delay = min(30, 2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(delay)
+        if last_error is not None:
+            raise last_error
 
         if not raw:
             msg = (

@@ -6,13 +6,23 @@ environment variables (with sensible defaults).
 
 Usage::
 
-    from scripts.app_config import load_config, AppConfig
+    from scripts.app_config import load_config, AppConfig, validate_config
     config = load_config()
+    validate_config(config)
 """
 
 import os
+import sys
 from dataclasses import dataclass
+from typing import Any
+
 from dotenv import load_dotenv
+
+
+SUPPORTED_EXCHANGES: frozenset[str] = frozenset({"binance", "bybit", "tokocrypto"})
+VALID_TIMEFRAMES: frozenset[str] = frozenset(
+    {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
+)
 
 
 @dataclass(frozen=True)
@@ -108,3 +118,75 @@ def load_config() -> AppConfig:
         maker_fee=float(os.getenv("MAKER_FEE", "0.00075")),
         slippage_bps=int(os.getenv("SLIPPAGE_BPS", "3")),
     )
+
+
+class ConfigError(Exception):
+    """Raised when configuration validation fails."""
+
+
+def validate_config(config: AppConfig) -> None:
+    """Validate all configuration values.
+
+    Raises ``ConfigError`` (which prints to stderr and exits) if any
+    required value is missing, invalid, or out of range.
+    """
+    errors: list[str] = []
+
+    if config.account_balance <= 0:
+        errors.append(f"ACCOUNT_BALANCE must be > 0 (got {config.account_balance})")
+    if config.exchange not in SUPPORTED_EXCHANGES:
+        errors.append(
+            f"EXCHANGE must be one of {sorted(SUPPORTED_EXCHANGES)} "
+            f"(got '{config.exchange}')"
+        )
+    if config.timeframe not in VALID_TIMEFRAMES:
+        errors.append(
+            f"TIMEFRAME must be one of {sorted(VALID_TIMEFRAMES)} "
+            f"(got '{config.timeframe}')"
+        )
+    if config.max_positions < 1:
+        errors.append(f"MAX_POSITIONS must be >= 1 (got {config.max_positions})")
+    if config.max_risk_per_trade_pct <= 0 or config.max_risk_per_trade_pct > 100:
+        errors.append(
+            f"MAX_RISK_PER_TRADE_PCT must be between 0 and 100 "
+            f"(got {config.max_risk_per_trade_pct})"
+        )
+    if config.scanner_threads < 1:
+        errors.append(f"SCANNER_THREADS must be >= 1 (got {config.scanner_threads})")
+    if config.scanner_top_n < 1:
+        errors.append(f"SCANNER_TOP_N must be >= 1 (got {config.scanner_top_n})")
+    if config.telegram_timeout < 1:
+        errors.append(
+            f"TELEGRAM_TIMEOUT must be >= 1 (got {config.telegram_timeout})"
+        )
+    if config.telegram_retry < 0:
+        errors.append(
+            f"TELEGRAM_RETRY must be >= 0 (got {config.telegram_retry})"
+        )
+    if config.min_rr <= 0 or config.max_rr <= config.min_rr:
+        errors.append(
+            f"MIN_RR ({config.min_rr}) must be positive and less than "
+            f"MAX_RR ({config.max_rr})"
+        )
+    if config.min_probability < 0 or config.min_probability > 100:
+        errors.append(f"MIN_PROBABILITY must be 0-100 (got {config.min_probability})")
+    if config.max_atr_pct <= 0:
+        errors.append(f"MAX_ATR_PCT must be > 0 (got {config.max_atr_pct})")
+    if config.max_holding_candles < 1:
+        errors.append(
+            f"MAX_HOLDING_CANDLES must be >= 1 (got {config.max_holding_candles})"
+        )
+    tp_sum = config.tp1_sell_pct + config.tp2_sell_pct + config.tp3_sell_pct
+    if abs(tp_sum - 100.0) > 0.01:
+        errors.append(
+            f"TP sell percentages must sum to 100 (got "
+            f"{config.tp1_sell_pct}+{config.tp2_sell_pct}+"
+            f"{config.tp3_sell_pct}={tp_sum})"
+        )
+    if config.taker_fee < 0 or config.maker_fee < 0:
+        errors.append("TAKER_FEE and MAKER_FEE must be non-negative")
+    if config.slippage_bps < 0:
+        errors.append(f"SLIPPAGE_BPS must be >= 0 (got {config.slippage_bps})")
+
+    if errors:
+        raise ConfigError("\n".join(errors))

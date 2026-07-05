@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-ZetBot AI — Application Orchestrator (v0.4.0)
+ZetBot AI — Application Orchestrator (v0.5.0)
 
-Long-running daemon that integrates the trading analysis pipeline with
-the Telegram Command Center.  Both run in the same process — no second
-terminal needed.
+Production-hardened long-running daemon.  Integrates the trading
+analysis pipeline with the Telegram Command Center in a single
+process.  Includes PID lock, health monitor, thread watchdog, and
+graceful shutdown.
 
 Usage::
 
@@ -14,6 +15,7 @@ All configuration is read from environment variables / .env.
 See ``scripts.app_config`` for the full list of options.
 """
 
+import atexit
 import json
 import os
 import signal
@@ -22,8 +24,15 @@ import threading
 import time
 from typing import Any
 
-from scripts.app_config import load_config, AppConfig
+from scripts.app_config import (
+    AppConfig,
+    ConfigError,
+    load_config,
+    validate_config,
+)
+from scripts.health import HealthMonitor
 from scripts.logger import PipelineLogger
+from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
 
 
@@ -134,6 +143,34 @@ def _build_summary(
     return lines
 
 
+def _thread_exists(name: str) -> bool:
+    """Check if a thread with the given name is alive (zombie detection)."""
+    for t in threading.enumerate():
+        if t.name == name and t.is_alive():
+            return True
+    return False
+
+
+def _start_worker(
+    name: str,
+    target: Any,
+    logger: PipelineLogger,
+) -> threading.Thread | None:
+    """Start a daemon worker thread if no thread with *name* exists.
+
+    Returns the thread on success, None if a zombie duplicate was found.
+    """
+    if _thread_exists(name):
+        logger.error(
+            "[WATCHDOG] Duplicate worker '%s' detected — not starting",
+            name,
+        )
+        return None
+    t = threading.Thread(target=target, name=name, daemon=True)
+    t.start()
+    return t
+
+
 def _send_telegram(config: AppConfig, lines: list[str]) -> None:
     """Send summary via Telegram if configured."""
     if not config.telegram_enabled:
@@ -166,36 +203,70 @@ def main() -> None:
     """Run ZetBot AI daemon with integrated Telegram Command Center."""
     t0 = time.time()
 
-    # Load configuration
+    # Load and validate configuration
     try:
         config = load_config()
+        validate_config(config)
+    except ConfigError as exc:
+        print(f"ERROR: Configuration validation failed:\n{exc}", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:
-        print(f"ERROR: Failed to load configuration — {exc}")
+        print(f"ERROR: Failed to load configuration — {exc}", file=sys.stderr)
         sys.exit(1)
 
     # Initialize logger
     logger = PipelineLogger(config)
-    logger.info(f"ZetBot AI — Daemon v0.4.0")
+    logger.info(f"ZetBot AI — Daemon v0.5.0")
     logger.info(f"Exchange : {config.exchange}")
     logger.info(f"Timeframe: {config.timeframe}")
     logger.info(f"Balance  : ${config.account_balance:>8,.2f}")
     logger.info(f"Mode     : {'PAPER' if config.paper_mode else 'LIVE'}")
 
-    # Run pipeline once on startup
+    # ------------------------------------------------------------------
+    #  PID lock — prevent duplicate instances
+    # ------------------------------------------------------------------
+
+    pid_file = PidFile(os.path.join(config.data_dir, "zetbot.pid"))
+    if not pid_file.acquire():
+        logger.error(
+            "Another ZetBot instance is already running "
+            "(PID file: %s/zetbot.pid) — exiting",
+            config.data_dir,
+        )
+        sys.exit(1)
+    atexit.register(pid_file.release)
+    logger.info("PID lock acquired")
+
+    # ------------------------------------------------------------------
+    #  Shutdown coordination
+    # ------------------------------------------------------------------
+
+    shutdown = threading.Event()
+
+    def _shutdown_handler(signum: int, _frame: Any) -> None:
+        logger.info(f"Signal {signum} received — shutting down")
+        shutdown.set()
+
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+
+    # ------------------------------------------------------------------
+    #  Run pipeline once on startup
+    # ------------------------------------------------------------------
+
     pipeline = Pipeline(config, logger)
+    last_pipeline_time: float = time.time()
     try:
         results = pipeline.run()
     except Exception as exc:
         logger.error(f"Pipeline failed: {exc}")
         results = []
 
-    # Summary
     total_elapsed = time.time() - t0
     if results:
         summary_lines = _build_summary(results, config)
         logger.summary(summary_lines)
 
-        # Telegram notification (one-shot)
         if config.telegram_enabled:
             logger.info("Sending Telegram notification...")
             _send_telegram(config, summary_lines)
@@ -220,13 +291,15 @@ def main() -> None:
         from scripts.telegram_commands import TelegramCommandCenter
 
         center = TelegramCommandCenter(config, test_mode=test_mode)
-        tg_thread = threading.Thread(
-            target=center.run,
-            name="TelegramCmd",
-            daemon=True,
+        tg_thread = _start_worker(
+            "TelegramCmd",
+            center.run,
+            logger,
         )
-        tg_thread.start()
-        logger.info("Telegram Command Center started (background thread)")
+        if tg_thread:
+            logger.info("Telegram Command Center started (background thread)")
+        else:
+            logger.error("Failed to start Telegram Command Center")
     else:
         if config.telegram_enabled and not has_creds:
             logger.warning(
@@ -237,31 +310,73 @@ def main() -> None:
             logger.info("Telegram disabled — command center not started")
 
     # ------------------------------------------------------------------
-    #  Keep alive — wait for shutdown signal
+    #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
-    shutdown = threading.Event()
+    health = HealthMonitor(logger, interval=60.0)
+    health.start()
+    logger.info("Health Monitor started (every 60s)")
 
-    def _on_signal(signum: int, _frame: Any) -> None:
-        logger.info(f"Signal {signum} received — shutting down")
-        shutdown.set()
-
-    signal.signal(signal.SIGINT, _on_signal)
-    signal.signal(signal.SIGTERM, _on_signal)
+    # ------------------------------------------------------------------
+    #  Keep alive — monitor workers, health, shutdown
+    # ------------------------------------------------------------------
 
     logger.info("ZetBot AI is running. Press Ctrl+C to stop.")
 
     try:
-        shutdown.wait()
+        while not shutdown.is_set():
+            shutdown.wait(timeout=10.0)
+            if shutdown.is_set():
+                break
+
+            # -- Watchdog: monitor Telegram thread -----------------------
+            if tg_thread is not None and not tg_thread.is_alive():
+                logger.warning(
+                    "[WATCHDOG] TelegramCmd worker stopped — restarting"
+                )
+                from scripts.telegram_commands import TelegramCommandCenter
+
+                center = TelegramCommandCenter(config, test_mode=test_mode)
+                new_thread = _start_worker(
+                    "TelegramCmd",
+                    center.run,
+                    logger,
+                )
+                if new_thread:
+                    tg_thread = new_thread
+                    logger.info(
+                        "[WATCHDOG] TelegramCmd restart successful"
+                    )
+                else:
+                    logger.error(
+                        "[WATCHDOG] TelegramCmd restart failed "
+                        "(zombie detected)"
+                    )
     except KeyboardInterrupt:
         shutdown.set()
 
-    # Graceful shutdown
+    # ------------------------------------------------------------------
+    #  Graceful shutdown
+    # ------------------------------------------------------------------
+
     logger.info("Shutting down...")
+
+    # Stop health monitor first
+    health.stop()
+
+    # Stop Telegram command center
     if center:
+        logger.info("Stopping Telegram Command Center...")
         center.stop()
         if tg_thread and tg_thread.is_alive():
             tg_thread.join(timeout=5.0)
+            if tg_thread.is_alive():
+                logger.warning("Telegram thread did not stop within 5s")
+
+    # Remove PID file
+    pid_file.release()
+    logger.info("PID lock released")
+
     logger.info("ZetBot AI stopped")
 
 
