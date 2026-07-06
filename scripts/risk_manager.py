@@ -37,6 +37,7 @@ MIN_POSITION_SIZE_USD = 10.0        # smallest trade value
 MIN_PROBABILITY = 50.0              # from decision engine
 MAX_ATR_PCT = 8.0                   # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
+MAX_POSITION_SIZE_PCT = 0.6         # max % of account equity per position ($ VALUE, not risk)
 STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
 STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 
@@ -163,7 +164,12 @@ class StopLossCalculator:
 
 
 class PositionSizer:
-    """Calculate safe position sizes."""
+    """Calculate safe position sizes.
+
+    The position VALUE (notional) is always capped so that no single
+    position can exceed ``max_position_pct`` of the available balance.
+    The risk_amount reflects the true dollar risk for the *capped* size.
+    """
 
     @staticmethod
     def calculate(
@@ -171,8 +177,28 @@ class PositionSizer:
         risk_pct: float,
         entry_price: float,
         stop_price: float,
+        max_position_value: float | None = None,
     ) -> tuple[float, float, float]:
-        """Return (position_size_units, risk_amount, position_value)."""
+        """Return (position_size_units, risk_amount, position_value).
+
+        Parameters
+        ----------
+        balance : float
+            Current account equity / free balance.
+        risk_pct : float
+            Max % of *balance* to risk on this trade (e.g. 2.0).
+        entry_price : float
+            Expected entry price.
+        stop_price : float
+            Stop-loss price.
+        max_position_value : float | None
+            Hard cap on the notional position value (e.g. 60 % of equity).
+            If ``None`` no cap is applied (fallback to old behaviour).
+
+        Returns
+        -------
+        (position_size, risk_amount, position_value)
+        """
         stop_distance = entry_price - stop_price
         if stop_distance <= 0:
             return 0.0, 0.0, 0.0
@@ -180,6 +206,12 @@ class PositionSizer:
         risk_amount = balance * (risk_pct / 100.0)
         position_size = risk_amount / stop_distance
         position_value = position_size * entry_price
+
+        # ── Cap notional position value ──────────────────────────────
+        if max_position_value is not None and position_value > max_position_value:
+            position_value = max_position_value
+            position_size = position_value / entry_price if entry_price > 0 else 0.0
+            risk_amount = position_size * stop_distance
 
         return position_size, risk_amount, position_value
 
@@ -363,13 +395,16 @@ class RiskManager:
         risk_per_trade: float = MAX_RISK_PER_TRADE_PCT,
         max_daily_loss: float = MAX_DAILY_LOSS_PCT,
         max_positions: int = MAX_OPEN_POSITIONS,
+        max_position_size_pct: float = MAX_POSITION_SIZE_PCT,
     ) -> None:
         self.balance = balance
         self.risk_per_trade = risk_per_trade
         self.max_daily_loss_amt = balance * (max_daily_loss / 100.0)
         self.max_positions = max_positions
+        self.max_position_size_pct = max_position_size_pct
         self.validator = TradeValidator()
         self.results: list[RiskResult] = []
+        self._used_capital = 0.0
 
     def run(self) -> list[RiskResult]:
         """Full risk-management pipeline."""
@@ -414,10 +449,15 @@ class RiskManager:
                 (scanner.price - stop_price) / scanner.price * 100.0
             )
 
-            # Position size
+            # Available capital (account equity minus already-approved positions)
+            available_capital = max(0.0, self.balance - self._used_capital)
+            max_pos_value = available_capital * self.max_position_size_pct
+
+            # Position size (capped to protect account)
             pos_size, risk_amt, pos_value = PositionSizer.calculate(
                 self.balance, self.risk_per_trade,
                 scanner.price, stop_price,
+                max_position_value=max_pos_value,
             )
 
             # Take profits
@@ -452,6 +492,7 @@ class RiskManager:
 
             if approval == "APPROVED":
                 approved_count += 1
+                self._used_capital += pos_value
 
             results.append(RiskResult(
                 symbol=dec.symbol,

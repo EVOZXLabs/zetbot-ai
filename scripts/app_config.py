@@ -66,6 +66,7 @@ class AppConfig:
     min_volume_24h: float = 100_000.0
     stop_atr_multiplier: float = 1.5
     stop_fixed_pct: float = 5.0
+    max_position_size_pct: float = 0.6
 
     # Position manager
     trail_atr_multiplier: float = 2.0
@@ -109,6 +110,7 @@ def load_config() -> AppConfig:
         min_volume_24h=float(os.getenv("MIN_VOLUME_24H", "100000")),
         stop_atr_multiplier=float(os.getenv("STOP_ATR_MULTIPLIER", "1.5")),
         stop_fixed_pct=float(os.getenv("STOP_FIXED_PCT", "5.0")),
+        max_position_size_pct=float(os.getenv("MAX_POSITION_SIZE_PCT", "0.6")),
         trail_atr_multiplier=float(os.getenv("TRAIL_ATR_MULTIPLIER", "2.0")),
         max_holding_candles=int(os.getenv("MAX_HOLDING_CANDLES", "48")),
         tp1_sell_pct=float(os.getenv("TP1_SELL_PCT", "30.0")),

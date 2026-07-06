@@ -94,7 +94,15 @@ class EquitySnapshot:
 
 
 class VirtualWallet:
-    """Tracks virtual USDT balance and margin."""
+    """Tracks virtual USDT balance and margin.
+
+    Accounting rules (spot):
+        equity   = free_balance + position_market_value
+        free     = balance (all free USDT, since no margin in spot)
+        used     = cost basis of open positions (not tracked here)
+        realized_pnl  = cumulative closed P&L
+        unrealized_pnl = sum of open position floating P&L
+    """
 
     def __init__(self, initial: float = INITIAL_BALANCE) -> None:
         self.initial = initial
@@ -132,10 +140,12 @@ class VirtualWallet:
 
     def snapshot(self, position_value: float = 0.0,
                  unrealized_pnl_value: float = 0.0) -> EquitySnapshot:
+        """"""
+        equity = self.balance + position_value
         return EquitySnapshot(
             timestamp=datetime.now(timezone.utc).isoformat(),
             balance=round(self.balance, 2),
-            equity=round(self.balance + position_value, 2),
+            equity=round(equity, 2),
             unrealized_pnl=round(unrealized_pnl_value, 2),
             margin_used=round(self.margin_used, 2),
             free_balance=round(self.free_balance, 2),
