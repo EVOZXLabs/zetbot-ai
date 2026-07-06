@@ -100,6 +100,7 @@ class Position:
     trailing_active: bool
     holding_candles: int
     holding_hours: float
+    entry_time: str
     status: str
 
 
@@ -360,6 +361,7 @@ class PositionSimulator:
             trailing_active=trailing_active,
             holding_candles=holding_candles,
             holding_hours=round(holding_hours, 1),
+            entry_time=plan.signal_time,
             status=status,
         )
 
@@ -375,6 +377,16 @@ class PositionManager:
     def __init__(self) -> None:
         self.positions: list[Position] = []
 
+    @staticmethod
+    def _load_previous_positions(path: str) -> dict[str, dict]:
+        """Load previous positions.json as a dict keyed by symbol."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            return {p["symbol"]: p for p in data.get("positions", [])}
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
     def run(self) -> list[Position]:
         """Full position management pipeline."""
         print(f"\n  {'=' * 78}")
@@ -388,7 +400,9 @@ class PositionManager:
         print("  [1/4] Loading data … ", end="", flush=True)
         plans = DataLoader.load_plans(TRADE_PLAN_PATH)
         prices = DataLoader.load_prices(SCANNER_PATH)
-        print(f"{len(plans)} plans, {len(prices)} scanner prices")
+        prev_positions = self._load_previous_positions("data/positions.json")
+        print(f"{len(plans)} plans, {len(prices)} scanner prices, "
+              f"{len(prev_positions)} prev positions")
 
         if not plans:
             print("  No READY plans found.  Exiting.")
@@ -409,6 +423,14 @@ class PositionManager:
                 cur_price = sp.price
                 atr_pct = sp.atr_pct
                 trend = sp.trend_alignment
+
+            prev = prev_positions.get(plan.symbol)
+            if prev:
+                prev_entry_time = prev.get("entry_time", "")
+                if prev_entry_time and prev.get("status") in (
+                    "OPEN", "PARTIAL", "TRAILING", "BREAKEVEN",
+                ):
+                    plan.signal_time = prev_entry_time
 
             pos = PositionSimulator.simulate(
                 plan, cur_price, atr_pct, trend, now,
@@ -537,7 +559,7 @@ class PositionExport:
             "tp1_hit", "tp2_hit", "tp3_hit",
             "breakeven_active", "trailing_active",
             "holding_candles", "holding_hours",
-            "status",
+            "entry_time", "status",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)

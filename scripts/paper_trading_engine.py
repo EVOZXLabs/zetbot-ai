@@ -26,6 +26,7 @@ from typing import Any
 
 TRADE_PLAN_PATH = "data/trade_plan.json"
 POSITIONS_PATH = "data/positions.json"
+STATE_PATH = "data/paper_state.json"
 
 INITIAL_BALANCE = 10_000.0
 TAKER_FEE = 0.001           # 0.1 %
@@ -76,6 +77,10 @@ class VirtualPosition:
     total_pnl: float
     cost_basis: float
     status: str              # OPEN | CLOSED
+    tp1_sold: bool = False   # TP level already executed
+    tp2_sold: bool = False
+    tp3_sold: bool = False
+    opened_at: str = ""      # ISO timestamp of first open
 
 
 @dataclass
@@ -115,6 +120,7 @@ class VirtualWallet:
 
     @property
     def equity(self) -> float:
+        """USDT equity = free balance (spot accounts have no margin)."""
         return self.balance
 
     def reserve(self, amount: float) -> bool:
@@ -289,6 +295,51 @@ class PaperTradingEngine:
         self.positions: dict[str, VirtualPosition] = {}
         self.equity_history: list[EquitySnapshot] = []
         self.metrics: dict[str, Any] = {}
+        self._load_state()
+
+    # ------------------------------------------------------------------
+    #  State persistence (cross-cycle)
+    # ------------------------------------------------------------------
+
+    def _load_state(self) -> None:
+        """Restore wallet, orders, positions, and equity history.
+
+        If ``STATE_PATH`` does not exist the engine starts fresh with
+        initial balance.
+        """
+        try:
+            with open(STATE_PATH) as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+
+        self.wallet.balance = state.get("balance", INITIAL_BALANCE)
+        self.wallet.margin_used = state.get("margin_used", 0.0)
+        self.orders = [Order(**o) for o in state.get("orders", [])]
+        self.positions = {
+            sym: VirtualPosition(**vp)
+            for sym, vp in state.get("positions", {}).items()
+        }
+        self.equity_history = [
+            EquitySnapshot(**s) for s in state.get("equity_history", [])
+        ]
+
+    def _save_state(self) -> None:
+        """Persist wallet, orders, positions, and equity history."""
+        os.makedirs("data", exist_ok=True)
+        state = {
+            "version": 1,
+            "balance": self.wallet.balance,
+            "margin_used": self.wallet.margin_used,
+            "orders": [asdict(o) for o in self.orders],
+            "positions": {
+                sym: asdict(vp)
+                for sym, vp in self.positions.items()
+            },
+            "equity_history": [asdict(s) for s in self.equity_history],
+        }
+        with open(STATE_PATH, "w") as f:
+            json.dump(state, f, indent=2, default=str)
 
     def run(self) -> dict[str, Any]:
         """Full paper trading pipeline."""
@@ -309,14 +360,21 @@ class PaperTradingEngine:
         print(f"{len(plans)} plans, {len(pos_map)} position states")
 
         if not plans:
+            self._save_state()
             print("  No READY plans.  Exiting.")
             return {}
 
         # 2. Execute orders (best confidence first)
         print("  [2/5] Executing orders …", flush=True)
         plans.sort(key=lambda p: p.get("confidence", 0), reverse=True)
+        reconciled_symbols: set[str] = set()
         for plan in plans:
-            self._execute_plan(plan, pos_map.get(plan["symbol"]))
+            symbol = plan["symbol"]
+            # Skip re-execution for positions already open from prior runs
+            vp = self.positions.get(symbol)
+            if vp is not None and vp.status == "OPEN":
+                continue
+            self._execute_plan(plan, pos_map.get(symbol))
             self.equity_history.append(
                 self.wallet.snapshot(
                     position_value=self._total_position_value(),
@@ -327,13 +385,29 @@ class PaperTradingEngine:
         # 3. Reconcile with positions
         print("  [3/5] Reconciling positions …", flush=True)
         for plan in plans:
-            self._reconcile(plan, pos_map.get(plan["symbol"]))
+            symbol = plan["symbol"]
+            self._reconcile(plan, pos_map.get(symbol))
+            reconciled_symbols.add(symbol)
             self.equity_history.append(
                 self.wallet.snapshot(
                     position_value=self._total_position_value(),
                     unrealized_pnl_value=self._total_unrealized_pnl(),
                 )
             )
+
+        # 3b. Reconcile open positions not in current plans
+        for symbol, vp in list(self.positions.items()):
+            if vp.status != "OPEN" or symbol in reconciled_symbols:
+                continue
+            pos_state = pos_map.get(symbol)
+            if pos_state is not None:
+                self._reconcile({"symbol": symbol}, pos_state)
+                self.equity_history.append(
+                    self.wallet.snapshot(
+                        position_value=self._total_position_value(),
+                        unrealized_pnl_value=self._total_unrealized_pnl(),
+                    )
+                )
 
         # 4. Compute metrics
         print("  [4/5] Computing metrics …", flush=True)
@@ -347,6 +421,8 @@ class PaperTradingEngine:
         # 5. Report
         print("  [5/5] Generating report …", flush=True)
         self._print_summary(elapsed)
+
+        self._save_state()
 
         return self.metrics
 
@@ -441,6 +517,7 @@ class PaperTradingEngine:
             realized_pnl=0.0, total_pnl=0.0,
             cost_basis=total_cost,
             status="OPEN",
+            opened_at=now_ts,
         )
 
         return order
@@ -462,17 +539,19 @@ class PaperTradingEngine:
         stop_loss = pos_state.get("stop_loss", 0.0)
 
         total_qty = vp.quantity
-        remaining_qty = total_qty
-        realized_pnl = 0.0
+        remaining_qty = vp.remaining_qty
+        realized_pnl = vp.realized_pnl
 
         # --- Process each TP hit by fraction of our own tracked qty ---
         tp_config = [
-            (tp1_hit, pos_state.get("tp1", 0.0), 0.30, "TP1"),
-            (tp2_hit, pos_state.get("tp2", 0.0), 0.30, "TP2"),
-            (tp3_hit, pos_state.get("tp3", 0.0), 0.40, "TP3"),
+            (tp1_hit, pos_state.get("tp1", 0.0), 0.30, "tp1_sold"),
+            (tp2_hit, pos_state.get("tp2", 0.0), 0.30, "tp2_sold"),
+            (tp3_hit, pos_state.get("tp3", 0.0), 0.40, "tp3_sold"),
         ]
-        for hit, price, fraction, label in tp_config:
+        for hit, price, fraction, sold_attr in tp_config:
             if not hit:
+                continue
+            if getattr(vp, sold_attr, False):
                 continue
             sell_qty = total_qty * fraction
             sell_qty = min(sell_qty, remaining_qty)
@@ -506,9 +585,18 @@ class PaperTradingEngine:
                 created_at=now_ts, filled_at=now_ts, closed_at=now_ts,
             ))
 
+            setattr(vp, sold_attr, True)
             remaining_qty -= sell_qty
 
         # --- Full close (STOPPED / CLOSED / TIMEOUT) ---
+        if remaining_qty <= 0:
+            vp.status = "CLOSED"
+            vp.remaining_qty = 0.0
+            vp.unrealized_pnl = 0.0
+            vp.realized_pnl = round(realized_pnl, 2)
+            vp.total_pnl = round(realized_pnl, 2)
+            return
+
         if pos_status in ("CLOSED", "STOPPED", "TIMEOUT") and remaining_qty > 0.0:
             exit_price = current_price
             if pos_status == "STOPPED":
