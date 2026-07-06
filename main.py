@@ -281,7 +281,7 @@ def main() -> None:
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
-    health = HealthMonitor(logger, interval=60.0)
+    health = HealthMonitor(logger, config, interval=60.0)
     health.start()
     logger.info("Health Monitor started (every 60s)")
 

@@ -117,6 +117,20 @@ class PipelineLogger:
         self._write_console(f"[{self._ts()}] ERROR  {message}")
         self._write_log(f"ERROR  {message}")
 
+    def warning(self, message: str) -> None:
+        """Log a warning message."""
+        self._write_console(f"[{self._ts()}] WARNING  {message}")
+        self._write_log(f"WARNING  {message}")
+
+    def debug(self, message: str) -> None:
+        """Log a debug message."""
+        self._write_log(f"DEBUG  {message}")
+
+    def critical(self, message: str) -> None:
+        """Log a critical message."""
+        self._write_console(f"[{self._ts()}] CRITICAL  {message}")
+        self._write_log(f"CRITICAL  {message}")
+
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------

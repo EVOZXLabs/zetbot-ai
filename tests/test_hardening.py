@@ -243,65 +243,8 @@ class TestConfigValidation:
 class TestHealthMonitor:
     """Health monitor startup, metrics gathering, shutdown."""
 
-    def test_health_monitor_start_stop(self) -> None:
-        from scripts.health import HealthMonitor
-        monitor = HealthMonitor(logger=_FakeLogger(), interval=0.1)
-        monitor.start()
-        time.sleep(0.3)
-        monitor.stop()
-        assert not monitor._running
-
-    def test_health_monitor_gathers_metrics(self) -> None:
-        from scripts.health import HealthMonitor
-        monitor = HealthMonitor(logger=_FakeLogger(), interval=60.0)
-        metrics = monitor._gather()
-        assert "uptime_sec" in metrics
-        assert "rss_kb" in metrics
-        assert "thread_count" in metrics
-        assert "process_cpu_sec" in metrics
-
-    def test_health_monitor_logs_metrics(self) -> None:
-        from scripts.health import HealthMonitor
-        logger = _FakeLogger()
-        monitor = HealthMonitor(logger=logger, interval=0.1)
-        monitor.start()
-        time.sleep(0.35)
-        monitor.stop()
-        logged = logger.get_lines()
-        health_lines = [l for l in logged if "HEALTH" in l]
-        assert len(health_lines) >= 1, f"Expected HEALTH log lines, got {logged}"
-
-    def test_snapshot_returns_cached_metrics(self) -> None:
-        from scripts.health import HealthMonitor
-        monitor = HealthMonitor(logger=_FakeLogger(), interval=60.0)
-        snap = monitor.snapshot()
-        assert "uptime_sec" in snap
-        assert "rss_kb" in snap
-        assert "thread_count" in snap
-        assert "process_cpu_sec" in snap
-        assert snap["thread_count"] >= 1
-
-    def test_snapshot_returns_copy(self) -> None:
-        from scripts.health import HealthMonitor
-        monitor = HealthMonitor(logger=_FakeLogger(), interval=60.0)
-        snap1 = monitor.snapshot()
-        snap2 = monitor.snapshot()
-        assert snap1 == snap2
-
-    def test_snapshot_updated_by_background_thread(self) -> None:
-        from scripts.health import HealthMonitor
-        logger = _FakeLogger()
-        monitor = HealthMonitor(logger=logger, interval=0.2)
-        snap_before = monitor.snapshot()
-        monitor.start()
-        time.sleep(0.5)
-        snap_after = monitor.snapshot()
-        monitor.stop()
-        assert snap_after["uptime_sec"] >= snap_before["uptime_sec"]
-
-    def test_snapshot_no_health_monitor(self) -> None:
-        from scripts.telegram_commands import TelegramCommandCenter
-        cfg = AppConfig(
+    def _make_config(self) -> AppConfig:
+        return AppConfig(
             account_balance=10000, exchange="binance", timeframe="1h",
             max_positions=3, max_risk_per_trade_pct=2,
             scanner_threads=5, scanner_top_n=50,
@@ -311,15 +254,74 @@ class TestHealthMonitor:
             tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
             slippage_bps=3,
         )
+
+    def test_health_monitor_start_stop(self) -> None:
+        from scripts.health import HealthMonitor
+        monitor = HealthMonitor(logger=_FakeLogger(), config=self._make_config(), interval=0.1)
+        monitor.start()
+        time.sleep(0.3)
+        monitor.stop()
+        assert not monitor._running
+
+    def test_health_monitor_gathers_metrics(self) -> None:
+        from scripts.health import HealthMonitor
+        monitor = HealthMonitor(logger=_FakeLogger(), config=self._make_config(), interval=60.0)
+        metrics = monitor._gather()
+        assert "uptime_sec" in metrics
+        assert "rss_kb" in metrics
+        assert "thread_count" in metrics
+        assert "process_cpu_sec" in metrics
+
+    def test_health_monitor_logs_metrics(self) -> None:
+        from scripts.health import HealthMonitor
+        logger = _FakeLogger()
+        monitor = HealthMonitor(logger=logger, config=self._make_config(), interval=0.1)
+        monitor.start()
+        time.sleep(0.35)
+        monitor.stop()
+        logged = logger.get_lines()
+        health_lines = [l for l in logged if "HEALTH" in l]
+        assert len(health_lines) >= 1, f"Expected HEALTH log lines, got {logged}"
+
+    def test_snapshot_returns_cached_metrics(self) -> None:
+        from scripts.health import HealthMonitor
+        monitor = HealthMonitor(logger=_FakeLogger(), config=self._make_config(), interval=60.0)
+        snap = monitor.snapshot()
+        assert "uptime_sec" in snap
+        assert "rss_kb" in snap
+        assert "thread_count" in snap
+        assert "process_cpu_sec" in snap
+        assert snap["thread_count"] >= 1
+
+    def test_snapshot_returns_copy(self) -> None:
+        from scripts.health import HealthMonitor
+        monitor = HealthMonitor(logger=_FakeLogger(), config=self._make_config(), interval=60.0)
+        snap1 = monitor.snapshot()
+        snap2 = monitor.snapshot()
+        assert snap1 == snap2
+
+    def test_snapshot_updated_by_background_thread(self) -> None:
+        from scripts.health import HealthMonitor
+        logger = _FakeLogger()
+        monitor = HealthMonitor(logger=logger, config=self._make_config(), interval=0.2)
+        snap_before = monitor.snapshot()
+        monitor.start()
+        time.sleep(0.5)
+        snap_after = monitor.snapshot()
+        monitor.stop()
+        assert snap_after["uptime_sec"] >= snap_before["uptime_sec"]
+
+    def test_snapshot_no_health_monitor(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+        cfg = self._make_config()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=None)
         result = center._cmd_health("/health")
         assert result is not None
-        assert "Health Score" in result
-        assert "System" in result
-        assert "Resources" in result
-        assert "Components" in result
-        assert "Trading" in result
-        assert "Timestamps" in result
+        assert "*Score:*" in result or "Score:" in result
+        assert "*System*" in result
+        assert "*Resources*" in result
+        assert "*Components*" in result
+        assert "*Account*" in result or "Account" in result
 
     def test_format_metrics(self) -> None:
         from scripts.health import _format_metrics
@@ -328,11 +330,15 @@ class TestHealthMonitor:
             "rss_kb": 102400,
             "thread_count": 5,
             "process_cpu_sec": 12.5,
+            "internet_ok": True,
+            "exchange_ok": True,
         })
         assert "01h01m01s" in result
         assert "100.0MB" in result
         assert "threads=5" in result
         assert "cpu=12.5s" in result
+        assert "internet=OK" in result
+        assert "exchange=OK" in result
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +362,7 @@ class TestHealthCommand:
 
     def _make_health_monitor(self) -> Any:
         from scripts.health import HealthMonitor
-        return HealthMonitor(logger=_FakeLogger(), interval=60.0)
+        return HealthMonitor(logger=_FakeLogger(), config=self._make_config(), interval=60.0)
 
     def test_health_contains_all_required_sections(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -364,12 +370,13 @@ class TestHealthCommand:
         health = self._make_health_monitor()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
-        assert "ZetBot Health Status" in result
-        assert "Health Score:" in result
+        assert "*ZetBot" in result
+        assert "*Score:*" in result
         assert "*System*" in result
         assert "*Resources*" in result
         assert "*Components*" in result
-        assert "*Trading*" in result
+        assert "*Account*" in result
+        assert "*Positions*" in result
         assert "*Timestamps*" in result
 
     def test_health_contains_required_fields(self) -> None:
@@ -380,19 +387,20 @@ class TestHealthCommand:
         result = center._cmd_health("/health")
         assert "Uptime:" in result
         assert "Mode:" in result
-        assert "Exchange:" in result
-        assert "Timeframe:" in result
         assert "CPU:" in result
         assert "Memory:" in result
         assert "Threads:" in result
         assert "Internet:" in result
         assert "Telegram:" in result
         assert "Scanner:" in result
-        assert "Open Positions:" in result
-        assert "Total Trades:" in result
+        assert "Open:" in result
+        assert "Total:" in result
+        assert "Equity:" in result
         assert "Balance:" in result
+        assert "Net PnL:" in result
+        assert "Win Rate:" in result
         assert "Last Scan:" in result
-        assert "Last API Call:" in result
+        assert "Last Trade:" in result
 
     def test_health_shows_correct_mode(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -401,8 +409,6 @@ class TestHealthCommand:
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
         assert "PAPER" in result
-        assert "binance" in result
-        assert "1h" in result
 
     def test_health_includes_status_icons(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -421,8 +427,8 @@ class TestHealthCommand:
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
         import re
-        match = re.search(r"Health Score:.*?`(\d+)/100`", result)
-        assert match is not None, f"Could not find Health Score in:\n{result}"
+        match = re.search(r"\*Score:\*.*?`(\d+)/100`", result)
+        assert match is not None, f"Could not find Score in:\n{result}"
         score = int(match.group(1))
         assert 0 <= score <= 100
 
@@ -440,8 +446,8 @@ class TestHealthCommand:
         cfg = self._make_config()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=None)
         result = center._cmd_health("/health")
-        assert "Health Score:" in result
-        assert "0/100" in result or "/100" in result
+        assert "*Score:*" in result
+        assert "/100" in result
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +497,12 @@ class _FakeLogger:
 
     def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._lines.append(f"WARN {msg % args if args else msg}")
+
+    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._lines.append(f"DEBUG {msg % args if args else msg}")
+
+    def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._lines.append(f"CRIT {msg % args if args else msg}")
 
     def get_lines(self) -> list[str]:
         return list(self._lines)
