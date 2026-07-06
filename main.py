@@ -229,9 +229,8 @@ def main() -> None:
     pid_file = PidFile(os.path.join(config.data_dir, "zetbot.pid"))
     if not pid_file.acquire():
         logger.error(
-            "Another ZetBot instance is already running "
-            "(PID file: %s/zetbot.pid) — exiting",
-            config.data_dir,
+            f"Another ZetBot instance is already running "
+            f"(PID file: {config.data_dir}/zetbot.pid) — exiting",
         )
         sys.exit(1)
     atexit.register(pid_file.release)
