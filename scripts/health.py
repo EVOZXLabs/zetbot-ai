@@ -2,7 +2,7 @@
 Health Monitor for ZetBot AI.
 
 Periodically checks real component health (internet, exchange, pipeline
-data) in addition to system metrics.  Runs as a background daemon thread.
+data) in addition to system metrics.  Runs as a background thread.
 
 Usage::
 
@@ -37,10 +37,12 @@ class HealthMonitor:
         logger: PipelineLogger,
         config: AppConfig,
         interval: float = 60.0,
+        shutdown_event: threading.Event | None = None,
     ) -> None:
         self._logger = logger
         self._config = config
         self._interval = interval
+        self._shutdown_event = shutdown_event
         self._start_time: float = time.time()
         self._running: bool = False
         self._thread: threading.Thread | None = None
@@ -53,12 +55,13 @@ class HealthMonitor:
         self._thread = threading.Thread(
             target=self._run,
             name="HealthMonitor",
-            daemon=True,
         )
         self._thread.start()
 
     def stop(self) -> None:
         self._running = False
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
 
@@ -73,7 +76,13 @@ class HealthMonitor:
 
     def _run(self) -> None:
         while self._running:
-            time.sleep(self._interval)
+            if self._shutdown_event is not None:
+                self._shutdown_event.wait(timeout=self._interval)
+                if self._shutdown_event.is_set():
+                    self._running = False
+                    break
+            else:
+                time.sleep(self._interval)
             if not self._running:
                 break
             self._last_snapshot = self._gather()

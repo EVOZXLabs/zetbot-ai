@@ -249,6 +249,9 @@ class TelegramCommandCenter:
         return data.get("result", [])
 
     def _process_update(self, update: dict[str, Any]) -> None:
+        if not self._running:
+            return
+
         update_id = update.get("update_id", 0)
         if update_id > self._last_update_id:
             self._last_update_id = update_id

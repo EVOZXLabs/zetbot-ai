@@ -159,7 +159,7 @@ def _start_worker(
     target: Any,
     logger: PipelineLogger,
 ) -> threading.Thread | None:
-    """Start a daemon worker thread if no thread with *name* exists.
+    """Start a worker thread if no thread with *name* exists.
 
     Returns the thread on success, None if a zombie duplicate was found.
     """
@@ -169,7 +169,7 @@ def _start_worker(
             name,
         )
         return None
-    t = threading.Thread(target=target, name=name, daemon=True)
+    t = threading.Thread(target=target, name=name)
     t.start()
     return t
 
@@ -293,7 +293,7 @@ def main() -> None:
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
-    health = HealthMonitor(logger, config, interval=60.0)
+    health = HealthMonitor(logger, config, interval=60.0, shutdown_event=shutdown)
     health.start()
     logger.info("Health Monitor started (every 60s)")
 
@@ -395,7 +395,10 @@ def main() -> None:
 
     logger.info("Shutting down...")
 
-    # Stop health monitor first
+    # Signal all workers to stop immediately
+    shutdown.set()
+
+    # Stop health monitor first (sets shutdown_event, breaks out of sleep)
     health.stop()
 
     # Stop Telegram command center
@@ -416,6 +419,19 @@ def main() -> None:
     logger.info("PID lock released")
 
     logger.info("ZetBot AI stopped")
+
+    # Suppress stdout/stderr to prevent late print() calls from
+    # crashing during interpreter finalization (Fatal Python error:
+    # _enter_buffered_busy).  After this point log messages go to
+    # devnull but still reach the log file.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        null = os.devnull
+        sys.stdout = open(null, "w")
+        sys.stderr = open(null, "w")
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

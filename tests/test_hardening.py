@@ -480,6 +480,101 @@ class TestZombieDetection:
 
 
 # ---------------------------------------------------------------------------
+#  Shutdown regression tests
+# ---------------------------------------------------------------------------
+
+class TestShutdown:
+    """Graceful shutdown must produce no fatal interpreter errors."""
+
+    @staticmethod
+    def _project_root() -> str:
+        return os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..")
+        )
+
+    def test_clean_shutdown_via_signal_file(self) -> None:
+        """Start bot in test mode, trigger shutdown via signal file,
+        verify clean exit with no fatal interpreter errors."""
+        import subprocess
+        env = {**os.environ, "TEST_MODE": "true"}
+        root = self._project_root()
+        proc = subprocess.Popen(
+            [sys.executable, "main.py"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
+        )
+        try:
+            # Wait for bot to initialize
+            time.sleep(4)
+
+            # Write shutdown signal file in project root
+            data_dir = os.path.join(root, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            with open(os.path.join(data_dir, ".shutdown_requested"), "w") as f:
+                f.write("shutdown test")
+
+            # Wait for process to exit
+            stdout, stderr = proc.communicate(timeout=25)
+            assert proc.returncode == 0, (
+                f"Exit code {proc.returncode}\n"
+                f"stdout:\n{stdout.decode()}\n\n"
+                f"stderr:\n{stderr.decode()}"
+            )
+            stderr_text = stderr.decode()
+            assert "Fatal Python error" not in stderr_text, (
+                f"Fatal error in stderr:\n{stderr_text}"
+            )
+            assert "_enter_buffered_busy" not in stderr_text, (
+                f"Buffer error in stderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            try:
+                os.remove(os.path.join(root, "data", ".shutdown_requested"))
+            except OSError:
+                pass
+
+    def test_clean_shutdown_via_signal(self) -> None:
+        """Start bot in test mode, send SIGTERM, verify clean exit."""
+        import subprocess
+        env = {**os.environ, "TEST_MODE": "true"}
+        root = self._project_root()
+        proc = subprocess.Popen(
+            [sys.executable, "main.py"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
+        )
+        try:
+            # Wait for bot to initialize
+            time.sleep(4)
+
+            # Send SIGTERM (handled same as SIGINT by _shutdown_handler)
+            proc.send_signal(signal.SIGTERM)
+
+            # Wait for process to exit
+            stdout, stderr = proc.communicate(timeout=25)
+            assert proc.returncode == 0, (
+                f"Exit code {proc.returncode}\n"
+                f"stdout:\n{stdout.decode()}\n\n"
+                f"stderr:\n{stderr.decode()}"
+            )
+            stderr_text = stderr.decode()
+            assert "Fatal Python error" not in stderr_text, (
+                f"Fatal error in stderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
+# ---------------------------------------------------------------------------
 #  Helpers
 # ---------------------------------------------------------------------------
 
