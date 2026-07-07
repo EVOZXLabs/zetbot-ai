@@ -13,11 +13,12 @@ Usage::
 
 import csv
 import json
+import logging
 import math
 import os
 import time
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -324,6 +325,75 @@ class PaperTradingEngine:
             EquitySnapshot(**s) for s in state.get("equity_history", [])
         ]
 
+    # ------------------------------------------------------------------
+    #  Telegram notification helper
+    # ------------------------------------------------------------------
+
+    def _notify_buy(self, plan: dict, fill_price: float, order_id: str) -> None:
+        """Send BUY OPENED Telegram notification."""
+        try:
+            from bot.telegram import TelegramNotifier
+            import bot.config as bot_cfg
+            bot_cfg.CONFIG.update({
+                "telegram_enabled": bool(os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"),
+                "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
+                "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+                "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", "10")),
+                "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
+            })
+            notifier = TelegramNotifier()
+            notifier.buy_opened(
+                symbol=plan["symbol"],
+                timeframe="1h",
+                exchange=os.getenv("EXCHANGE", "binance"),
+                entry_price=fill_price,
+                quantity=plan.get("quantity", 0),
+                position_size=plan.get("position_size_usdt", 0),
+                stop_loss=plan.get("stop_loss", 0),
+                take_profit=plan.get("tp1", 0),
+                reasons=plan.get("reasons", ["Paper trade executed"]),
+            )
+        except Exception as exc:
+            logging.getLogger("ZetBot").warning(
+                "Failed to send BUY notification: %s", exc
+            )
+
+    def _notify_close(
+        self,
+        symbol: str,
+        exit_price: float,
+        total_pnl: float,
+        balance: float,
+        exit_reason: str,
+        holding_time: timedelta,
+        entry_price: float,
+    ) -> None:
+        """Send trade closed Telegram notification."""
+        try:
+            from bot.telegram import TelegramNotifier
+            import bot.config as bot_cfg
+            bot_cfg.CONFIG.update({
+                "telegram_enabled": bool(os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"),
+                "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
+                "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+                "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", "10")),
+                "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
+            })
+            notifier = TelegramNotifier()
+            pnl_pct = (total_pnl / (entry_price * 1)) * 100 if entry_price > 0 else 0.0
+            notifier.trade_closed(
+                exit_price=exit_price,
+                pnl_usd=total_pnl,
+                pnl_pct=pnl_pct,
+                balance=balance,
+                exit_reason=exit_reason,
+                holding_time=holding_time,
+            )
+        except Exception as exc:
+            logging.getLogger("ZetBot").warning(
+                "Failed to send close notification: %s", exc
+            )
+
     def _save_state(self) -> None:
         """Persist wallet, orders, positions, and equity history."""
         os.makedirs("data", exist_ok=True)
@@ -520,6 +590,9 @@ class PaperTradingEngine:
             opened_at=now_ts,
         )
 
+        # Send BUY OPENED notification
+        self._notify_buy(plan, fill_price, order_id)
+
         return order
 
     def _reconcile(self, plan: dict, pos_state: dict | None) -> None:
@@ -595,6 +668,19 @@ class PaperTradingEngine:
             vp.unrealized_pnl = 0.0
             vp.realized_pnl = round(realized_pnl, 2)
             vp.total_pnl = round(realized_pnl, 2)
+
+            # Determine exit reason: all filled via TP hits
+            exit_reason = "Take Profit"
+            holding_time = self._calc_holding_time(vp.opened_at, now_ts)
+            self._notify_close(
+                symbol=vp.symbol,
+                exit_price=vp.current_price,
+                total_pnl=vp.total_pnl,
+                balance=self.wallet.balance,
+                exit_reason=exit_reason,
+                holding_time=holding_time,
+                entry_price=vp.entry_price,
+            )
             return
 
         if pos_status in ("CLOSED", "STOPPED", "TIMEOUT") and remaining_qty > 0.0:
@@ -637,6 +723,27 @@ class PaperTradingEngine:
             vp.realized_pnl = round(realized_pnl, 2)
             vp.unrealized_pnl = 0.0
             vp.total_pnl = round(realized_pnl, 2)
+
+            # Determine exit reason
+            if pos_status == "STOPPED":
+                exit_reason = "Stop Loss"
+            elif pos_status == "TIMEOUT":
+                exit_reason = "Strategy Exit"
+            elif tp3_hit or tp2_hit or tp1_hit:
+                exit_reason = "Take Profit"
+            else:
+                exit_reason = "Strategy Exit"
+
+            holding_time = self._calc_holding_time(vp.opened_at, now_ts)
+            self._notify_close(
+                symbol=vp.symbol,
+                exit_price=exit_price,
+                total_pnl=vp.total_pnl,
+                balance=self.wallet.balance,
+                exit_reason=exit_reason,
+                holding_time=holding_time,
+                entry_price=vp.entry_price,
+            )
         else:
             cost_remaining = vp.cost_basis * (remaining_qty / total_qty) \
                 if total_qty > 0 else 0.0
@@ -647,6 +754,15 @@ class PaperTradingEngine:
             )
             vp.realized_pnl = round(realized_pnl, 2)
             vp.total_pnl = round(vp.realized_pnl + vp.unrealized_pnl, 2)
+
+    def _calc_holding_time(self, opened_at: str, closed_at: str) -> timedelta:
+        """Calculate holding duration between two ISO timestamps."""
+        try:
+            open_dt = datetime.fromisoformat(opened_at)
+            close_dt = datetime.fromisoformat(closed_at)
+            return close_dt - open_dt
+        except (ValueError, TypeError):
+            return timedelta()
 
     def _total_position_value(self) -> float:
         return sum(p.current_price * p.remaining_qty for p in self.positions.values()

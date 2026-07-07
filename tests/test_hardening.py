@@ -396,7 +396,7 @@ class TestHealthCommand:
         assert "Open:" in result
         assert "Total:" in result
         assert "Equity:" in result
-        assert "Balance:" in result
+        assert "Cash:" in result
         assert "Net PnL:" in result
         assert "Win Rate:" in result
         assert "Last Scan:" in result

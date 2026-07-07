@@ -123,13 +123,16 @@ def _build_summary(
     net_pnl = paper_balance.get("net_pnl", 0.0)
     win_rate = paper_balance.get("win_rate", 0.0)
     total_trades = paper_balance.get("total_trades", 0)
-    if total_trades > 0:
-        lines.append(f"Win rate            : {win_rate:.1f}%")
-    lines.append(f"USDT balance        : ${balance:>10,.2f}")
-    lines.append(f"Equity              : ${equity:>10,.2f}")
+    wins = paper_balance.get("winning_trades", 0)
+    losses = paper_balance.get("losing_trades", 0)
+    lines.append(f"Today's trades      : {total_trades}  (W:{wins} L:{losses})")
+    lines.append(f"Win rate            : {win_rate:.1f}%")
     lines.append(f"Realized PnL        : ${realized:>+10,.2f}")
     lines.append(f"Unrealized PnL      : ${unrealized:>+10,.2f}")
     lines.append(f"Net PnL             : ${net_pnl:>+10,.2f}")
+    lines.append(f"USDT balance        : ${balance:>10,.2f}")
+    lines.append(f"Equity              : ${equity:>10,.2f}")
+    lines.append(f"Cash                : ${balance:>10,.2f}")
 
     # Stage execution times
     lines.append("")
@@ -216,7 +219,17 @@ def main() -> None:
 
     # Initialize logger
     logger = PipelineLogger(config)
-    logger.info(f"ZetBot AI — Daemon v0.5.0")
+    import subprocess, sys
+    git_commit = "?"
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            git_commit = r.stdout.strip()
+    except Exception:
+        pass
+    logger.info(f"ZetBot AI — Daemon v0.5.0 (git: {git_commit})")
+    logger.info(f"Python : {sys.version.split()[0]}")
     logger.info(f"Exchange : {config.exchange}")
     logger.info(f"Timeframe: {config.timeframe}")
     logger.info(f"Balance  : ${config.account_balance:>8,.2f}")
@@ -301,6 +314,8 @@ def main() -> None:
             config,
             test_mode=test_mode,
             health_monitor=health,
+            shutdown_event=shutdown,
+            pid_file=pid_file,
         )
         tg_thread = _start_worker(
             "TelegramCmd",
@@ -332,6 +347,16 @@ def main() -> None:
             if shutdown.is_set():
                 break
 
+            # -- Check for shutdown signal file -------------------------
+            if os.path.exists("data/.shutdown_requested"):
+                logger.info("Shutdown signal file detected — shutting down")
+                shutdown.set()
+                try:
+                    os.remove("data/.shutdown_requested")
+                except OSError:
+                    pass
+                break
+
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():
                 logger.warning(
@@ -343,6 +368,8 @@ def main() -> None:
                     config,
                     test_mode=test_mode,
                     health_monitor=health,
+                    shutdown_event=shutdown,
+                    pid_file=pid_file,
                 )
                 new_thread = _start_worker(
                     "TelegramCmd",
@@ -376,9 +403,13 @@ def main() -> None:
         logger.info("Stopping Telegram Command Center...")
         center.stop()
         if tg_thread and tg_thread.is_alive():
-            tg_thread.join(timeout=5.0)
+            tg_thread.join(timeout=12.0)
             if tg_thread.is_alive():
-                logger.warning("Telegram thread did not stop within 5s")
+                logger.warning(
+                    "Telegram thread did not stop within timeout"
+                )
+            else:
+                logger.info("Telegram thread stopped cleanly")
 
     # Remove PID file
     pid_file.release()

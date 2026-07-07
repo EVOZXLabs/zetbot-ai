@@ -117,6 +117,8 @@ class HealthMonitor:
             "win_rate": paper_data.get("win_rate", 0.0),
             "paused": os.path.exists(f"{d}/.paused"),
             "paper_mode": self._config.paper_mode,
+            "realized_pnl": paper_data.get("realized_pnl", 0.0),
+            "unrealized_pnl": paper_data.get("unrealized_pnl", 0.0),
         }
 
 
@@ -218,6 +220,7 @@ def _format_metrics(m: dict[str, Any]) -> str:
     threads = m["thread_count"]
     internet = "OK" if m["internet_ok"] else "FAIL"
     exchange = "OK" if m["exchange_ok"] else "FAIL"
+    net_pnl = m.get("net_pnl", 0.0)
     return (
         f"uptime={hours:02.0f}h{minutes:02.0f}m{seconds:02.0f}s"
         f"  rss={rss_mb:.1f}MB"
@@ -225,4 +228,5 @@ def _format_metrics(m: dict[str, Any]) -> str:
         f"  threads={threads}"
         f"  internet={internet}"
         f"  exchange={exchange}"
+        f"  net_pnl={net_pnl:+.2f}"
     )

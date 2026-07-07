@@ -22,11 +22,16 @@ Commands::
     /summary    — Today's trading statistics
     /pause      — Disable new trade openings
     /resume     — Enable new trade openings
+    /health     — System health & status overview
+    /version    — Show ZetBot version information
+    /shutdown   — Shut down the bot gracefully
     /help       — List all available commands
 """
 
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -41,13 +46,16 @@ from scripts.app_config import AppConfig, load_config
 # ---------------------------------------------------------------------------
 
 API_BASE = "https://api.telegram.org/bot{token}/{method}"
-POLL_TIMEOUT = 30          # long-poll seconds
-POLL_REQUEST_TIMEOUT = 35  # HTTP request timeout (must exceed POLL_TIMEOUT)
+POLL_TIMEOUT = 5           # short poll for responsive shutdown
+POLL_REQUEST_TIMEOUT = 10  # HTTP request timeout (must exceed POLL_TIMEOUT)
 PAUSE_FILE = "data/.paused"
+SHUTDOWN_FILE = "data/.shutdown_requested"
 DATA_DIR = "data"
 
 MAX_BACKOFF = 120   # maximum sleep between poll retries (seconds)
 BASE_DELAY = 2.0    # initial retry delay
+
+BOT_VERSION = "v0.5.0"
 
 # Test-mode simulated command sequence
 _TEST_COMMANDS = [
@@ -100,9 +108,13 @@ class TelegramCommandCenter:
         config: AppConfig,
         test_mode: bool = False,
         health_monitor: Any = None,
+        shutdown_event: Any = None,
+        pid_file: Any = None,
     ) -> None:
         self._config = config
         self._health_monitor = health_monitor
+        self._shutdown_event = shutdown_event
+        self._pid_file = pid_file
         self._token: str = config.telegram_token
         self._chat_id: str = config.telegram_chat_id
         self._timeout: int = config.telegram_timeout
@@ -110,6 +122,7 @@ class TelegramCommandCenter:
         self._start_time: float = time.time()
         self._running: bool = True
         self._test_mode: bool = test_mode
+        self._shutdown_pending: bool = False
 
         self._test_index: int = 0
         self._consecutive_errors: int = 0
@@ -122,8 +135,10 @@ class TelegramCommandCenter:
             "/balance":   self._cmd_balance,
             "/summary":   self._cmd_summary,
             "/health":    self._cmd_health,
+            "/version":   self._cmd_version,
             "/pause":     self._cmd_pause,
             "/resume":    self._cmd_resume,
+            "/shutdown":  self._cmd_shutdown,
             "/help":      self._cmd_help,
             "/start":     self._cmd_help,
         }
@@ -338,6 +353,7 @@ class TelegramCommandCenter:
             f"Trading: `{'PAUSED \u23f8\ufe0f' if paused else 'ACTIVE'}`\n"
             f"Balance: `${pb.get('final_balance', 0):,.2f}`\n"
             f"Equity: `${pb.get('final_equity', 0):,.2f}`\n"
+            f"Cash: `${pb.get('final_balance', 0):,.2f}`\n"
             f"Net PnL: `${pb.get('net_pnl', 0):+,.2f}`\n"
             f"Open Positions: `{open_pos}`\n"
             f"Closed Positions: `{closed_pos}`"
@@ -445,7 +461,7 @@ class TelegramCommandCenter:
 
         return (
             f"\U0001f4b0 *Balance*\n"
-            f"Free USDT: `${pb.get('final_balance', 0):,.2f}`\n"
+            f"Cash: `${pb.get('final_balance', 0):,.2f}`\n"
             f"Equity: `${pb.get('final_equity', 0):,.2f}`\n"
             f"Realized PnL: `${pb.get('realized_pnl', 0):+,.2f}`\n"
             f"Unrealized PnL: `${pb.get('unrealized_pnl', 0):+,.2f}`\n"
@@ -459,9 +475,12 @@ class TelegramCommandCenter:
         orders_data = _read_json(f"{DATA_DIR}/paper_orders.json")
 
         total_trades = pb.get("total_trades", 0)
-
-        if total_trades == 0:
-            return "No completed trades yet."
+        wins = pb.get("winning_trades", 0)
+        losses = pb.get("losing_trades", 0)
+        win_rate = pb.get("win_rate", 0.0)
+        realized_pnl = pb.get("realized_pnl", 0.0)
+        unrealized_pnl = pb.get("unrealized_pnl", 0.0)
+        net_pnl = pb.get("net_pnl", 0.0)
 
         closed_orders = [
             o for o in orders_data.get("orders", [])
@@ -476,15 +495,19 @@ class TelegramCommandCenter:
 
         lines = [
             f"\U0001f4ca *Trading Summary*",
-            f"Total Trades: `{total_trades}`",
-            f"Wins: `{pb.get('winning_trades', 0)}`  "
-            f"Losses: `{pb.get('losing_trades', 0)}`",
-            f"Win Rate: `{pb.get('win_rate', 0):.1f}%`",
-            f"Profit Factor: `{pb.get('profit_factor', 0):.2f}`",
-            f"Gross Profit: `${pb.get('gross_profit', 0):,.2f}`",
-            f"Gross Loss: `${pb.get('gross_loss', 0):,.2f}`",
-            f"Net Profit: `${pb.get('net_pnl', 0):+,.2f}`",
+            f"Today's Trades: `{total_trades}`",
+            f"Wins: `{wins}`  "
+            f"Losses: `{losses}`",
+            f"Win Rate: `{win_rate:.1f}%`",
+            f"Realized PnL: `${realized_pnl:+,.2f}`",
+            f"Unrealized PnL: `${unrealized_pnl:+,.2f}`",
+            f"Net PnL: `${net_pnl:+,.2f}`",
         ]
+
+        if total_trades > 0:
+            lines.insert(4, f"Profit Factor: `{pb.get('profit_factor', 0):.2f}`")
+            lines.insert(5, f"Gross Profit: `${pb.get('gross_profit', 0):,.2f}`")
+            lines.insert(6, f"Gross Loss: `${pb.get('gross_loss', 0):,.2f}`")
 
         if best:
             lines.append(
@@ -567,13 +590,13 @@ class TelegramCommandCenter:
         else:
             telegram_icon, telegram_status = "\u26aa", "Disabled"
 
-        # Resource thresholds
-        cpu_icon = "\U0001f7e2" if cpu_pct < 80 else ("\U0001f7e1" if cpu_pct < 95 else "\U0001f534")
-        cpu_label = "Healthy" if cpu_pct < 80 else ("Warning" if cpu_pct < 95 else "Critical")
-        mem_icon = "\U0001f7e2" if rss_mb < 200 else ("\U0001f7e1" if rss_mb < 500 else "\U0001f534")
-        mem_label = "Healthy" if rss_mb < 200 else ("Warning" if rss_mb < 500 else "Critical")
-        thr_icon = "\U0001f7e2" if thread_count < 30 else ("\U0001f7e1" if thread_count < 50 else "\U0001f534")
-        thr_label = "Healthy" if thread_count < 30 else ("Warning" if thread_count < 50 else "Critical")
+        # Resource thresholds (production-appropriate for a bot process)
+        cpu_icon = "\U0001f7e2" if cpu_pct < 50 else ("\U0001f7e1" if cpu_pct < 80 else "\U0001f534")
+        cpu_label = "Healthy" if cpu_pct < 50 else ("Warning" if cpu_pct < 80 else "Critical")
+        mem_icon = "\U0001f7e2" if rss_mb < 100 else ("\U0001f7e1" if rss_mb < 250 else "\U0001f534")
+        mem_label = "Healthy" if rss_mb < 100 else ("Warning" if rss_mb < 250 else "Critical")
+        thr_icon = "\U0001f7e2" if thread_count < 15 else ("\U0001f7e1" if thread_count < 30 else "\U0001f534")
+        thr_label = "Healthy" if thread_count < 15 else ("Warning" if thread_count < 30 else "Critical")
 
         # Health Score from real component state
         score = 100
@@ -622,7 +645,7 @@ class TelegramCommandCenter:
             f"Telegram:   {telegram_icon} {telegram_status}\n\n"
             f"*Account*\n"
             f"Equity:     `${equity:,.2f}`\n"
-            f"Balance:    `${balance:,.2f}`\n"
+            f"Cash:       `${balance:,.2f}`\n"
             f"Net PnL:    `${net_pnl:+,.2f}`\n"
             f"Win Rate:   `{win_rate:.1f}%`\n\n"
             f"*Positions*\n"
@@ -631,6 +654,77 @@ class TelegramCommandCenter:
             f"*Timestamps*\n"
             f"Last Scan:  `{scanner_time}`\n"
             f"Last Trade: `{api_time}`"
+        )
+
+    def _cmd_version(self, _text: str) -> str:
+        """Show ZetBot version information."""
+        git_commit = "N/A"
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                git_commit = result.stdout.strip()
+        except Exception:
+            pass
+
+        py_ver = sys.version.split()[0]
+        ccxt_ver = "N/A"
+        try:
+            import ccxt
+            ccxt_ver = ccxt.__version__
+        except Exception:
+            pass
+
+        uptime_sec = time.time() - self._start_time
+        days, rem = divmod(int(uptime_sec), 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        uptime_str = f"{days}d {hours:02d}h {minutes:02d}m" if days else f"{hours:02d}h {minutes:02d}m"
+
+        start_time_str = datetime.fromtimestamp(
+            self._start_time, tz=timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        return (
+            f"\U0001f916 *ZetBot AI*\n"
+            f"Version: `{BOT_VERSION}`\n"
+            f"Git: `{git_commit}`\n"
+            f"Python: `{py_ver}`\n"
+            f"CCXT: `{ccxt_ver}`\n"
+            f"Exchange: `{self._config.exchange}`\n"
+            f"Mode: `{'PAPER' if self._config.paper_mode else 'LIVE'}`\n"
+            f"Started: `{start_time_str}`\n"
+            f"Uptime: `{uptime_str}`"
+        )
+
+    def _cmd_shutdown(self, _text: str) -> str:
+        """Shut down the bot gracefully."""
+        if not self._shutdown_pending:
+            self._shutdown_pending = True
+            _log("Shutdown confirmation requested")
+            return (
+                "\u26a0\ufe0f *Shutdown Confirmation*\n"
+                "Are you sure? Send `/shutdown` again within 60 seconds "
+                "to confirm and shut down the bot."
+            )
+
+        _log("Shutdown confirmed — initiating graceful shutdown")
+
+        # Signal the main process to shut down
+        if self._shutdown_event:
+            self._shutdown_event.set()
+        else:
+            # Fallback: write shutdown signal file
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(SHUTDOWN_FILE, "w") as f:
+                f.write(datetime.now(timezone.utc).isoformat())
+
+        self._running = False
+        return (
+            "\U0001f6d1 *Shutting Down*\n"
+            "Graceful shutdown initiated. Goodbye."
         )
 
     def _cmd_pause(self, _text: str) -> str:
@@ -652,7 +746,7 @@ class TelegramCommandCenter:
         """List all available commands."""
         return (
             "\U0001f4ac *ZetBot Commands*\n\n"
-            "/status \u2014 Bot status, balance, positions\n"
+            "/status \u2014 Bot status, runtime, positions\n"
             "/pipeline \u2014 Run full analysis pipeline\n"
             "/scan \u2014 Run market scanner only\n"
             "/positions \u2014 Show open positions\n"
@@ -660,7 +754,9 @@ class TelegramCommandCenter:
             "/summary \u2014 Today's trading statistics\n"
             "/pause \u2014 Disable new trades\n"
             "/resume \u2014 Enable new trades\n"
-            "/health \u2014 System health & status overview\n"
+            "/health \u2014 System health & component status\n"
+            "/version \u2014 Bot version & system info\n"
+            "/shutdown \u2014 Gracefully shut down the bot\n"
             "/help \u2014 Show this message"
         )
 
