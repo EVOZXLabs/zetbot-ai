@@ -1,7 +1,5 @@
 from telegram.base_command import BaseCommand, CommandMeta
 
-DATA_DIR = "data"
-
 
 class ScanCommand(BaseCommand):
     meta = CommandMeta(
@@ -13,9 +11,11 @@ class ScanCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        from scripts import scanner  # noqa: PLC0415
-
-        scanner.main()
+        if ctx.services is not None:
+            ctx.services.scanner.run()
+        else:
+            from scripts import scanner  # noqa: PLC0415
+            scanner.main()
 
         data = ctx.read_json("scanner_results.json")
         total = data.get("total_pairs", 0)

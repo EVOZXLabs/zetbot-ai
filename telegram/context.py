@@ -5,7 +5,12 @@ import time
 
 @dataclass
 class CommandContext:
-    """Provides access to all bot components. Created per-request."""
+    """Provides access to all bot components. Created per-request.
+
+    When a ServiceContainer is available (via ``services``), all component
+    properties delegate to it.  Otherwise, the old lazy-loading mechanism
+    is used for backward compatibility.
+    """
 
     config: Any = None
     logger: Any = None
@@ -21,7 +26,10 @@ class CommandContext:
     is_admin: bool = False
     test_mode: bool = False
 
-    # Lazily-loaded components
+    # Service Container (DI)
+    services: Any = None
+
+    # Lazily-loaded components (backward compat, used when services is None)
     _scanner: Any = None
     _risk_manager: Any = None
     _position_manager: Any = None
@@ -29,6 +37,8 @@ class CommandContext:
 
     @property
     def scanner(self) -> Any:
+        if self.services is not None:
+            return self.services.scanner
         if self._scanner is None:
             from scripts import scanner  # noqa: PLC0415
             self._scanner = scanner
@@ -36,6 +46,8 @@ class CommandContext:
 
     @property
     def risk_manager(self) -> Any:
+        if self.services is not None:
+            return self.services.risk
         if self._risk_manager is None:
             from scripts import risk_manager  # noqa: PLC0415
             self._risk_manager = risk_manager
@@ -43,6 +55,8 @@ class CommandContext:
 
     @property
     def position_manager(self) -> Any:
+        if self.services is not None:
+            return self.services.position
         if self._position_manager is None:
             from scripts import position_manager  # noqa: PLC0415
             self._position_manager = position_manager
@@ -50,6 +64,8 @@ class CommandContext:
 
     @property
     def paper_wallet(self) -> Any:
+        if self.services is not None:
+            return self.services.wallet
         if self._paper_wallet is None:
             from scripts import paper_trading_engine  # noqa: PLC0415
             self._paper_wallet = paper_trading_engine

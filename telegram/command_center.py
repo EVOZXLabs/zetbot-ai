@@ -11,9 +11,11 @@ from telegram.registry import CommandRegistry
 class CommandCenter:
     """New modular command center — replaces legacy dispatch."""
 
-    def __init__(self, config: Any, logger: Any) -> None:
+    def __init__(self, config: Any, logger: Any,
+                 services: Any = None) -> None:
         self._config = config
         self._logger = logger
+        self._services = services
         self._registry = CommandRegistry()
         self._registry.discover()
 
@@ -126,4 +128,5 @@ class CommandCenter:
             pid_file=pid_file,
             start_time=start_time,
             health_monitor=health_monitor,
+            services=self._services,
         )

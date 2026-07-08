@@ -32,6 +32,7 @@ from scripts.app_config import (
     validate_config,
 )
 from scripts.health import HealthMonitor
+from scripts.service_container import ServiceContainer
 from scripts.logger import PipelineLogger
 from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
@@ -687,11 +688,20 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown_handler)
 
     # ------------------------------------------------------------------
+    #  Service Container — single source of all dependencies
+    # ------------------------------------------------------------------
+
+    container = ServiceContainer(config, logger)
+    container.bootstrap()
+    logger.info("Service Container initialised")
+
+    # ------------------------------------------------------------------
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
     health = HealthMonitor(logger, config, interval=60.0, shutdown_event=shutdown)
     health.start()
+    container.inject_health(health)
     logger.info("Health Monitor started (every 60s)")
 
     # ------------------------------------------------------------------
@@ -713,6 +723,7 @@ def main() -> None:
             health_monitor=health,
             shutdown_event=shutdown,
             pid_file=pid_file,
+            services=container,
         )
         tg_thread = _start_worker(
             "TelegramCmd",
@@ -736,7 +747,7 @@ def main() -> None:
     #  Run pipeline once on startup
     # ------------------------------------------------------------------
 
-    pipeline = Pipeline(config, logger)
+    pipeline = Pipeline(config, logger, container=container)
     last_pipeline_time: float = time.time()
     try:
         results = pipeline.run()
@@ -804,6 +815,7 @@ def main() -> None:
                     health_monitor=health,
                     shutdown_event=shutdown,
                     pid_file=pid_file,
+                    services=container,
                 )
                 new_thread = _start_worker(
                     "TelegramCmd",

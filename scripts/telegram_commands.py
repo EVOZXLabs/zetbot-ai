@@ -112,11 +112,13 @@ class TelegramCommandCenter:
         health_monitor: Any = None,
         shutdown_event: Any = None,
         pid_file: Any = None,
+        services: Any = None,
     ) -> None:
         self._config = config
         self._health_monitor = health_monitor
         self._shutdown_event = shutdown_event
         self._pid_file = pid_file
+        self._services = services
         self._token: str = config.telegram_token
         self._chat_id: str = config.telegram_chat_id
         self._timeout: int = config.telegram_timeout
@@ -132,7 +134,8 @@ class TelegramCommandCenter:
 
         # New modular command system
         from telegram.command_center import CommandCenter  # noqa: PLC0415
-        self._command_center = CommandCenter(config, logger=_log)
+        self._command_center = CommandCenter(config, logger=_log,
+                                             services=services)
 
         # Legacy handler dict → now routes through CommandCenter
         self._command_handlers: dict[str, Any] = {}
@@ -296,6 +299,7 @@ class TelegramCommandCenter:
             pid_file=self._pid_file,
             start_time=self._start_time,
             health_monitor=self._health_monitor,
+            services=self._services,
         )
 
         if response is not None:
@@ -424,6 +428,7 @@ class TelegramCommandCenter:
             start_time=self._start_time,
             health_monitor=self._health_monitor,
             test_mode=self._test_mode,
+            services=self._services,
         )
         return response or "Command returned no output."
 

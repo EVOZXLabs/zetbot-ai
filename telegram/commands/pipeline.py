@@ -11,14 +11,15 @@ class PipelineCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        # This runs synchronously — the caller (CommandCenter) will send
-        # the result. The original sent an intermediate "running..." message.
-        from scripts.logger import PipelineLogger  # noqa: PLC0415
-        from scripts.pipeline import Pipeline  # noqa: PLC0415
-
-        logger = PipelineLogger(ctx.config)
-        pipeline = Pipeline(ctx.config, logger)
-        results = pipeline.run()
+        # Use services when available, fall back to direct import
+        if ctx.services is not None:
+            results = ctx.services.run_pipeline()
+        else:
+            from scripts.logger import PipelineLogger  # noqa: PLC0415
+            from scripts.pipeline import Pipeline  # noqa: PLC0415
+            logger = PipelineLogger(ctx.config)
+            pipeline = Pipeline(ctx.config, logger)
+            results = pipeline.run()
 
         total = sum(r.duration for r in results)
         lines = ["\U0001f4ca *Pipeline Report*"]

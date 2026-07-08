@@ -84,11 +84,18 @@ _CONFIG_OVERRIDES: dict[str, dict[str, str]] = {
 
 
 class Pipeline:
-    """Orchestrate sequential execution of trading pipeline stages."""
+    """Orchestrate sequential execution of trading pipeline stages.
 
-    def __init__(self, config: AppConfig, logger: PipelineLogger) -> None:
+    Accepts an optional ``container`` (ServiceContainer) for dependency
+    injection.  When provided, stages use services from the container
+    instead of the old module-level config override approach.
+    """
+
+    def __init__(self, config: AppConfig, logger: PipelineLogger,
+                 container: Any = None) -> None:
         self.config = config
         self.logger = logger
+        self.container = container
         self.results: list[StageResult] = []
 
     def run(self) -> list[StageResult]:
@@ -100,14 +107,25 @@ class Pipeline:
         self.logger.pipeline_start()
         self._apply_config()
 
-        stages: list[tuple[str, Callable[[], Any], str]] = [
-            ("Scanner",       self._run_scanner,       "data/scanner_results.json"),
-            ("Decision",      self._run_decision,      "data/decision_results.json"),
-            ("Risk",          self._run_risk,           "data/risk_results.json"),
-            ("Trade",         self._run_trade,          "data/trade_plan.json"),
-            ("Position",      self._run_position,       "data/positions.json"),
-            ("Paper",         self._run_paper,          "data/paper_orders.json"),
-        ]
+        # Use DI stage runners when container is available
+        if self.container is not None:
+            stages: list[tuple[str, Callable[[], Any], str]] = [
+                ("Scanner",       self._run_scanner_di,  "data/scanner_results.json"),
+                ("Decision",      self._run_decision_di, "data/decision_results.json"),
+                ("Risk",          self._run_risk_di,      "data/risk_results.json"),
+                ("Trade",         self._run_trade_di,     "data/trade_plan.json"),
+                ("Position",      self._run_position_di,  "data/positions.json"),
+                ("Paper",         self._run_paper_di,     "data/paper_orders.json"),
+            ]
+        else:
+            stages: list[tuple[str, Callable[[], Any], str]] = [
+                ("Scanner",       self._run_scanner,       "data/scanner_results.json"),
+                ("Decision",      self._run_decision,      "data/decision_results.json"),
+                ("Risk",          self._run_risk,           "data/risk_results.json"),
+                ("Trade",         self._run_trade,          "data/trade_plan.json"),
+                ("Position",      self._run_position,       "data/positions.json"),
+                ("Paper",         self._run_paper,          "data/paper_orders.json"),
+            ]
 
         for name, fn, output_file in stages:
             result = self._run_stage(name, fn, output_file)
@@ -188,6 +206,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------
     #  Stage runners (delayed imports to avoid circular dependencies)
+    #  When ``self.container`` is set, services are used instead.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -195,27 +214,54 @@ class Pipeline:
         from scripts import scanner
         scanner.main()
 
+    def _run_scanner_di(self) -> None:
+        self.container.scanner.run()
+
     @staticmethod
     def _run_decision() -> None:
         from scripts import decision_engine
         decision_engine.main()
+
+    def _run_decision_di(self) -> None:
+        data = self.container.scanner.get_results()
+        self.container.strategy.evaluate(data)
 
     @staticmethod
     def _run_risk() -> None:
         from scripts import risk_manager
         risk_manager.main()
 
+    def _run_risk_di(self) -> None:
+        decisions = self.container.strategy.get_decisions()
+        self.container.risk.approve(decisions, self.container.wallet,
+                                    self.container.position)
+
     @staticmethod
     def _run_trade() -> None:
         from scripts import trade_executor
         trade_executor.main()
+
+    def _run_trade_di(self) -> None:
+        approved = self.container.risk.get_approved()
+        for plan in approved:
+            self.container.order.execute(plan)
 
     @staticmethod
     def _run_position() -> None:
         from scripts import position_manager
         position_manager.main()
 
+    def _run_position_di(self) -> None:
+        orders = self.container.order.get_orders()
+        # PositionManager still reads from JSON files internally
+        from scripts import position_manager
+        position_manager.main()
+
     @staticmethod
     def _run_paper() -> None:
+        from scripts import paper_trading_engine
+        paper_trading_engine.main()
+
+    def _run_paper_di(self) -> None:
         from scripts import paper_trading_engine
         paper_trading_engine.main()

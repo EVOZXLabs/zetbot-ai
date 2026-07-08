@@ -1,5 +1,6 @@
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.command_center import CommandCenter
+from telegram.formatter import bold, code
+from telegram.registry import CommandRegistry
 
 
 class HelpCommand(BaseCommand):
@@ -12,5 +13,14 @@ class HelpCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        cc = CommandCenter(ctx.config, ctx.logger)
-        return cc.generate_help(user_is_admin=ctx.is_admin)
+        registry = CommandRegistry()
+        registry.discover()
+        parts = [bold("Available Commands\n")]
+        for meta in registry.get_all_commands():
+            if meta.hidden:
+                continue
+            if meta.permission == "admin" and not ctx.is_admin:
+                continue
+            usage = meta.usage or f"/{meta.name}"
+            parts.append(f"{code(usage)} — {meta.description}")
+        return "\n".join(parts)
