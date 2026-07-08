@@ -32,11 +32,11 @@ from bot.indicators import IndicatorEngine
 #  Config
 # ---------------------------------------------------------------------------
 
-OHLCV_LIMIT = 300
+OHLCV_LIMIT = 200
 TIMEFRAME = "1h"
 EXCHANGE_NAME = "binance"
 TOP_N = 50
-THREADS = 5
+THREADS = 8
 MIN_VOLUME_24H = 50_000  # skip pairs below $50K daily volume
 
 # Weights for overall score (must sum to 1.0)

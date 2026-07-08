@@ -237,6 +237,239 @@ def _check_dependencies() -> None:
         sys.exit(1)
 
 
+_exit_reason_map = {
+    "STOPPED": "Stop Loss",
+    "CLOSED": "Take Profit",
+    "TIMEOUT": "Strategy Exit",
+}
+
+
+def _notify_closure(
+    logger: Any,
+    config: AppConfig,
+    symbol: str,
+    new_pos: Any,
+    exit_price: float,
+    exit_reason_map: dict[str, str],
+) -> None:
+    """Send Telegram notification when a position closes."""
+    exit_reason = exit_reason_map.get(new_pos.status, "Strategy Exit")
+    logger.info(
+        f"Position {symbol}: {new_pos.status} "
+        f"(PnL: ${new_pos.total_pnl:+.2f}, {exit_reason})"
+    )
+
+    # Update paper balance & orders to reflect the closure
+    _update_paper_on_closure(logger, symbol, new_pos, exit_price, exit_reason)
+
+    # Send Telegram notification
+    if not config.telegram_enabled:
+        logger.debug(f"Telegram disabled, skipping close notification for {symbol}")
+        return
+
+    # Read latest balance after update
+    balance = 0.0
+    try:
+        with open("data/paper_balance.json") as f:
+            pb = json.load(f)
+        balance = pb.get("final_balance", 0.0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    try:
+        from bot.telegram import TelegramNotifier  # noqa: PLC0415
+        import bot.config as bot_cfg  # noqa: PLC0415
+
+        bot_cfg.CONFIG.update({
+            "telegram_enabled": config.telegram_enabled,
+            "telegram_token": config.telegram_token,
+            "telegram_chat_id": config.telegram_chat_id,
+            "telegram_timeout": config.telegram_timeout,
+            "telegram_retry": 3,
+        })
+        notifier = TelegramNotifier()
+        from datetime import timedelta  # noqa: PLC0415
+        holding_secs = new_pos.holding_hours * 3600
+        notifier.trade_closed(
+            exit_price=exit_price,
+            pnl_usd=new_pos.total_pnl,
+            pnl_pct=new_pos.floating_pnl_pct,
+            balance=balance,
+            exit_reason=exit_reason,
+            holding_time=timedelta(seconds=holding_secs),
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to send close notification for {symbol}: {exc}")
+
+
+def _update_paper_on_closure(
+    logger: Any,
+    symbol: str,
+    new_pos: Any,
+    exit_price: float,
+    exit_reason: str,
+) -> None:
+    """Update paper balance and order history when a position closes."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    # Update paper_balance.json
+    try:
+        with open("data/paper_balance.json") as f:
+            pb = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pb = {
+            "initial_balance": 10000.0,
+            "final_balance": 10000.0,
+            "final_equity": 10000.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "win_rate": 0.0,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+        }
+
+    pnl = new_pos.total_pnl
+    pb["final_balance"] = round(pb.get("final_balance", 10000.0) + pnl, 2)
+    pb["final_equity"] = pb["final_balance"]
+    pb["total_trades"] = pb.get("total_trades", 0) + 1
+    if pnl > 0:
+        pb["winning_trades"] = pb.get("winning_trades", 0) + 1
+    else:
+        pb["losing_trades"] = pb.get("losing_trades", 0) + 1
+    total = pb.get("total_trades", 0)
+    pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
+    pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
+    pb["net_pnl"] = round(pb.get("net_pnl", 0.0) + pnl, 2)
+
+    try:
+        with open("data/paper_balance.json", "w") as f:
+            json.dump(pb, f, indent=2)
+    except OSError as exc:
+        logger.warning(f"Failed to update paper_balance.json: {exc}")
+
+    # Append closed order to paper_orders.json
+    order = {
+        "id": f"monitor-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
+        "symbol": symbol,
+        "side": "SELL",
+        "type": "MARKET",
+        "quantity": new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity,
+        "filled_quantity": new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity,
+        "entry_price": new_pos.entry_price,
+        "fill_price": exit_price,
+        "slippage": 0.0,
+        "entry_fee": 0.0,
+        "exit_price": exit_price,
+        "exit_fee": 0.0,
+        "total_cost": 0.0,
+        "total_proceeds": exit_price * (new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity),
+        "net_pnl": round(pnl, 2),
+        "net_pnl_pct": round(new_pos.floating_pnl_pct, 2),
+        "status": "CLOSED",
+        "created_at": now_ts,
+        "filled_at": now_ts,
+        "closed_at": now_ts,
+    }
+    try:
+        with open("data/paper_orders.json") as f:
+            orders_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        orders_data = {"orders": []}
+    orders_data.setdefault("orders", []).append(order)
+    try:
+        with open("data/paper_orders.json", "w") as f:
+            json.dump(orders_data, f, indent=2)
+    except OSError as exc:
+        logger.warning(f"Failed to update paper_orders.json: {exc}")
+
+
+def _notify_buy_opened(
+    logger: Any,
+    config: AppConfig,
+    symbol: str,
+    entry_price: float,
+    quantity: float,
+    position_size: float,
+    stop_loss: float,
+    tp1: float,
+) -> None:
+    """Send Telegram notification when a buy is opened."""
+    if not config.telegram_enabled:
+        return
+
+    try:
+        from bot.telegram import TelegramNotifier  # noqa: PLC0415
+        import bot.config as bot_cfg  # noqa: PLC0415
+
+        bot_cfg.CONFIG.update({
+            "telegram_enabled": config.telegram_enabled,
+            "telegram_token": config.telegram_token,
+            "telegram_chat_id": config.telegram_chat_id,
+            "telegram_timeout": config.telegram_timeout,
+            "telegram_retry": 3,
+        })
+        notifier = TelegramNotifier()
+        notifier.buy_opened(
+            symbol=symbol,
+            timeframe=config.timeframe,
+            exchange=config.exchange,
+            entry_price=entry_price,
+            quantity=quantity,
+            position_size=position_size,
+            stop_loss=stop_loss,
+            take_profit=tp1,
+            reasons=["Pipeline execution"],
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to send buy notification for {symbol}: {exc}")
+
+
+def _notify_existing_positions(
+    logger: Any,
+    config: AppConfig,
+) -> None:
+    """Send buy notifications for open positions not yet notified."""
+    NOTIFIED_FILE = "data/.notified_buys"
+    try:
+        notified: set[str] = set()
+        if os.path.exists(NOTIFIED_FILE):
+            with open(NOTIFIED_FILE) as f:
+                notified = set(line.strip() for line in f if line.strip())
+
+        with open("data/positions.json") as f:
+            data = json.load(f)
+
+        new_notified = False
+        for pos in data.get("positions", []):
+            sym = pos.get("symbol", "")
+            if sym in notified:
+                continue
+            if pos.get("status") not in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+                continue
+
+            _notify_buy_opened(
+                logger, config,
+                symbol=sym,
+                entry_price=pos.get("entry_price", 0),
+                quantity=pos.get("quantity", 0),
+                position_size=pos.get("position_size_usdt", 0),
+                stop_loss=pos.get("stop_loss", 0),
+                tp1=pos.get("tp1", 0),
+            )
+            notified.add(sym)
+            new_notified = True
+
+        if new_notified:
+            with open(NOTIFIED_FILE, "w") as f:
+                for sym in sorted(notified):
+                    f.write(f"{sym}\n")
+    except Exception as exc:
+        logger.debug(f"Notify existing positions failed: {exc}")
+
+
 def _monitor_positions(
     logger: Any,
     config: AppConfig,
@@ -370,49 +603,11 @@ def _monitor_positions(
 
         changed = True
 
-        # Detect status change → notify
+        # Detect status change → notify closure
         if old_status != new_pos.status and new_pos.status in (
             "CLOSED", "STOPPED", "TIMEOUT"
         ):
-            exit_reason = {
-                "STOPPED": "Stop Loss",
-                "CLOSED": "Take Profit",
-                "TIMEOUT": "Strategy Exit",
-            }.get(new_pos.status, "Strategy Exit")
-
-            logger.info(
-                f"Position {sym}: {old_status} → {new_pos.status} "
-                f"(PnL: ${new_pos.total_pnl:+.2f}, {exit_reason})"
-            )
-
-            if center:
-                try:
-                    from bot.telegram import TelegramNotifier  # noqa: PLC0415
-                    import bot.config as bot_cfg  # noqa: PLC0415
-
-                    bot_cfg.CONFIG.update({
-                        "telegram_enabled": "true",
-                        "telegram_token": config.telegram_token,
-                        "telegram_chat_id": config.telegram_chat_id,
-                        "telegram_timeout": config.telegram_timeout,
-                        "telegram_retry": 3,
-                    })
-                    notifier = TelegramNotifier()
-                    holding_secs = new_pos.holding_hours * 3600
-                    hours, rem = divmod(int(holding_secs), 3600)
-                    minutes, seconds = divmod(rem, 60)
-                    holding_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-                    notifier.trade_closed(
-                        exit_price=current_price,
-                        pnl_usd=new_pos.total_pnl,
-                        pnl_pct=new_pos.floating_pnl_pct,
-                        balance=0.0,  # will be read from paper_balance below
-                        exit_reason=exit_reason,
-                        holding_time=holding_str,
-                    )
-                except Exception as exc:
-                    logger.warning(f"Failed to send close notification for {sym}: {exc}")
+            _notify_closure(logger, config, sym, new_pos, current_price, _exit_reason_map)
 
     if changed:
         try:
@@ -492,33 +687,6 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown_handler)
 
     # ------------------------------------------------------------------
-    #  Run pipeline once on startup
-    # ------------------------------------------------------------------
-
-    pipeline = Pipeline(config, logger)
-    last_pipeline_time: float = time.time()
-    try:
-        results = pipeline.run()
-    except Exception as exc:
-        logger.error(f"Pipeline failed: {exc}")
-        results = []
-
-    total_elapsed = time.time() - t0
-    if results:
-        summary_lines = _build_summary(results, config)
-        logger.summary(summary_lines)
-
-        if config.telegram_enabled:
-            logger.info("Sending Telegram notification...")
-            _send_telegram(config, summary_lines)
-
-        any_failed = any(not r.success for r in results)
-        if any_failed:
-            logger.error("Pipeline had failures — see logs for details")
-    else:
-        logger.info("Pipeline did not produce results — skipping summary")
-
-    # ------------------------------------------------------------------
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
@@ -527,7 +695,7 @@ def main() -> None:
     logger.info("Health Monitor started (every 60s)")
 
     # ------------------------------------------------------------------
-    #  Telegram Command Center — background daemon thread
+    #  Telegram Command Center — start BEFORE pipeline for responsiveness
     # ------------------------------------------------------------------
 
     center: Any = None
@@ -563,6 +731,36 @@ def main() -> None:
             )
         else:
             logger.info("Telegram disabled — command center not started")
+
+    # ------------------------------------------------------------------
+    #  Run pipeline once on startup
+    # ------------------------------------------------------------------
+
+    pipeline = Pipeline(config, logger)
+    last_pipeline_time: float = time.time()
+    try:
+        results = pipeline.run()
+    except Exception as exc:
+        logger.error(f"Pipeline failed: {exc}")
+        results = []
+
+    total_elapsed = time.time() - t0
+    if results:
+        summary_lines = _build_summary(results, config)
+        logger.summary(summary_lines)
+
+        if config.telegram_enabled:
+            logger.info("Sending Telegram notification...")
+            _send_telegram(config, summary_lines)
+
+        any_failed = any(not r.success for r in results)
+        if any_failed:
+            logger.error("Pipeline had failures — see logs for details")
+
+        # Send buy notifications for any open positions
+        _notify_existing_positions(logger, config)
+    else:
+        logger.info("Pipeline did not produce results — skipping summary")
 
     # ------------------------------------------------------------------
     #  Keep alive — monitor workers, health, shutdown
