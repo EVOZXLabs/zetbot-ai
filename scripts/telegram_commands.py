@@ -50,6 +50,8 @@ POLL_TIMEOUT = 5           # short poll for responsive shutdown
 POLL_REQUEST_TIMEOUT = 10  # HTTP request timeout (must exceed POLL_TIMEOUT)
 PAUSE_FILE = "data/.paused"
 SHUTDOWN_FILE = "data/.shutdown_requested"
+UPDATE_ID_FILE = "data/.last_update_id"
+STARTUP_GRACE_PERIOD = 30  # ignore shutdown commands within N seconds of start
 DATA_DIR = "data"
 
 MAX_BACKOFF = 120   # maximum sleep between poll retries (seconds)
@@ -118,11 +120,12 @@ class TelegramCommandCenter:
         self._token: str = config.telegram_token
         self._chat_id: str = config.telegram_chat_id
         self._timeout: int = config.telegram_timeout
-        self._last_update_id: int = 0
+        self._last_update_id: int = self._load_update_id()
         self._start_time: float = time.time()
         self._running: bool = True
         self._test_mode: bool = test_mode
         self._shutdown_pending: bool = False
+        self._shutdown_request_time: float = 0.0
 
         self._test_index: int = 0
         self._consecutive_errors: int = 0
@@ -148,6 +151,26 @@ class TelegramCommandCenter:
             _log(f"TEST MODE — simulating {len(_TEST_COMMANDS)} commands")
         else:
             _log(f"Listening for commands on chat {self._chat_id}")
+
+    # ------------------------------------------------------------------
+    #  Update ID persistence (prevents replay of old commands after restart)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_update_id() -> int:
+        try:
+            with open(UPDATE_ID_FILE) as f:
+                return int(f.read().strip())
+        except (FileNotFoundError, ValueError):
+            return 0
+
+    def _save_update_id(self) -> None:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(UPDATE_ID_FILE, "w") as f:
+                f.write(str(self._last_update_id))
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     #  Public
@@ -255,6 +278,7 @@ class TelegramCommandCenter:
         update_id = update.get("update_id", 0)
         if update_id > self._last_update_id:
             self._last_update_id = update_id
+            self._save_update_id()
 
         message = update.get("message", {})
         chat_id = message.get("chat", {}).get("id")
@@ -704,8 +728,19 @@ class TelegramCommandCenter:
 
     def _cmd_shutdown(self, _text: str) -> str:
         """Shut down the bot gracefully."""
-        if not self._shutdown_pending:
+        now = time.time()
+        # Ignore shutdown within grace period to prevent replay of old updates
+        if not self._test_mode and now - self._start_time < STARTUP_GRACE_PERIOD:
+            _log("Shutdown ignored — still in startup grace period")
+            return (
+                "\u26a0\ufe0f *Shutdown ignored*\n"
+                f"Bot just started. Try again in "
+                f"{int(STARTUP_GRACE_PERIOD - (now - self._start_time))}s."
+            )
+
+        if not self._shutdown_pending or (now - self._shutdown_request_time > 60.0):
             self._shutdown_pending = True
+            self._shutdown_request_time = now
             _log("Shutdown confirmation requested")
             return (
                 "\u26a0\ufe0f *Shutdown Confirmation*\n"

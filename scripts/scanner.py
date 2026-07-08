@@ -9,6 +9,8 @@ Usage::
     python -m scripts.scanner
 """
 
+from __future__ import annotations
+
 import csv
 import json
 import logging
@@ -20,9 +22,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
-
-import ccxt
-import pandas as pd
 
 logging.getLogger("ZetBot").setLevel(logging.WARNING)
 
@@ -332,6 +331,7 @@ class PairAnalyzer:
     @classmethod
     def _get_exchange(cls):
         """Return a thread-local ccxt Binance instance."""
+        import ccxt
         if cls._thread_local is None:
             cls._thread_local = threading.local()
         if not hasattr(cls._thread_local, "exchange"):
@@ -344,6 +344,7 @@ class PairAnalyzer:
     @classmethod
     def analyze(cls, pair: PairRaw) -> PairAnalysis:
         """Fetch OHLCV, calculate indicators, return analysis."""
+        import pandas as pd
         try:
             exchange = cls._get_exchange()
             raw = exchange.fetch_ohlcv(

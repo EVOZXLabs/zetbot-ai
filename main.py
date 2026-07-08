@@ -19,6 +19,7 @@ import atexit
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -193,8 +194,8 @@ def _send_telegram(config: AppConfig, lines: list[str]) -> None:
         notifier = TelegramNotifier()
         msg = "\n".join(line for line in lines[:25])
         notifier._send(f"\U0001f4ca *Pipeline Report*\n{msg}")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error(f"Telegram notification failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +203,228 @@ def _send_telegram(config: AppConfig, lines: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _check_dependencies() -> None:
+    """Verify critical dependencies are importable; exit with helpful message if not."""
+    # Use subprocess to avoid import deadlocks between certain packages
+    import subprocess  # noqa: PLC0415
+
+    code = (
+        "import sys\n"
+        "for mod in (\"numpy\", \"pandas\", \"ccxt\", \"requests\"):\n"
+        "    try:\n"
+        "        __import__(mod)\n"
+        "    except Exception:\n"
+        "        print(mod, file=sys.stderr)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: Dependency check failed — {result.stderr.strip()}", file=sys.stderr)
+        print("On some systems 'python3' must be used instead of 'python'.", file=sys.stderr)
+        sys.exit(1)
+    missing = [m for m in result.stderr.strip().split("\n") if m]
+    if missing:
+        print(
+            f"ERROR: Missing or broken dependencies: {', '.join(missing)}.\n"
+            f"Install with: pip install {' '.join(missing)}\n"
+            f"On some systems 'python3' must be used instead of 'python'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _monitor_positions(
+    logger: Any,
+    config: AppConfig,
+    center: Any,
+) -> None:
+    """Fetch current prices for open positions, update PnL, detect closures."""
+    # Only run if pipeline already ran (positions.json exists)
+    if not os.path.exists("data/positions.json"):
+        return
+
+    try:
+        import ccxt  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+        from scripts.position_manager import (  # noqa: PLC0415
+            PositionSimulator, TradePlan,
+        )
+    except ImportError as exc:
+        logger.debug(f"Monitor imports failed: {exc}")
+        return
+
+    # Load positions
+    try:
+        with open("data/positions.json") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+
+    positions = data.get("positions", [])
+    active = [
+        p for p in positions
+        if p.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN")
+    ]
+    if not active:
+        return
+
+    # Load scanner prices for ATR/trend
+    scanner_prices: dict[str, dict] = {}
+    try:
+        with open("data/scanner_results.json") as f:
+            scan = json.load(f)
+        for p in scan.get("pairs", []):
+            scanner_prices[p["symbol"]] = p
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    # Load trade plans
+    plans_by_symbol: dict[str, dict] = {}
+    try:
+        with open("data/trade_plan.json") as f:
+            plans_data = json.load(f)
+        for p in plans_data.get("plans", []):
+            plans_by_symbol[p["symbol"]] = p
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    # Fetch tickers for active symbols
+    symbols = [p["symbol"] for p in active if "symbol" in p]
+    try:
+        exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+        tickers = exchange.fetch_tickers(symbols)
+    except Exception as exc:
+        logger.debug(f"Monitor ticker fetch failed: {exc}")
+        return
+
+    now = datetime.now(timezone.utc)
+    changed = False
+
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        if pos.get("status") not in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+            continue
+
+        ticker = tickers.get(sym)
+        if ticker is None:
+            continue
+        current_price = ticker.get("last")
+        if current_price is None or current_price <= 0:
+            continue
+
+        scan_data = scanner_prices.get(sym, {})
+        atr_pct = scan_data.get("atr_pct", 0.0)
+        trend = scan_data.get("trend_alignment", "MIXED")
+        plan_data = plans_by_symbol.get(sym, {})
+
+        try:
+            plan = TradePlan(
+                symbol=sym,
+                entry_price=plan_data.get("entry_price", pos.get("entry_price", 0.0)),
+                position_size_usdt=plan_data.get("position_size_usdt", 0.0),
+                quantity=plan_data.get("quantity", 0.0),
+                stop_loss=plan_data.get("stop_loss", pos.get("stop_loss", 0.0)),
+                tp1=plan_data.get("tp1", pos.get("tp1", 0.0)),
+                tp2=plan_data.get("tp2", pos.get("tp2", 0.0)),
+                tp3=plan_data.get("tp3", pos.get("tp3", 0.0)),
+                risk_amount=plan_data.get("risk_amount", 0.0),
+                reward_amount=plan_data.get("reward_amount", 0.0),
+                risk_reward=plan_data.get("risk_reward", 0.0),
+                probability=plan_data.get("probability", 0.0),
+                recommendation=plan_data.get("recommendation", ""),
+                confidence=plan_data.get("confidence", 0.0),
+                signal_time=pos.get("entry_time", ""),
+                status="",
+                rejection_reason="",
+            )
+        except Exception as exc:
+            logger.debug(f"Monitor plan creation failed for {sym}: {exc}")
+            continue
+
+        old_status = pos.get("status")
+        new_pos = PositionSimulator.simulate(plan, current_price, atr_pct, trend, now)
+
+        # Update position data
+        pos["current_price"] = round(current_price, 8)
+        pos["status"] = new_pos.status
+        pos["floating_pnl"] = new_pos.floating_pnl
+        pos["floating_pnl_pct"] = new_pos.floating_pnl_pct
+        pos["holding_hours"] = new_pos.holding_hours
+        pos["holding_candles"] = new_pos.holding_candles
+        pos["tp1_hit"] = new_pos.tp1_hit
+        pos["tp2_hit"] = new_pos.tp2_hit
+        pos["tp3_hit"] = new_pos.tp3_hit
+        pos["breakeven_active"] = new_pos.breakeven_active
+        pos["trailing_active"] = new_pos.trailing_active
+        pos["current_stop"] = round(new_pos.current_stop, 8)
+        pos["remaining_pct"] = new_pos.remaining_pct
+        pos["remaining_qty"] = new_pos.remaining_qty
+        pos["realized_pnl"] = new_pos.realized_pnl
+        pos["total_pnl"] = new_pos.total_pnl
+        pos["highest_price"] = new_pos.highest_price
+        pos["lowest_price"] = new_pos.lowest_price
+
+        changed = True
+
+        # Detect status change → notify
+        if old_status != new_pos.status and new_pos.status in (
+            "CLOSED", "STOPPED", "TIMEOUT"
+        ):
+            exit_reason = {
+                "STOPPED": "Stop Loss",
+                "CLOSED": "Take Profit",
+                "TIMEOUT": "Strategy Exit",
+            }.get(new_pos.status, "Strategy Exit")
+
+            logger.info(
+                f"Position {sym}: {old_status} → {new_pos.status} "
+                f"(PnL: ${new_pos.total_pnl:+.2f}, {exit_reason})"
+            )
+
+            if center:
+                try:
+                    from bot.telegram import TelegramNotifier  # noqa: PLC0415
+                    import bot.config as bot_cfg  # noqa: PLC0415
+
+                    bot_cfg.CONFIG.update({
+                        "telegram_enabled": "true",
+                        "telegram_token": config.telegram_token,
+                        "telegram_chat_id": config.telegram_chat_id,
+                        "telegram_timeout": config.telegram_timeout,
+                        "telegram_retry": 3,
+                    })
+                    notifier = TelegramNotifier()
+                    holding_secs = new_pos.holding_hours * 3600
+                    hours, rem = divmod(int(holding_secs), 3600)
+                    minutes, seconds = divmod(rem, 60)
+                    holding_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+                    notifier.trade_closed(
+                        exit_price=current_price,
+                        pnl_usd=new_pos.total_pnl,
+                        pnl_pct=new_pos.floating_pnl_pct,
+                        balance=0.0,  # will be read from paper_balance below
+                        exit_reason=exit_reason,
+                        holding_time=holding_str,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to send close notification for {sym}: {exc}")
+
+    if changed:
+        try:
+            with open("data/positions.json", "w") as f:
+                json.dump({"positions": positions}, f, indent=2)
+        except OSError as exc:
+            logger.error(f"Failed to write positions.json: {exc}")
+
+
 def main() -> None:
     """Run ZetBot AI daemon with integrated Telegram Command Center."""
+    _check_dependencies()
     t0 = time.time()
 
     # Load and validate configuration
@@ -219,7 +440,6 @@ def main() -> None:
 
     # Initialize logger
     logger = PipelineLogger(config)
-    import subprocess, sys
     git_commit = "?"
     try:
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -254,6 +474,15 @@ def main() -> None:
     # ------------------------------------------------------------------
 
     shutdown = threading.Event()
+
+    # Clean up stale shutdown signal file from previous run
+    stale_file = "data/.shutdown_requested"
+    if os.path.exists(stale_file):
+        try:
+            os.remove(stale_file)
+            logger.info("Cleaned up stale shutdown signal file from previous run")
+        except OSError:
+            pass
 
     def _shutdown_handler(signum: int, _frame: Any) -> None:
         logger.info(f"Signal {signum} received — shutting down")
@@ -341,6 +570,7 @@ def main() -> None:
 
     logger.info("ZetBot AI is running. Press Ctrl+C to stop.")
 
+    _monitor_interval = 0  # counter for periodic position monitoring (~60s)
     try:
         while not shutdown.is_set():
             shutdown.wait(timeout=10.0)
@@ -356,6 +586,12 @@ def main() -> None:
                 except OSError:
                     pass
                 break
+
+            # -- Position monitoring every ~60 seconds ------------------
+            _monitor_interval += 10
+            if _monitor_interval >= 60:
+                _monitor_interval = 0
+                _monitor_positions(logger, config, center)
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():
@@ -398,10 +634,7 @@ def main() -> None:
     # Signal all workers to stop immediately
     shutdown.set()
 
-    # Stop health monitor first (sets shutdown_event, breaks out of sleep)
-    health.stop()
-
-    # Stop Telegram command center
+    # Stop Telegram command center first (stop polling loop immediately)
     if center:
         logger.info("Stopping Telegram Command Center...")
         center.stop()
@@ -413,6 +646,9 @@ def main() -> None:
                 )
             else:
                 logger.info("Telegram thread stopped cleanly")
+
+    # Stop health monitor (sets shutdown_event to wake up health thread)
+    health.stop()
 
     # Remove PID file
     pid_file.release()
@@ -432,6 +668,8 @@ def main() -> None:
         sys.stderr = open(null, "w")
     except OSError:
         pass
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

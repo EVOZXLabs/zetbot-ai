@@ -92,7 +92,7 @@ def load_config() -> AppConfig:
         data_dir=os.getenv("DATA_DIR", "data"),
         logs_dir=os.getenv("LOGS_DIR", "logs"),
         account_balance=float(os.getenv("ACCOUNT_BALANCE", "10000")),
-        max_positions=int(os.getenv("MAX_POSITIONS", "3")),
+        max_positions=int(os.getenv("MAX_POSITIONS", "2")),
         max_risk_per_trade_pct=float(os.getenv("MAX_RISK_PER_TRADE_PCT", "2.0")),
         telegram_enabled=os.getenv("TELEGRAM_ENABLED", "false").lower() == "true",
         telegram_token=os.getenv("TELEGRAM_TOKEN", ""),

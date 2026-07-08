@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
-from bot.data import EXCHANGE_MAP, NORMALIZED_COLUMNS, MarketData
+from bot.data import NORMALIZED_COLUMNS, MarketData
+
+SUPPORTED_EXCHANGES = ("binance", "bybit", "tokocrypto")
 
 
 def test_invalid_exchange_raises_error() -> None:
@@ -17,7 +19,7 @@ def test_invalid_exchange_raises_error() -> None:
 
 def test_valid_exchange_initialises() -> None:
     """MarketData should initialise for all supported exchanges."""
-    for name in EXCHANGE_MAP:
+    for name in SUPPORTED_EXCHANGES:
         md = MarketData(exchange_name=name)
         assert md.exchange_name == name
         assert md.exchange is not None

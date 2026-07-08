@@ -575,6 +575,133 @@ class TestShutdown:
 
 
 # ---------------------------------------------------------------------------
+#  Pipeline timeout tests
+# ---------------------------------------------------------------------------
+
+class TestPipelineTimeout:
+    """Pipeline stage timeout must be enforced."""
+
+    def _make_config(self) -> AppConfig:
+        return AppConfig(
+            account_balance=10000, exchange="binance", timeframe="1h",
+            max_positions=3, max_risk_per_trade_pct=2,
+            scanner_threads=5, scanner_top_n=50,
+            telegram_timeout=10, telegram_retry=3,
+            min_rr=1.5, max_rr=5, min_probability=50,
+            max_atr_pct=8, tp1_sell_pct=30, tp2_sell_pct=30,
+            tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
+            slippage_bps=3,
+        )
+
+    def test_stage_timeout_fails_gracefully(self) -> None:
+        """A stage that hangs beyond STAGE_TIMEOUT must return a failure result."""
+        import scripts.pipeline as pipeline_mod
+        orig_timeout = pipeline_mod.STAGE_TIMEOUT
+        pipeline_mod.STAGE_TIMEOUT = 0.1  # very short timeout for testing
+
+        from scripts.pipeline import Pipeline, StageResult
+
+        def _hanging_stage() -> None:
+            import time
+            time.sleep(10)
+
+        try:
+            config = self._make_config()
+            logger = _FakeLogger()
+            pipeline = Pipeline(config, logger)
+
+            result = pipeline._run_stage("HangTest", _hanging_stage, "/dev/null/nonexistent")
+
+            assert not result.success
+            assert "timed out" in (result.error or "")
+        finally:
+            pipeline_mod.STAGE_TIMEOUT = orig_timeout
+
+    def test_fast_stage_succeeds(self) -> None:
+        """A stage that completes quickly must succeed."""
+        from scripts.pipeline import Pipeline, StageResult
+
+        def _fast_stage() -> None:
+            pass
+
+        config = self._make_config()
+        logger = _FakeLogger()
+        pipeline = Pipeline(config, logger)
+
+        result = pipeline._run_stage("FastTest", _fast_stage, "/dev/null/nonexistent")
+
+        assert result.success
+        assert "no output" in result.detail
+
+
+# ---------------------------------------------------------------------------
+#  Shutdown confirmation timeout tests
+# ---------------------------------------------------------------------------
+
+class TestShutdownConfirmation:
+    """Telegram /shutdown must enforce 60s confirmation window."""
+
+    def test_first_shutdown_requests_confirmation(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+
+        config = AppConfig(
+            account_balance=10000, exchange="binance", timeframe="1h",
+            max_positions=3, max_risk_per_trade_pct=2,
+            scanner_threads=5, scanner_top_n=50,
+            telegram_timeout=10, telegram_retry=3,
+            min_rr=1.5, max_rr=5, min_probability=50,
+            max_atr_pct=8, tp1_sell_pct=30, tp2_sell_pct=30,
+            tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
+            slippage_bps=3,
+        )
+        center = TelegramCommandCenter(config, test_mode=True)
+        response = center._cmd_shutdown("/shutdown")
+        assert "Shutdown Confirmation" in response
+        assert "60 seconds" in response
+        assert center._shutdown_pending is True
+
+    def test_second_shutdown_confirms(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+
+        config = AppConfig(
+            account_balance=10000, exchange="binance", timeframe="1h",
+            max_positions=3, max_risk_per_trade_pct=2,
+            scanner_threads=5, scanner_top_n=50,
+            telegram_timeout=10, telegram_retry=3,
+            min_rr=1.5, max_rr=5, min_probability=50,
+            max_atr_pct=8, tp1_sell_pct=30, tp2_sell_pct=30,
+            tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
+            slippage_bps=3,
+        )
+        center = TelegramCommandCenter(config, test_mode=True)
+        center._cmd_shutdown("/shutdown")  # first: request confirmation
+        center._shutdown_request_time = time.time() - 1  # 1 second ago, still fresh
+        response = center._cmd_shutdown("/shutdown")  # second: confirm
+        assert "Shutting Down" in response
+        assert center._shutdown_pending is True
+
+    def test_shutdown_timeout_expires(self) -> None:
+        from scripts.telegram_commands import TelegramCommandCenter
+
+        config = AppConfig(
+            account_balance=10000, exchange="binance", timeframe="1h",
+            max_positions=3, max_risk_per_trade_pct=2,
+            scanner_threads=5, scanner_top_n=50,
+            telegram_timeout=10, telegram_retry=3,
+            min_rr=1.5, max_rr=5, min_probability=50,
+            max_atr_pct=8, tp1_sell_pct=30, tp2_sell_pct=30,
+            tp3_sell_pct=40, taker_fee=0.001, maker_fee=0.00075,
+            slippage_bps=3,
+        )
+        center = TelegramCommandCenter(config, test_mode=True)
+        center._cmd_shutdown("/shutdown")  # first: request confirmation
+        center._shutdown_request_time = time.time() - 61  # 61 seconds ago, expired
+        response = center._cmd_shutdown("/shutdown")  # second: should be treated as first
+        assert "Shutdown Confirmation" in response
+        assert "60 seconds" in response
+
+
+# ---------------------------------------------------------------------------
 #  Helpers
 # ---------------------------------------------------------------------------
 
@@ -583,6 +710,7 @@ class _FakeLogger:
 
     def __init__(self) -> None:
         self._lines: list[str] = []
+        self._output_buf: list[str] = []
 
     def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._lines.append(f"INFO {msg % args if args else msg}")
@@ -601,3 +729,31 @@ class _FakeLogger:
 
     def get_lines(self) -> list[str]:
         return list(self._lines)
+
+    # PipelineLogger-compatible API for Pipeline._run_stage
+    def stage_start(self, name: str) -> None:
+        self._lines.append(f"STAGE START {name}")
+
+    def stage_done(self, name: str, detail: str = "") -> None:
+        self._lines.append(f"STAGE DONE {name}  {detail}")
+
+    def stage_fail(self, name: str, reason: str) -> None:
+        self._lines.append(f"STAGE FAIL {name}  {reason}")
+
+    def pipeline_start(self) -> None:
+        self._lines.append("PIPELINE START")
+
+    def pipeline_end(self, total_elapsed: float) -> None:
+        self._lines.append(f"PIPELINE END  {total_elapsed:.1f}s")
+
+    def summary(self, lines: list[str]) -> None:
+        for line in lines:
+            self._lines.append(f"SUMMARY  {line}")
+
+    def capture_output(self):
+        """Minimal context manager that captures stdout/stderr."""
+        import contextlib
+        @contextlib.contextmanager
+        def _noop_capture():
+            yield
+        return _noop_capture()

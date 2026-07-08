@@ -28,7 +28,7 @@ DECISION_RESULTS_PATH = "data/decision_results.json"
 # Simulated exchange requirements (Binance spot defaults)
 EXCHANGE_MIN_NOTIONAL = 10.0        # $10 minimum order value
 EXCHANGE_MIN_QTY_DEFAULT = 0.00001  # default min quantity step
-MAX_OPEN_POSITIONS = 3
+MAX_OPEN_POSITIONS = 2
 MAX_DAILY_LOSS_USD = 500.0          # 5 % of $10 000
 MIN_RR = 1.5
 

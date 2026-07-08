@@ -4,12 +4,11 @@ Market Data Module
 ZetBot AI
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
-
-import ccxt
-import pandas as pd
 
 from bot.config import CONFIG
 from bot.indicators import IndicatorEngine
@@ -17,11 +16,14 @@ from bot.state import MarketStateDetector
 
 logger = logging.getLogger("ZetBot")
 
-EXCHANGE_MAP: dict[str, type[ccxt.Exchange]] = {
-    "binance": ccxt.binance,
-    "bybit": ccxt.bybit,
-    "tokocrypto": ccxt.binance,
-}
+
+def _get_exchange_map():
+    import ccxt
+    return {
+        "binance": ccxt.binance,
+        "bybit": ccxt.bybit,
+        "tokocrypto": ccxt.binance,
+    }
 
 NORMALIZED_COLUMNS: list[str] = [
     "timestamp",
@@ -57,12 +59,14 @@ class MarketData:
         Raises:
             ValueError: If the exchange is not supported.
         """
+        import ccxt
         exchange_name = exchange_name.lower()
-        exchange_class = EXCHANGE_MAP.get(exchange_name)
+        exchange_map = _get_exchange_map()
+        exchange_class = exchange_map.get(exchange_name)
         if exchange_class is None:
             msg = (
                 f"Unsupported exchange: '{exchange_name}'. "
-                f"Supported: {', '.join(EXCHANGE_MAP)}"
+                f"Supported: {', '.join(exchange_map)}"
             )
             raise ValueError(msg)
 
@@ -107,6 +111,8 @@ class MarketData:
             limit, timeframe, symbol, self.exchange_name,
         )
 
+        import ccxt
+        import pandas as pd
         raw: list[list[Any]] = []
         last_error: Exception | None = None
         for attempt in range(1, 4):

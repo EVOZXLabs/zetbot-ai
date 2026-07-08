@@ -17,6 +17,7 @@ Usage::
     results = pipeline.run()
 """
 
+import concurrent.futures
 import importlib
 import os
 import time
@@ -25,6 +26,9 @@ from typing import Any, Callable, Optional
 
 from scripts.app_config import AppConfig
 from scripts.logger import PipelineLogger
+
+
+STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
 
 
 @dataclass
@@ -128,15 +132,30 @@ class Pipeline:
         self.logger.stage_start(name)
         t0 = time.time()
 
-        try:
+        def _captured_fn() -> None:
             with self.logger.capture_output():
                 fn()
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(_captured_fn)
+            future.result(timeout=STAGE_TIMEOUT)
+            executor.shutdown(wait=True)
             elapsed = time.time() - t0
             detail = self._verify_output(output_file)
             self.logger.stage_done(name, detail)
             return StageResult(name=name, success=True, duration=elapsed, detail=detail)
 
+        except concurrent.futures.TimeoutError:
+            executor.shutdown(wait=False, cancel_futures=True)
+            elapsed = time.time() - t0
+            reason = f"Stage timed out after {STAGE_TIMEOUT}s"
+            self.logger.stage_fail(name, reason)
+            return StageResult(
+                name=name, success=False, duration=elapsed, error=reason,
+            )
         except Exception as exc:
+            executor.shutdown(wait=False, cancel_futures=True)
             elapsed = time.time() - t0
             reason = str(exc)
             self.logger.stage_fail(name, reason)
