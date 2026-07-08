@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from scripts.exchange_manager import ExchangeManager
 from scripts.interfaces import (
     IConfigService,
     IExchangeManager,
@@ -64,7 +65,9 @@ class ServiceContainer:
 
         # Order matters: earlier services may be required by later ones
         self._config_service = _ConfigAdapter(self._config)
-        self._exchange = _ExchangeAdapter(self._config_service)
+        self._exchange = ExchangeManager(
+            active=self._config_service.exchange,
+        )
         self._metrics = _MetricsAdapter()
         self._notification = _NotificationAdapter(self._config_service)
         self._wallet = _WalletAdapter(self._config_service)
@@ -183,59 +186,6 @@ class _ConfigAdapter:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cfg, name)
 
-
-class _ExchangeAdapter:
-    """Wraps ccxt exchange creation / health checks."""
-
-    def __init__(self, config: IConfigService) -> None:
-        self._config = config
-        self._exchange_instance: Any = None
-
-    def _get_exchange(self) -> Any:
-        if self._exchange_instance is None:
-            import ccxt  # noqa: PLC0415
-            exchange_class = getattr(ccxt, self._config.exchange, ccxt.binance)
-            self._exchange_instance = exchange_class()
-        return self._exchange_instance
-
-    @property
-    def name(self) -> str:
-        return self._config.exchange
-
-    def get_ticker(self, symbol: str) -> dict[str, Any]:
-        try:
-            ex = self._get_exchange()
-            return ex.fetch_ticker(symbol)
-        except Exception:
-            return {}
-
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> list:
-        try:
-            ex = self._get_exchange()
-            return ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-        except Exception:
-            return []
-
-    def fetch_balance(self) -> dict[str, Any]:
-        try:
-            ex = self._get_exchange()
-            return ex.fetch_balance()
-        except Exception:
-            return {}
-
-    def get_markets(self) -> list[dict[str, Any]]:
-        try:
-            ex = self._get_exchange()
-            return list(ex.markets.values()) if ex.markets else []
-        except Exception:
-            return []
-
-    def health_check(self) -> bool:
-        try:
-            self._get_exchange().fetch_time()
-            return True
-        except Exception:
-            return False
 
 
 class _WalletAdapter:
