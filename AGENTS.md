@@ -20,6 +20,22 @@ Do not create placeholder implementations.
 
 ---
 
+# Modular Command Architecture (Telegram)
+
+Commands live in `telegram/commands/` — one file per command.  
+To add a new command:
+
+1. Create `telegram/commands/your_command.py`
+2. Define a class inheriting from `BaseCommand` with `meta` + `execute()`
+3. Done — auto-discovered by `CommandRegistry`
+
+Do NOT:
+- Edit `scripts/telegram_commands.py` to add commands
+- Add `if/elif` blocks
+- Manually register anything
+
+---
+
 # Source of Truth
 
 The project specification is defined in:

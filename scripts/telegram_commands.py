@@ -130,23 +130,14 @@ class TelegramCommandCenter:
         self._test_index: int = 0
         self._consecutive_errors: int = 0
 
-        self._command_handlers: dict[str, Any] = {
-            "/status":    self._cmd_status,
-            "/pipeline":  self._cmd_pipeline,
-            "/scan":      self._cmd_scan,
-            "/positions": self._cmd_positions,
-            "/balance":   self._cmd_balance,
-            "/summary":   self._cmd_summary,
-            "/health":    self._cmd_health,
-            "/version":   self._cmd_version,
-            "/pause":     self._cmd_pause,
-            "/resume":    self._cmd_resume,
-            "/shutdown":  self._cmd_shutdown,
-            "/help":      self._cmd_help,
-            "/start":     self._cmd_help,
-        }
+        # New modular command system
+        from telegram.command_center import CommandCenter  # noqa: PLC0415
+        self._command_center = CommandCenter(config, logger=_log)
 
-        _log("Telegram Command Center started.")
+        # Legacy handler dict → now routes through CommandCenter
+        self._command_handlers: dict[str, Any] = {}
+
+        _log("Telegram Command Center started (modular dispatch).")
         if self._test_mode:
             _log(f"TEST MODE — simulating {len(_TEST_COMMANDS)} commands")
         else:
@@ -295,20 +286,20 @@ class TelegramCommandCenter:
         command = text.split()[0].lower()
         _log(f"Received: {command}")
 
-        handler = self._command_handlers.get(command)
-        if handler is None:
-            self._send(
-                f"Unknown command `{command}`.  Use /help for available commands.",
-            )
-            return
+        response = self._command_center.dispatch(
+            chat_id=str(chat_id) if chat_id else "",
+            message_id=message.get("message_id", 0),
+            update_id=update_id,
+            text=text,
+            exchange=None,
+            shutdown_event=self._shutdown_event,
+            pid_file=self._pid_file,
+            start_time=self._start_time,
+            health_monitor=self._health_monitor,
+        )
 
-        try:
-            response = handler(text)
-            if response:
-                self._send(response)
-        except Exception as exc:
-            _log(f"Command failed: {command} — {exc}")
-            self._send(f"Command `{command}` failed: `{exc}`")
+        if response is not None:
+            self._send(response)
 
     # ------------------------------------------------------------------
     #  Send
@@ -350,386 +341,36 @@ class TelegramCommandCenter:
         return False
 
     # ------------------------------------------------------------------
-    #  Command handlers
+    #  Legacy command handlers — backward compat, delegate to modular system
     # ------------------------------------------------------------------
 
     def _cmd_status(self, _text: str) -> str:
-        """Bot status, runtime, balance, positions overview."""
-        runtime = time.time() - self._start_time
-        hours, remainder = divmod(int(runtime), 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        pb = _read_json(f"{DATA_DIR}/paper_balance.json")
-        pos_data = _read_json(f"{DATA_DIR}/positions.json")
-        pos_list = pos_data.get("positions", [])
-
-        open_pos = sum(
-            1 for p in pos_list if p.get("status") == "OPEN"
-        )
-        closed_pos = sum(
-            1 for p in pos_list if p.get("status") in ("CLOSED", "STOPPED", "TIMEOUT")
-        )
-        paused = os.path.exists(PAUSE_FILE)
-
-        return (
-            f"\U0001f916 *Bot Status*\n"
-            f"Status: `ONLINE`\n"
-            f"Exchange: `{self._config.exchange}`\n"
-            f"Mode: `{'PAPER' if self._config.paper_mode else 'LIVE'}`\n"
-            f"Runtime: `{hours:02d}:{minutes:02d}:{seconds:02d}`\n"
-            f"Trading: `{'PAUSED \u23f8\ufe0f' if paused else 'ACTIVE'}`\n"
-            f"Balance: `${pb.get('final_balance', 0):,.2f}`\n"
-            f"Equity: `${pb.get('final_equity', 0):,.2f}`\n"
-            f"Cash: `${pb.get('final_balance', 0):,.2f}`\n"
-            f"Net PnL: `${pb.get('net_pnl', 0):+,.2f}`\n"
-            f"Open Positions: `{open_pos}`\n"
-            f"Closed Positions: `{closed_pos}`"
-        )
+        return self._delegate("status")
 
     def _cmd_pipeline(self, _text: str) -> str:
-        """Run full pipeline (scanner → decision → risk → trade → position → paper)."""
-        self._send(
-            "\U0001f4ca Running pipeline... "
-            f"(this takes ~{int(self._config.scanner_threads * 12)}s)"
-        )
-
-        from scripts.logger import PipelineLogger
-        from scripts.pipeline import Pipeline
-
-        logger = PipelineLogger(self._config)
-        pipeline = Pipeline(self._config, logger)
-        results = pipeline.run()
-
-        total = sum(r.duration for r in results)
-        lines: list[str] = ["\U0001f4ca *Pipeline Report*"]
-        for r in results:
-            icon = "\u2705" if r.success else "\u274c"
-            detail = f"  {r.detail}" if r.detail else ""
-            lines.append(f"{icon} `{r.name:>10s}` {r.duration:.1f}s{detail}")
-        lines.append(f"Total: `{total:.1f}s`")
-
-        failed = [r for r in results if not r.success]
-        if failed:
-            lines.append("")
-            lines.append(f"\u26a0\ufe0f *{len(failed)} stage(s) failed*")
-            for f in failed:
-                lines.append(f"`{f.name}`: {f.error}")
-
-        return "\n".join(lines)
+        return self._delegate("pipeline")
 
     def _cmd_scan(self, _text: str) -> str:
-        """Run scanner only."""
-        self._send("Scanning market... (this takes ~60s)")
-
-        from scripts import scanner
-        scanner.main()
-
-        data = _read_json(f"{DATA_DIR}/scanner_results.json")
-        total = data.get("total_pairs", 0)
-        results_list = data.get("results", data.get("sorted", []))
-        top_count = min(
-            5, len(results_list) if isinstance(results_list, list) else 0
-        )
-        top_pairs: list[str] = []
-        if isinstance(results_list, list):
-            for i, s in enumerate(results_list[:top_count], 1):
-                sym = s.get("symbol", "?")
-                score = s.get("overall_score", 0)
-                top_pairs.append(f"  `{i}. {sym}` score={score:.1f}")
-
-        lines = [
-            f"\U0001f50d *Scan Complete*",
-            f"Pairs scanned: `{total}`",
-        ]
-        if top_pairs:
-            lines.append("")
-            lines.append("Top pairs:")
-            lines.extend(top_pairs)
-
-        return "\n".join(lines)
+        return self._delegate("scan")
 
     def _cmd_positions(self, _text: str) -> str:
-        """List all open positions with entry, PnL, SL, TP levels."""
-        pos_data = _read_json(f"{DATA_DIR}/positions.json")
-        pos_list = pos_data.get("positions", [])
-
-        open_positions = [p for p in pos_list if p.get("status") == "OPEN"]
-
-        if not open_positions:
-            return "No open positions."
-
-        chunks: list[str] = []
-        for p in open_positions:
-            pnl = p.get("floating_pnl", 0)
-            pnl_pct = p.get("floating_pnl_pct", 0)
-            emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-
-            chunk = (
-                f"{emoji} *{p['symbol']}*\n"
-                f"Entry: `{p['entry_price']:.6f}`  "
-                f"Curr: `{p['current_price']:.6f}`\n"
-                f"PnL: `${pnl:+,.2f}` ({pnl_pct:+.2f}%)\n"
-                f"SL: `{p.get('stop_loss', 0):.6f}`\n"
-                f"TP1: `{p.get('tp1', 0):.6f}`  "
-                f"TP2: `{p.get('tp2', 0):.6f}`  "
-                f"TP3: `{p.get('tp3', 0):.6f}`\n"
-                f"Holding: `{p.get('holding_hours', 0):.1f}h`  "
-                f"Size: `${p.get('position_size_usdt', 0):,.2f}`"
-            )
-            chunks.append(chunk)
-
-        return "\n\n".join(chunks)
+        return self._delegate("positions")
 
     def _cmd_balance(self, _text: str) -> str:
-        """Account balance, equity, PnL."""
-        pb = _read_json(f"{DATA_DIR}/paper_balance.json")
-        if not pb:
-            return "No balance data yet.  Run `/pipeline` first."
-
-        return (
-            f"\U0001f4b0 *Balance*\n"
-            f"Cash: `${pb.get('final_balance', 0):,.2f}`\n"
-            f"Equity: `${pb.get('final_equity', 0):,.2f}`\n"
-            f"Realized PnL: `${pb.get('realized_pnl', 0):+,.2f}`\n"
-            f"Unrealized PnL: `${pb.get('unrealized_pnl', 0):+,.2f}`\n"
-            f"Net PnL: `${pb.get('net_pnl', 0):+,.2f}`\n"
-            f"Return: `{pb.get('total_return_pct', 0):+.2f}%`"
-        )
+        return self._delegate("balance")
 
     def _cmd_summary(self, _text: str) -> str:
-        """Today's trading statistics."""
-        pb = _read_json(f"{DATA_DIR}/paper_balance.json")
-        orders_data = _read_json(f"{DATA_DIR}/paper_orders.json")
-
-        total_trades = pb.get("total_trades", 0)
-        wins = pb.get("winning_trades", 0)
-        losses = pb.get("losing_trades", 0)
-        win_rate = pb.get("win_rate", 0.0)
-        realized_pnl = pb.get("realized_pnl", 0.0)
-        unrealized_pnl = pb.get("unrealized_pnl", 0.0)
-        net_pnl = pb.get("net_pnl", 0.0)
-
-        closed_orders = [
-            o for o in orders_data.get("orders", [])
-            if o.get("status") == "CLOSED"
-        ]
-
-        best: Optional[dict[str, Any]] = None
-        worst: Optional[dict[str, Any]] = None
-        if closed_orders:
-            best = max(closed_orders, key=lambda o: o.get("net_pnl", 0))
-            worst = min(closed_orders, key=lambda o: o.get("net_pnl", 0))
-
-        lines = [
-            f"\U0001f4ca *Trading Summary*",
-            f"Today's Trades: `{total_trades}`",
-            f"Wins: `{wins}`  "
-            f"Losses: `{losses}`",
-            f"Win Rate: `{win_rate:.1f}%`",
-            f"Realized PnL: `${realized_pnl:+,.2f}`",
-            f"Unrealized PnL: `${unrealized_pnl:+,.2f}`",
-            f"Net PnL: `${net_pnl:+,.2f}`",
-        ]
-
-        if total_trades > 0:
-            lines.insert(4, f"Profit Factor: `{pb.get('profit_factor', 0):.2f}`")
-            lines.insert(5, f"Gross Profit: `${pb.get('gross_profit', 0):,.2f}`")
-            lines.insert(6, f"Gross Loss: `${pb.get('gross_loss', 0):,.2f}`")
-
-        if best:
-            lines.append(
-                f"Best Trade: `{best['symbol']}`  "
-                f"`${best['net_pnl']:+,.2f}`"
-            )
-        if worst:
-            lines.append(
-                f"Worst Trade: `{worst['symbol']}`  "
-                f"`${worst['net_pnl']:+,.2f}`"
-            )
-
-        return "\n".join(lines)
+        return self._delegate("summary")
 
     def _cmd_health(self, _text: str) -> str:
-        """System health overview using HealthMonitor snapshot (realtime)."""
-        snapshot: dict[str, Any] = {}
-        if self._health_monitor:
-            try:
-                snapshot = self._health_monitor.force_refresh()
-            except Exception as exc:
-                _log(f"HealthMonitor snapshot failed: {exc}")
-
-        ver = snapshot.get("version", "?")
-        uptime_sec = snapshot.get("uptime_sec", 0)
-        rss_kb = snapshot.get("rss_kb", 0)
-        thread_count = snapshot.get("thread_count", 0)
-        process_cpu_sec = snapshot.get("process_cpu_sec", 0)
-        internet_ok = snapshot.get("internet_ok", False)
-        exchange_ok = snapshot.get("exchange_ok", False)
-        scanner_time = snapshot.get("scanner_time", "N/A")
-        api_time = snapshot.get("api_time", "N/A")
-        balance = snapshot.get("balance", 0.0)
-        equity = snapshot.get("equity", 0.0)
-        net_pnl = snapshot.get("net_pnl", 0.0)
-        open_positions = snapshot.get("open_positions", 0)
-        total_trades = snapshot.get("total_trades", 0)
-        win_rate = snapshot.get("win_rate", 0.0)
-        paused = snapshot.get("paused", False)
-        paper_mode = snapshot.get("paper_mode", True)
-
-        hours, rem = divmod(int(uptime_sec), 3600)
-        minutes, seconds = divmod(rem, 60)
-        uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        cpu_pct = (process_cpu_sec / uptime_sec * 100) if uptime_sec > 0 else 0.0
-        rss_mb = rss_kb / 1024.0
-
-        # Component icons
-        def _icon(status: bool, label_ok: str = "Healthy") -> tuple[str, str]:
-            if status:
-                return "\U0001f7e2", label_ok
-            return "\U0001f534", "Critical"
-
-        internet_icon, internet_status = _icon(internet_ok, "Connected" if internet_ok else "Disconnected")
-        exchange_icon, exchange_status = _icon(exchange_ok, "Connected")
-
-        # Scanner health based on data freshness
-        scanner_age = snapshot.get("scanner_age", float("inf"))
-        if scanner_age == float("inf"):
-            scanner_icon, scanner_status = "\U0001f534", "No Data"
-        elif scanner_age < 7200:
-            scanner_icon, scanner_status = "\U0001f7e2", "Healthy"
-        elif scanner_age < 86400:
-            scanner_icon, scanner_status = "\U0001f7e1", "Stale"
-        else:
-            scanner_icon, scanner_status = "\U0001f534", "Critical"
-
-        # Telegram: check if telegram thread is alive
-        has_creds = bool(self._config.telegram_token and self._config.telegram_chat_id)
-        tg_alive = False
-        if has_creds:
-            for t in threading.enumerate():
-                if t.name == "TelegramCmd" and t.is_alive():
-                    tg_alive = True
-                    break
-        if has_creds and tg_alive:
-            telegram_icon, telegram_status = "\U0001f7e2", "Healthy"
-        elif has_creds:
-            telegram_icon, telegram_status = "\U0001f534", "Not Running"
-        else:
-            telegram_icon, telegram_status = "\u26aa", "Disabled"
-
-        # Resource thresholds (production-appropriate for a bot process)
-        cpu_icon = "\U0001f7e2" if cpu_pct < 50 else ("\U0001f7e1" if cpu_pct < 80 else "\U0001f534")
-        cpu_label = "Healthy" if cpu_pct < 50 else ("Warning" if cpu_pct < 80 else "Critical")
-        mem_icon = "\U0001f7e2" if rss_mb < 100 else ("\U0001f7e1" if rss_mb < 250 else "\U0001f534")
-        mem_label = "Healthy" if rss_mb < 100 else ("Warning" if rss_mb < 250 else "Critical")
-        thr_icon = "\U0001f7e2" if thread_count < 15 else ("\U0001f7e1" if thread_count < 30 else "\U0001f534")
-        thr_label = "Healthy" if thread_count < 15 else ("Warning" if thread_count < 30 else "Critical")
-
-        # Health Score from real component state
-        score = 100
-        if not internet_ok:
-            score -= 20
-        if not exchange_ok:
-            score -= 20
-        if scanner_status == "Critical":
-            score -= 15
-        elif scanner_status == "Stale":
-            score -= 5
-        if telegram_status == "Not Running":
-            score -= 15
-        elif telegram_status == "Disabled":
-            score -= 0
-        if cpu_label == "Critical":
-            score -= 10
-        elif cpu_label == "Warning":
-            score -= 5
-        if mem_label == "Critical":
-            score -= 10
-        elif mem_label == "Warning":
-            score -= 5
-        if thr_label == "Critical":
-            score -= 5
-        elif thr_label == "Warning":
-            score -= 3
-        score = max(0, min(100, score))
-        score_icon = "\U0001f7e2" if score >= 80 else ("\U0001f7e1" if score >= 50 else "\U0001f534")
-
-        return (
-            f"{score_icon} *ZetBot {ver} Health*\n\n"
-            f"*Score:* `{score}/100`\n\n"
-            f"*System*\n"
-            f"Uptime:     `{uptime_str}`\n"
-            f"Mode:       `{'PAPER' if paper_mode else 'LIVE'}`\n"
-            f"Trading:    `{'PAUSED \u23f8\ufe0f' if paused else 'ACTIVE'}`\n\n"
-            f"*Resources*\n"
-            f"CPU:        `{cpu_pct:.1f}%`  {cpu_icon} {cpu_label}\n"
-            f"Memory:     `{rss_mb:.1f}MB`  {mem_icon} {mem_label}\n"
-            f"Threads:    `{thread_count}`  {thr_icon} {thr_label}\n\n"
-            f"*Components*\n"
-            f"Internet:   {internet_icon} {internet_status}\n"
-            f"Exchange:   {exchange_icon} {exchange_status}\n"
-            f"Scanner:    {scanner_icon} {scanner_status}\n"
-            f"Telegram:   {telegram_icon} {telegram_status}\n\n"
-            f"*Account*\n"
-            f"Equity:     `${equity:,.2f}`\n"
-            f"Cash:       `${balance:,.2f}`\n"
-            f"Net PnL:    `${net_pnl:+,.2f}`\n"
-            f"Win Rate:   `{win_rate:.1f}%`\n\n"
-            f"*Positions*\n"
-            f"Open:       `{open_positions}`\n"
-            f"Total:      `{total_trades}`\n\n"
-            f"*Timestamps*\n"
-            f"Last Scan:  `{scanner_time}`\n"
-            f"Last Trade: `{api_time}`"
-        )
+        return self._delegate("health")
 
     def _cmd_version(self, _text: str) -> str:
-        """Show ZetBot version information."""
-        git_commit = "N/A"
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                git_commit = result.stdout.strip()
-        except Exception:
-            pass
-
-        py_ver = sys.version.split()[0]
-        ccxt_ver = "N/A"
-        try:
-            import ccxt
-            ccxt_ver = ccxt.__version__
-        except Exception:
-            pass
-
-        uptime_sec = time.time() - self._start_time
-        days, rem = divmod(int(uptime_sec), 86400)
-        hours, rem = divmod(rem, 3600)
-        minutes, _ = divmod(rem, 60)
-        uptime_str = f"{days}d {hours:02d}h {minutes:02d}m" if days else f"{hours:02d}h {minutes:02d}m"
-
-        start_time_str = datetime.fromtimestamp(
-            self._start_time, tz=timezone.utc
-        ).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        return (
-            f"\U0001f916 *ZetBot AI*\n"
-            f"Version: `{BOT_VERSION}`\n"
-            f"Git: `{git_commit}`\n"
-            f"Python: `{py_ver}`\n"
-            f"CCXT: `{ccxt_ver}`\n"
-            f"Exchange: `{self._config.exchange}`\n"
-            f"Mode: `{'PAPER' if self._config.paper_mode else 'LIVE'}`\n"
-            f"Started: `{start_time_str}`\n"
-            f"Uptime: `{uptime_str}`"
-        )
+        return self._delegate("version")
 
     def _cmd_shutdown(self, _text: str) -> str:
-        """Shut down the bot gracefully."""
+        """Shut down the bot gracefully (legacy — direct impl for backward compat)."""
         now = time.time()
-        # Ignore shutdown within grace period to prevent replay of old updates
         if not self._test_mode and now - self._start_time < STARTUP_GRACE_PERIOD:
             _log("Shutdown ignored — still in startup grace period")
             return (
@@ -749,16 +390,12 @@ class TelegramCommandCenter:
             )
 
         _log("Shutdown confirmed — initiating graceful shutdown")
-
-        # Signal the main process to shut down
         if self._shutdown_event:
             self._shutdown_event.set()
         else:
-            # Fallback: write shutdown signal file
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(SHUTDOWN_FILE, "w") as f:
                 f.write(datetime.now(timezone.utc).isoformat())
-
         self._running = False
         return (
             "\U0001f6d1 *Shutting Down*\n"
@@ -766,37 +403,29 @@ class TelegramCommandCenter:
         )
 
     def _cmd_pause(self, _text: str) -> str:
-        """Disable new trade openings."""
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(PAUSE_FILE, "w") as f:
-            f.write(datetime.now(timezone.utc).isoformat())
-        _log("Trading paused")
-        return "\u23f8\ufe0f *Trading Paused*\nNew trades will not be opened."
+        return self._delegate("pause")
 
     def _cmd_resume(self, _text: str) -> str:
-        """Enable new trade openings."""
-        if os.path.exists(PAUSE_FILE):
-            os.remove(PAUSE_FILE)
-        _log("Trading resumed")
-        return "\u25b6\ufe0f *Trading Resumed*\nNew trade openings enabled."
+        return self._delegate("resume")
 
     def _cmd_help(self, _text: str) -> str:
-        """List all available commands."""
-        return (
-            "\U0001f4ac *ZetBot Commands*\n\n"
-            "/status \u2014 Bot status, runtime, positions\n"
-            "/pipeline \u2014 Run full analysis pipeline\n"
-            "/scan \u2014 Run market scanner only\n"
-            "/positions \u2014 Show open positions\n"
-            "/balance \u2014 Account balance & equity\n"
-            "/summary \u2014 Today's trading statistics\n"
-            "/pause \u2014 Disable new trades\n"
-            "/resume \u2014 Enable new trades\n"
-            "/health \u2014 System health & component status\n"
-            "/version \u2014 Bot version & system info\n"
-            "/shutdown \u2014 Gracefully shut down the bot\n"
-            "/help \u2014 Show this message"
+        return self._delegate("help")
+
+    def _delegate(self, cmd: str) -> str:
+        """Dispatch to the modular command system."""
+        response = self._command_center.dispatch(
+            chat_id=self._chat_id or "",
+            message_id=0,
+            update_id=0,
+            text=f"/{cmd}",
+            exchange=None,
+            shutdown_event=self._shutdown_event,
+            pid_file=self._pid_file,
+            start_time=self._start_time,
+            health_monitor=self._health_monitor,
+            test_mode=self._test_mode,
         )
+        return response or "Command returned no output."
 
 
 # ---------------------------------------------------------------------------

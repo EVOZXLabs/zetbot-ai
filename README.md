@@ -39,19 +39,75 @@ stays active in the background. Send `/help` to your bot to see all commands.
 
 No second terminal, no `nohup`, no `tmux`, no `screen` required.
 
+## Architecture
+
+```
+telegram/
+├── command_center.py    # Dispatcher: parse → middleware → execute → reply
+├── registry.py          # Auto-discovers commands in telegram/commands/
+├── context.py           # Per-request context (config, exchange, logger, ...)
+├── middleware.py        # Auth, cooldown, exception handling pipeline
+├── permissions.py       # Chat authorization
+├── formatter.py         # Markdown formatting helpers
+├── base_command.py      # Abstract base class for all commands
+└── commands/            # One file per command — drop a file, it's registered
+    ├── status.py        # /status — bot status overview
+    ├── balance.py       # /balance — account balance & PnL
+    ├── positions.py     # /positions — open positions with SL/TP
+    ├── pipeline.py      # /pipeline — run analysis pipeline
+    ├── scan.py          # /scan — run scanner only
+    ├── summary.py       # /summary — trading statistics
+    ├── health.py        # /health — system health overview
+    ├── version.py       # /version — ZetBot version info
+    ├── pause.py         # /pause — disable new trades
+    ├── resume.py        # /resume — enable new trades
+    ├── shutdown.py      # /shutdown — graceful shutdown
+    ├── help.py          # /help — list all commands
+    ├── logs.py          # /logs — recent log output
+    ├── config.py        # /config — show configuration
+    ├── wallet.py        # /wallet — wallet summary
+    └── ...              # Extend by adding one file
+```
+
+### Adding a New Command
+
+Create one file in `telegram/commands/`:
+
+```python
+from telegram.base_command import BaseCommand, CommandMeta
+
+class MyCommand(BaseCommand):
+    meta = CommandMeta(
+        name="mycommand",
+        aliases=["mc"],
+        description="Does something useful",
+        usage="/mycommand [arg]",
+        permission="user",   # or "admin"
+    )
+    def execute(self, ctx, args: str) -> str:
+        return "Hello from my command!"
+```
+
+That's it. No imports, no registration, no `if/elif`. The registry auto-discovers it.
+
 ## Telegram Commands
 
-| Command      | Description                        |
-|--------------|------------------------------------|
-| `/help`      | List all available commands        |
-| `/status`    | Bot status, balance, positions     |
-| `/balance`   | Account balance & equity           |
-| `/positions` | Show open positions with PnL       |
-| `/pipeline`  | Run full analysis pipeline         |
-| `/scan`      | Run market scanner only            |
-| `/summary`   | Today's trading statistics         |
-| `/pause`     | Disable new trade openings         |
-| `/resume`    | Enable new trade openings          |
+| Command        | Description                        |
+|----------------|------------------------------------|
+| `/help`        | List all available commands        |
+| `/start`       | Alias for /help                    |
+| `/status`      | Bot status, balance, positions     |
+| `/balance`     | Account balance & equity           |
+| `/positions`   | Show open positions with PnL       |
+| `/pipeline`    | Run full analysis pipeline         |
+| `/scan`        | Run market scanner only            |
+| `/summary`     | Today's trading statistics         |
+| `/health`      | System health & component status   |
+| `/version`     | Bot version & system info          |
+| `/pause`       | Disable new trade openings         |
+| `/resume`      | Enable new trade openings          |
+| `/shutdown`    | Gracefully shut down the bot       |
+| `/logs`        | Show recent log output             |
 
 ## Configuration
 
