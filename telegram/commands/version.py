@@ -31,12 +31,8 @@ class VersionCommand(BaseCommand):
             pass
 
         py_ver = sys.version.split()[0]
-        ccxt_ver = "N/A"
-        try:
-            import ccxt  # noqa: PLC0415
-            ccxt_ver = ccxt.__version__
-        except Exception:
-            pass
+        exchange_name = ctx.config.exchange
+        mode = "PAPER" if ctx.config.paper_mode else "LIVE"
 
         uptime_sec = time.time() - ctx.start_time
         days, rem = divmod(int(uptime_sec), 86400)
@@ -53,9 +49,8 @@ class VersionCommand(BaseCommand):
             f"Version: `{BOT_VERSION}`\n"
             f"Git: `{git_commit}`\n"
             f"Python: `{py_ver}`\n"
-            f"CCXT: `{ccxt_ver}`\n"
-            f"Exchange: `{ctx.config.exchange}`\n"
-            f"Mode: `{'PAPER' if ctx.config.paper_mode else 'LIVE'}`\n"
+            f"Exchange: `{exchange_name}`\n"
+            f"Mode: `{mode}`\n"
             f"Started: `{start_time_str}`\n"
             f"Uptime: `{uptime_str}`"
         )

@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from scripts.exchange_manager import ExchangeManager
+from scripts.order_manager import OrderManager
 from scripts.interfaces import (
     IConfigService,
     IExchangeManager,
@@ -74,7 +75,13 @@ class ServiceContainer:
         self._scanner = _ScannerAdapter(self._config_service)
         self._strategy = _StrategyAdapter()
         self._risk = _RiskAdapter(self._config_service)
-        self._order = _OrderAdapter()
+        self._order = OrderManager(
+            config=self._config_service,
+            exchange=self._exchange,
+            wallet=self._wallet,
+            risk=self._risk,
+            mode="PAPER",
+        )
         self._position = _PositionAdapter(self._config_service)
         self._health = None  # created by main.py, injected later
 
@@ -324,25 +331,6 @@ class _RiskAdapter:
         except (FileNotFoundError, json.JSONDecodeError):
             return []
 
-
-class _OrderAdapter:
-    """Wraps scripts.trade_executor as IOrderManager."""
-
-    def execute(self, trade_plan: dict[str, Any]) -> dict[str, Any]:
-        from scripts import trade_executor  # noqa: PLC0415
-        executor = trade_executor.TradeExecutor()
-        plans = executor.run()
-        return plans[0].__dict__ if plans else {}
-
-    def get_orders(self) -> list[dict[str, Any]]:
-        import json, os  # noqa: PLC0415
-        path = "data/trade_plan.json"
-        try:
-            with open(path) as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else data.get("plans", [])
-        except (FileNotFoundError, json.JSONDecodeError):
-            return []
 
 
 class _PositionAdapter:
