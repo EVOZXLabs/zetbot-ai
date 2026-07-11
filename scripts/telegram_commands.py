@@ -54,8 +54,9 @@ UPDATE_ID_FILE = "data/.last_update_id"
 STARTUP_GRACE_PERIOD = 30  # ignore shutdown commands within N seconds of start
 DATA_DIR = "data"
 
-MAX_BACKOFF = 120   # maximum sleep between poll retries (seconds)
-BASE_DELAY = 2.0    # initial retry delay
+MAX_BACKOFF = 120          # maximum sleep between poll retries (seconds)
+BASE_DELAY = 2.0           # initial retry delay
+MAX_CONSECUTIVE_ERRORS = 15  # circuit-breaker: give up after this many consecutive errors
 
 BOT_VERSION = "v0.5.0"
 
@@ -173,25 +174,45 @@ class TelegramCommandCenter:
     def run(self) -> None:
         """Start the polling loop (blocks forever)."""
         try:
-            while self._running:
+            while self._running and not self._is_shutdown():
                 try:
                     updates = self._poll()
                     self._consecutive_errors = 0
                     for update in updates:
+                        if not self._running or self._is_shutdown():
+                            return
                         self._process_update(update)
                 except requests.Timeout:
                     pass
                 except Exception as exc:
                     self._consecutive_errors += 1
+                    if self._consecutive_errors > MAX_CONSECUTIVE_ERRORS:
+                        _log(
+                            f"Too many consecutive errors "
+                            f"({self._consecutive_errors}) — "
+                            f"shutting down polling"
+                        )
+                        self._running = False
+                        return
                     delay = self._backoff_delay()
                     _log(
                         f"Poll error ({self._consecutive_errors}x): {exc}"
                         f"  retry in {delay:.0f}s"
                     )
-                    time.sleep(delay)
+                    if self._shutdown_event is not None:
+                        self._shutdown_event.wait(timeout=delay)
+                        if self._shutdown_event.is_set():
+                            self._running = False
+                            return
+                    else:
+                        time.sleep(delay)
         except KeyboardInterrupt:
             _log("Shutting down")
             self._running = False
+
+    def _is_shutdown(self) -> bool:
+        return (self._shutdown_event is not None
+                and self._shutdown_event.is_set())
 
     def stop(self) -> None:
         """Signal the polling loop to exit."""
@@ -249,8 +270,15 @@ class TelegramCommandCenter:
             "timeout": POLL_TIMEOUT,
             "allowed_updates": ["message"],
         }
-        resp = requests.get(url, params=params, timeout=POLL_REQUEST_TIMEOUT)
-        resp.raise_for_status()
+        try:
+            resp = requests.get(url, params=params, timeout=POLL_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.ConnectionError as exc:
+            _log(f"Telegram connection error (DNS/network): {exc}")
+            return []
+        except requests.Timeout as exc:
+            _log(f"Telegram poll timeout: {exc}")
+            return []
 
         try:
             data = resp.json()
@@ -303,13 +331,18 @@ class TelegramCommandCenter:
         )
 
         if response is not None:
-            self._send(response)
+            if self._running and not self._is_shutdown():
+                # Help command → plain text, not Markdown
+                parse_mode = None if command in ("/help", "/start") else "Markdown"
+                if parse_mode is None:
+                    _log(f"HELP repr: {response!r}")
+                self._send(response, parse_mode=parse_mode)
 
     # ------------------------------------------------------------------
     #  Send
     # ------------------------------------------------------------------
 
-    def _send(self, text: str) -> bool:
+    def _send(self, text: str, parse_mode: Optional[str] = "Markdown") -> bool:
         if self._test_mode:
             _log(f"Replied successfully ({len(text)} chars)")
             return True
@@ -318,19 +351,27 @@ class TelegramCommandCenter:
         payload: dict[str, Any] = {
             "chat_id": self._chat_id,
             "text": text,
-            "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         for attempt in range(1, self._config.telegram_retry + 1):
+            if self._is_shutdown():
+                return False
             try:
                 resp = requests.post(url, json=payload, timeout=self._timeout)
                 resp.raise_for_status()
                 _log("Replied successfully")
                 return True
+            except requests.ConnectionError as exc:
+                _log(
+                    f"Telegram connection error (attempt {attempt}/"
+                    f"{self._config.telegram_retry}): {exc}"
+                )
             except requests.RequestException as exc:
                 resp_body = (
                     exc.response.text[:300]
-                    if exc.response is not None
+                    if getattr(exc, 'response', None) is not None
                     else "no response"
                 )
                 _log(
@@ -338,7 +379,11 @@ class TelegramCommandCenter:
                     f"{self._config.telegram_retry}): {exc}"
                     f"  body={resp_body}"
                 )
-                if attempt < self._config.telegram_retry:
+            if attempt < self._config.telegram_retry:
+                if self._shutdown_event is not None:
+                    if self._shutdown_event.wait(timeout=1 * attempt):
+                        return False
+                else:
                     time.sleep(1 * attempt)
 
         _log("Send failed after all retries")

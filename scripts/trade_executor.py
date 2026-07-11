@@ -339,6 +339,12 @@ class TradeExecutor:
 
             if status == "READY":
                 self.validator.commit(risk)
+                print(f"    READY   {risk.symbol:>12s}  "
+                      f"conf={confidence:.1f}  "
+                      f"R:R {risk.expected_rr:.2f}  "
+                      f"${risk.position_value:>7,.2f}")
+            else:
+                print(f"    {status:>8s} {risk.symbol:>12s}  {reason}")
 
             plans.append(TradeExecution(
                 symbol=risk.symbol,

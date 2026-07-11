@@ -32,7 +32,8 @@ from bot.indicators import IndicatorEngine
 #  Config
 # ---------------------------------------------------------------------------
 
-OHLCV_LIMIT = 200
+MIN_CANDLES = 250          # minimum candles required for analysis (must match fetch limit)
+OHLCV_LIMIT = MIN_CANDLES  # fetch this many candles (must match MIN_CANDLES)
 TIMEFRAME = "1h"
 EXCHANGE_NAME = "binance"
 TOP_N = 50
@@ -352,7 +353,7 @@ class PairAnalyzer:
                 timeframe=TIMEFRAME,
                 limit=OHLCV_LIMIT,
             )
-            if not raw or len(raw) < 250:
+            if not raw or len(raw) < MIN_CANDLES:
                 return PairAnalysis(
                     symbol=pair.symbol, base=pair.base,
                     price=pair.price, volume_24h=pair.volume_24h,
@@ -363,7 +364,7 @@ class PairAnalyzer:
                     atr_pct=0, relative_volume=0,
                     trend_alignment="", candle_count=len(raw) if raw else 0,
                     status="skipped",
-                    error=f"only {len(raw)} candles (< 250)",
+                    error=f"only {len(raw)} candles (< {MIN_CANDLES})",
                 )
 
             df = pd.DataFrame(raw, columns=NORMALIZED_COLUMNS)

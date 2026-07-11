@@ -1,9 +1,11 @@
+import datetime
 import os
+import time
 
 from telegram.base_command import BaseCommand, CommandMeta
+from telegram.formatter import fmt_compact_number, time_ago
 
 PAUSE_FILE = "data/.paused"
-DATA_DIR = "data"
 
 
 class StatusCommand(BaseCommand):
@@ -16,28 +18,111 @@ class StatusCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        runtime = ctx.runtime_formatted()
-        pb = ctx.read_json("paper_balance.json")
-        pos_data = ctx.read_json("positions.json")
-        pos_list = pos_data.get("positions", [])
+        # Uptime
+        if ctx.services is not None and ctx.services.health is not None:
+            uptime_sec = ctx.services.health.uptime_sec
+        else:
+            uptime_sec = 0
+        hours, rem = divmod(int(uptime_sec), 3600)
+        minutes, seconds = divmod(rem, 60)
+        runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-        open_pos = sum(1 for p in pos_list if p.get("status") == "OPEN")
-        closed_pos = sum(
-            1 for p in pos_list if p.get("status") in ("CLOSED", "STOPPED", "TIMEOUT")
-        )
+        # Financial data
+        if ctx.services is not None:
+            m = ctx.services.metrics
+            bal = m.balance()
+            eq = m.equity()
+            net_pnl = m.net_pnl()
+            open_pos = m.open_positions_count()
+            win_rate = 0.0
+            try:
+                wr = m.win_rate()
+                win_rate = wr if isinstance(wr, (int, float)) else 0.0
+            except Exception:
+                pass
+        else:
+            pb = ctx.read_json("paper_balance.json")
+            pos_data = ctx.read_json("positions.json")
+            pos_list = pos_data.get("positions", [])
+            bal = pb.get("final_balance", 0.0)
+            eq = pb.get("final_equity", 0.0)
+            net_pnl = pb.get("net_pnl", 0.0)
+            open_pos = sum(1 for p in pos_list if p.get("status") == "OPEN")
+            win_rate = pb.get("win_rate", 0.0)
+
         paused = os.path.exists(PAUSE_FILE)
+
+        # Scheduler & pipeline status
+        scheduler_status = "N/A"
+        pipeline_status = "N/A"
+        last_scan_str = "N/A"
+        next_scan_str = "N/A"
+        health_score = "N/A"
+
+        if ctx.services is not None:
+            sched = ctx.services.scheduler
+            if sched is not None:
+                scheduler_status = sched.status
+                pipeline_status = sched.status
+                if scheduler_status == "stopped":
+                    scheduler_status = "Stopped"
+                    pipeline_status = "Stopped"
+                elif scheduler_status == "running":
+                    scheduler_status = "Active"
+                    pipeline_status = "Running..."
+                elif scheduler_status == "completed":
+                    scheduler_status = "Active"
+                    pipeline_status = "Idle"
+                elif scheduler_status.startswith("failed"):
+                    scheduler_status = "Active"
+                    pipeline_status = scheduler_status
+                else:
+                    scheduler_status = "Active"
+                    pipeline_status = "Idle"
+
+                if sched.next_run:
+                    next_ts = datetime.datetime.fromtimestamp(
+                        sched.next_run, tz=datetime.timezone.utc
+                    ).strftime("%H:%M:%S UTC")
+                    next_scan_str = next_ts
+                if sched.last_start:
+                    last_scan_str = time_ago(
+                        datetime.datetime.fromtimestamp(
+                            sched.last_start, tz=datetime.timezone.utc
+                        ).isoformat()
+                    )
+
+            # Health score from health monitor
+            if ctx.services.health is not None:
+                try:
+                    snap = ctx.services.health.snapshot()
+                    hs = snap.get("score")
+                    if hs is not None:
+                        health_score = f"{hs:.0f}"
+                    scanner_time_raw = snap.get("scanner_time", "N/A")
+                    if scanner_time_raw != "N/A":
+                        last_scan_str = time_ago(scanner_time_raw)
+                except Exception:
+                    pass
 
         return (
             f"\U0001f916 *Bot Status*\n"
-            f"Status: `ONLINE`\n"
+            f"Mode: `{'PAPER' if ctx.config.paper_mode else 'LIVE'}`  "
             f"Exchange: `{ctx.config.exchange}`\n"
-            f"Mode: `{'PAPER' if ctx.config.paper_mode else 'LIVE'}`\n"
-            f"Runtime: `{runtime}`\n"
+            f"Runtime: `{runtime}`  "
             f"Trading: `{'PAUSED \u23f8\ufe0f' if paused else 'ACTIVE'}`\n"
-            f"Balance: `${pb.get('final_balance', 0):,.2f}`\n"
-            f"Equity: `${pb.get('final_equity', 0):,.2f}`\n"
-            f"Cash: `${pb.get('final_balance', 0):,.2f}`\n"
-            f"Net PnL: `${pb.get('net_pnl', 0):+,.2f}`\n"
+            f"\n"
+            f"*Pipeline*\n"
+            f"Scheduler: `{scheduler_status}`  "
+            f"Pipeline: `{pipeline_status}`\n"
+            f"Last Scan: `{last_scan_str}`  "
+            f"Next Scan: `{next_scan_str}`\n"
+            f"\n"
+            f"*Account*\n"
             f"Open Positions: `{open_pos}`\n"
-            f"Closed Positions: `{closed_pos}`"
+            f"Cash: `{fmt_compact_number(bal)}`  "
+            f"Equity: `{fmt_compact_number(eq)}`\n"
+            f"Net PnL: `{net_pnl:+,.2f}`  "
+            f"Win Rate: `{win_rate:.1f}%`\n"
+            f"Health: `{health_score}`"
         )

@@ -421,3 +421,83 @@ class TestPipelineWithContainer:
 
 
 import pytest  # noqa: PLC0415, E402 (import at end for fixture above)
+
+
+# ======================================================================
+#  Metrics account sync
+# ======================================================================
+
+class TestMetricsAccountSync:
+    """Equity = Cash when no open positions, Equity = Cash + Unrealized PnL otherwise."""
+
+    def test_equity_equals_balance_when_no_open_positions(self) -> None:
+        """With zero open positions, equity should equal balance (cash)."""
+        import json
+        os.makedirs("data", exist_ok=True)
+        # Balance = 10000, Unrealized PnL = 500
+        with open("data/paper_balance.json", "w") as f:
+            json.dump({
+                "final_balance": 10000.0,
+                "final_equity": 10500.0,
+                "realized_pnl": 200.0,
+                "unrealized_pnl": 500.0,
+                "net_pnl": 700.0,
+            }, f)
+        # No open positions
+        with open("data/positions.json", "w") as f:
+            json.dump({"positions": []}, f)
+
+        c = _make_container()
+        assert c.metrics.open_positions_count() == 0
+        assert c.metrics.unrealized_pnl() == 0.0
+        assert c.metrics.equity() == 10000.0
+        assert c.metrics.balance() == 10000.0
+
+    def test_equity_includes_unrealized_when_open_positions(self) -> None:
+        """With open positions, equity = balance + unrealized PnL."""
+        import json
+        os.makedirs("data", exist_ok=True)
+        with open("data/paper_balance.json", "w") as f:
+            json.dump({
+                "final_balance": 10000.0,
+                "final_equity": 10500.0,
+                "realized_pnl": 200.0,
+                "unrealized_pnl": 500.0,
+                "net_pnl": 700.0,
+            }, f)
+        with open("data/positions.json", "w") as f:
+            json.dump({"positions": [{
+                "symbol": "BTC/USDT", "status": "OPEN",
+                "entry_price": 60000.0, "current_price": 61000.0,
+            }]}, f)
+
+        c = _make_container()
+        assert c.metrics.open_positions_count() == 1
+        assert c.metrics.unrealized_pnl() == 500.0
+        assert c.metrics.equity() == 10500.0  # 10000 + 500
+
+    def test_summary_syncs_unrealized_to_zero_when_no_open(self) -> None:
+        """summary() should reflect the same sync logic."""
+        import json
+        os.makedirs("data", exist_ok=True)
+        with open("data/paper_balance.json", "w") as f:
+            json.dump({
+                "final_balance": 10000.0,
+                "final_equity": 10500.0,
+                "realized_pnl": 200.0,
+                "unrealized_pnl": 500.0,
+                "net_pnl": 700.0,
+            }, f)
+        with open("data/positions.json", "w") as f:
+            json.dump({"positions": [{
+                "symbol": "BTC/USDT", "status": "CLOSED",
+                "entry_price": 60000.0, "current_price": 61000.0,
+            }]}, f)
+
+        c = _make_container()
+        s = c.metrics.summary()
+        # No open positions (CLOSED doesn't count)
+        assert s["open_positions"] == 0
+        assert s["unrealized_pnl"] == 0.0
+        assert s["equity"] == 10000.0
+        assert s["net_pnl"] == 200.0  # only realized

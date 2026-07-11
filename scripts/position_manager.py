@@ -114,8 +114,11 @@ class DataLoader:
 
     @staticmethod
     def load_plans(path: str) -> list[TradePlan]:
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
         plans: list[TradePlan] = []
         for p in data.get("plans", []):
             if p.get("status") != "READY":

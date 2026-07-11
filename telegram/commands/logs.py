@@ -25,6 +25,7 @@ class LogsCommand(BaseCommand):
 
         log_files = sorted(
             [f for f in os.listdir(LOG_DIR) if f.endswith(".log")],
+            key=lambda f: os.path.getmtime(os.path.join(LOG_DIR, f)),
             reverse=True,
         )
         if not log_files:

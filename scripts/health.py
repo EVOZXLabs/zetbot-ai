@@ -27,6 +27,8 @@ from scripts.app_config import AppConfig
 from scripts.logger import PipelineLogger
 
 BOT_VERSION = "v0.5.0"
+SCANNER_TIMEOUT = 7200        # seconds before scanner data is considered stale (default 2h)
+SCANNER_CRITICAL = 86400      # seconds before scanner data is considered critical (default 24h)
 
 
 class HealthMonitor:
@@ -101,6 +103,16 @@ class HealthMonitor:
 
         paper_data = _read_json(f"{d}/paper_balance.json")
 
+        # Derive scanner status
+        if scanner_age == float("inf"):
+            scanner_status = "no_data"
+        elif scanner_age < SCANNER_TIMEOUT:
+            scanner_status = "healthy"
+        elif scanner_age < SCANNER_CRITICAL:
+            scanner_status = "stale"
+        else:
+            scanner_status = "critical"
+
         return {
             "version": BOT_VERSION,
             "uptime_sec": int(uptime_sec),
@@ -113,6 +125,9 @@ class HealthMonitor:
             "exchange_name": exchange_name,
             "scanner_time": scanner_time,
             "scanner_age": scanner_age,
+            "scanner_status": scanner_status,
+            "scanner_timeout": SCANNER_TIMEOUT,
+            "scanner_critical": SCANNER_CRITICAL,
             "api_time": api_time,
             "api_age": api_age,
             "balance": paper_data.get("final_balance", 0.0),
@@ -154,7 +169,7 @@ def _check_exchange(name: str) -> tuple[bool, str]:
         exchange_class = getattr(ccxt, name, None)
         if exchange_class is None:
             return False, "unknown"
-        ex = exchange_class({"enableRateLimit": False})
+        ex = exchange_class({"enableRateLimit": False, "timeout": 15000})
         ex.load_markets()
         return True, name
     except Exception:

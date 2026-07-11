@@ -215,8 +215,8 @@ class TestBotFatherExport:
         cfg.telegram_chat_id = "123"
         cc = CommandCenter(cfg, logger=None)
         export = cc.export_botfather_commands()
-        assert "signals -" not in export
-        # signals is hidden, should not appear
+        assert "takeprofit -" not in export
+        # stoploss is hidden, should not appear
 
 
 # ---------------------------------------------------------------------------

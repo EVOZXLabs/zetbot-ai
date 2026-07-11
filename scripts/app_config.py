@@ -80,6 +80,10 @@ class AppConfig:
     maker_fee: float = 0.00075
     slippage_bps: int = 3
 
+    # Pipeline scheduler
+    auto_pipeline: bool = True
+    pipeline_interval_seconds: int = 300
+
 
 def load_config() -> AppConfig:
     """Load configuration from environment variables (via .env)."""
@@ -119,6 +123,8 @@ def load_config() -> AppConfig:
         taker_fee=float(os.getenv("TAKER_FEE", "0.001")),
         maker_fee=float(os.getenv("MAKER_FEE", "0.00075")),
         slippage_bps=int(os.getenv("SLIPPAGE_BPS", "3")),
+        auto_pipeline=os.getenv("AUTO_PIPELINE", "true").lower() == "true",
+        pipeline_interval_seconds=int(os.getenv("PIPELINE_INTERVAL", "300")),
     )
 
 

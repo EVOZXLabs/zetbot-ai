@@ -126,7 +126,43 @@ class OrderManager:
     def validate_live_ready(self) -> Optional[str]:
         return self._engine.validate_live_ready()
 
-    # -- Metrics ----------------------------------------------------------
+    # -- State sync --------------------------------------------------------
+
+    def sync_paper_state(self, result: Any) -> None:
+        """Sync an OrderResult to the canonical paper state files.
+
+        Writes to ``paper_orders.json``, ``paper_balance.json``, and
+        ``positions.json`` so that Telegram commands see the trade
+        immediately.  Safe to call multiple times (the next pipeline
+        run will re-derive authoritative state from ``paper_state.json``).
+        """
+        if self._engine.mode != "PAPER":
+            return
+
+        was_dict = isinstance(result, dict)
+        if was_dict:
+            from scripts.execution_engine import OrderResult  # noqa: PLC0415
+            # best-effort dict -> OrderResult conversion
+            sym = result.get("symbol", "?")
+            side = result.get("side", "?")
+            amt = result.get("filled_amount", result.get("amount", 0.0))
+            price = result.get("filled_price", result.get("price", 0.0))
+            cost = result.get("cost", amt * price)
+            status = result.get("status", "UNKNOWN")
+            pnl = result.get("net_pnl", 0.0)
+        else:
+            sym = result.symbol
+            side = result.side
+            amt = result.filled_amount or result.amount
+            price = result.filled_price or result.price
+            cost = result.cost or amt * price
+            status = result.status
+            pnl = getattr(result, 'net_pnl', 0.0)
+
+        if status not in ("FILLED", "EXECUTED"):
+            return
+
+        _sync_paper_files(sym, side.upper(), amt, price, cost, pnl)
 
     @property
     def metrics(self) -> ExecutionMetrics:
@@ -239,3 +275,86 @@ class OrderManager:
             error=result.error,
             timestamp=result.timestamp,
         )
+
+
+# ---------------------------------------------------------------------------
+#  State sync helpers — write OrderResult to canonical paper JSON files
+# ---------------------------------------------------------------------------
+
+
+def _sync_paper_files(
+    symbol: str, side: str, amount: float, price: float, cost: float, pnl: float,
+) -> None:
+    """Write a manual trade to ``paper_orders.json`` and ``paper_balance.json``."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+    now_ts = datetime.now(timezone.utc).isoformat()
+    data_dir = "data"
+
+    # --- Append to paper_orders.json ---
+    orders_path = f"{data_dir}/paper_orders.json"
+    try:
+        with open(orders_path) as f:
+            orders_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        orders_data = {"orders": []}
+    orders_data.setdefault("orders", []).append({
+        "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": amount,
+        "filled_quantity": amount,
+        "price": price,
+        "fill_price": price,
+        "cost": cost,
+        "net_pnl": round(pnl, 2),
+        "status": "FILLED",
+        "created_at": now_ts,
+        "filled_at": now_ts,
+    })
+    try:
+        with open(orders_path, "w") as f:
+            json.dump(orders_data, f, indent=2)
+    except OSError:
+        pass
+
+    # --- Update paper_balance.json ---
+    bal_path = f"{data_dir}/paper_balance.json"
+    try:
+        with open(bal_path) as f:
+            pb = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pb = {
+            "final_balance": 10000.0,
+            "final_equity": 10000.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "win_rate": 0.0,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+        }
+
+    if side == "BUY":
+        pb["final_balance"] = round(pb.get("final_balance", 10000.0) - cost, 2)
+        pb["final_equity"] = pb["final_balance"]
+    elif side == "SELL":
+        proceeds = amount * price
+        pb["final_balance"] = round(pb.get("final_balance", 10000.0) + proceeds, 2)
+        pb["final_equity"] = pb["final_balance"]
+        pb["total_trades"] = pb.get("total_trades", 0) + 1
+        if pnl > 0:
+            pb["winning_trades"] = pb.get("winning_trades", 0) + 1
+        else:
+            pb["losing_trades"] = pb.get("losing_trades", 0) + 1
+        total = pb.get("total_trades", 0)
+        pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
+        pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
+        pb["net_pnl"] = round(pb.get("net_pnl", 0.0) + pnl, 2)
+
+    try:
+        with open(bal_path, "w") as f:
+            json.dump(pb, f, indent=2)
+    except OSError:
+        pass

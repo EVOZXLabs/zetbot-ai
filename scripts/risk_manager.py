@@ -493,6 +493,11 @@ class RiskManager:
             if approval == "APPROVED":
                 approved_count += 1
                 self._used_capital += pos_value
+                print(f"    APPROVED {dec.symbol:>12s}  "
+                      f"R:R {rr_for_validation:.2f}  "
+                      f"${pos_value:>7,.2f}")
+            else:
+                print(f"    {approval:>8s} {dec.symbol:>12s}  {reason}")
 
             results.append(RiskResult(
                 symbol=dec.symbol,

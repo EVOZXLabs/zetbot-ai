@@ -330,7 +330,7 @@ class PaperTradingEngine:
     # ------------------------------------------------------------------
 
     def _notify_buy(self, plan: dict, fill_price: float, order_id: str) -> None:
-        """Send BUY OPENED Telegram notification."""
+        """Send BUY OPENED Telegram notification with full details."""
         try:
             from bot.telegram import TelegramNotifier
             import bot.config as bot_cfg
@@ -341,18 +341,75 @@ class PaperTradingEngine:
                 "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", "10")),
                 "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
             })
+
+            from telegram.formatter import fmt_price, fmt_compact_number
+
+            symbol = plan["symbol"]
+            entry = fill_price
+            curr = plan.get("current_price", fill_price)
+            sl = plan.get("stop_loss", 0)
+            tp1 = plan.get("tp1", 0)
+            tp2 = plan.get("tp2", 0)
+            tp3 = plan.get("tp3", 0)
+            pos_size = plan.get("position_size_usdt", 0)
+            risk_amt = plan.get("risk_amount", 0)
+            reward = plan.get("reward_amount", 0)
+            rr = plan.get("risk_reward", 0)
+            confidence = plan.get("confidence", plan.get("probability", 0))
+            signal = plan.get("recommendation", "BUY")
+            reasons = plan.get("reasons", ["Paper trade executed"])
+            reasons_str = "; ".join(reasons) if isinstance(reasons, list) else str(reasons)
+            signal_time = plan.get("signal_time", "")
+
+            exchange = str(os.getenv("EXCHANGE", "binance"))
+            timeframe = str(os.getenv("TIMEFRAME", "1h"))
+
+            risk_pct = (risk_amt / pos_size * 100) if pos_size > 0 else 0.0
+            reward_pct = (reward / pos_size * 100) if pos_size > 0 else 0.0
+
+            ema200 = 0.0
+            rsi = 0.0
+            adx = 0.0
+            atr = 0.0
+            try:
+                with open("data/scanner_results.json") as f:
+                    sc_data = json.load(f)
+                for p in sc_data.get("pairs", []):
+                    if p.get("symbol") == symbol:
+                        ema200 = p.get("ema200", 0) or 0
+                        rsi = p.get("rsi14", 0) or 0
+                        adx = p.get("adx14", 0) or 0
+                        atr = p.get("atr_pct", 0) or 0
+                        break
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+
+            ema200_dist = ((curr - ema200) / ema200 * 100) if ema200 > 0 and curr > 0 else 0
+
             notifier = TelegramNotifier()
-            notifier.buy_opened(
-                symbol=plan["symbol"],
-                timeframe="1h",
-                exchange=os.getenv("EXCHANGE", "binance"),
-                entry_price=fill_price,
-                quantity=plan.get("quantity", 0),
-                position_size=plan.get("position_size_usdt", 0),
-                stop_loss=plan.get("stop_loss", 0),
-                take_profit=plan.get("tp1", 0),
-                reasons=plan.get("reasons", ["Paper trade executed"]),
+            msg = (
+                f"\U0001f4b0 *BUY OPENED*\n"
+                f"Pair: `{symbol}`\n"
+                f"Exchange: `{exchange}`  Timeframe: `{timeframe}`\n"
+                f"Signal: `{signal}`  Confidence: `{confidence:.1f}%`\n"
+                f"\n"
+                f"*Prices*\n"
+                f"Entry: `{fmt_price(entry)}`  Current: `{fmt_price(curr)}`\n"
+                f"SL: `{fmt_price(sl)}`  TP1: `{fmt_price(tp1)}`\n"
+                f"TP2: `{fmt_price(tp2)}`  TP3: `{fmt_price(tp3)}`\n"
+                f"\n"
+                f"*Position*\n"
+                f"Size: `{fmt_compact_number(pos_size)} USDT`\n"
+                f"Risk: `{risk_pct:.2f}%`  Reward: `{reward_pct:.2f}%`  R/R: `{rr:.2f}`\n"
+                f"\n"
+                f"*Indicators*\n"
+                f"EMA200: `{fmt_price(ema200)}`  Distance: `{ema200_dist:+.2f}%`\n"
+                f"RSI: `{rsi:.1f}`  ADX: `{adx:.1f}`  ATR: `{atr:.2f}%`\n"
+                f"\n"
+                f"Reason: `{reasons_str}`\n"
+                f"Opened: `{signal_time}`"
             )
+            notifier.send(msg)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send BUY notification: %s", exc
@@ -367,6 +424,7 @@ class PaperTradingEngine:
         exit_reason: str,
         holding_time: timedelta,
         entry_price: float,
+        cost_basis: float = 0.0,
     ) -> None:
         """Send trade closed Telegram notification."""
         try:
@@ -379,20 +437,49 @@ class PaperTradingEngine:
                 "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", "10")),
                 "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
             })
+
+            from telegram.formatter import fmt_price, fmt_holding
+
             notifier = TelegramNotifier()
-            pnl_pct = (total_pnl / (entry_price * 1)) * 100 if entry_price > 0 else 0.0
-            notifier.trade_closed(
-                exit_price=exit_price,
-                pnl_usd=total_pnl,
-                pnl_pct=pnl_pct,
-                balance=balance,
-                exit_reason=exit_reason,
-                holding_time=holding_time,
+            pnl_pct = (total_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+
+            if entry_price > 0 and exit_price > 0:
+                roi_pct = ((exit_price - entry_price) / entry_price * 100)
+            else:
+                roi_pct = 0.0
+
+            emoji_map = {
+                "Take Profit": "\U0001f7e2",
+                "Stop Loss": "\U0001f534",
+                "Strategy Exit": "\u26aa",
+            }
+            emoji = emoji_map.get(exit_reason, "\u2753")
+            result_emoji = "\U0001f7e2" if total_pnl >= 0 else "\U0001f534"
+            result_tag = "WIN" if total_pnl >= 0 else "LOSS"
+
+            holding_str = fmt_holding(holding_time.total_seconds())
+
+            msg = (
+                f"{emoji} *{exit_reason}*\n"
+                f"Pair: `{symbol}`\n"
+                f"Entry: `{fmt_price(entry_price)}`  Exit: `{fmt_price(exit_price)}`\n"
+                f"Held: `{holding_str}`\n"
+                f"\n"
+                f"PnL: `{total_pnl:+.2f}` USDT ({pnl_pct:+.2f}%)\n"
+                f"ROI: `{roi_pct:+.2f}%`\n"
+                f"Balance: `{balance:.2f}` USDT\n"
+                f"Result: {result_emoji} `{result_tag}`"
             )
+            notifier.send(msg)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send close notification: %s", exc
             )
+
+    @staticmethod
+    def _holding_str(td: timedelta) -> str:
+        from telegram.formatter import fmt_holding
+        return fmt_holding(td.total_seconds())
 
     def _save_state(self) -> None:
         """Persist wallet, orders, positions, and equity history."""
@@ -680,6 +767,7 @@ class PaperTradingEngine:
                 exit_reason=exit_reason,
                 holding_time=holding_time,
                 entry_price=vp.entry_price,
+                cost_basis=vp.cost_basis,
             )
             return
 
@@ -743,6 +831,7 @@ class PaperTradingEngine:
                 exit_reason=exit_reason,
                 holding_time=holding_time,
                 entry_price=vp.entry_price,
+                cost_basis=vp.cost_basis,
             )
         else:
             cost_remaining = vp.cost_basis * (remaining_qty / total_qty) \

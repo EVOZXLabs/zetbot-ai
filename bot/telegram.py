@@ -110,6 +110,10 @@ class TelegramNotifier:
     #  Public notification methods
     # ------------------------------------------------------------------
 
+    def send(self, message: str) -> bool:
+        """Send a raw message. Returns True on success."""
+        return self._send(message)
+
     def bot_started(
         self,
         symbol: str,
@@ -174,8 +178,12 @@ class TelegramNotifier:
         balance: float,
         exit_reason: str,
         holding_time: timedelta,
+        symbol: str = "",
+        entry_price: float = 0.0,
     ) -> None:
         """Notify that a trade was closed."""
+        from telegram.formatter import fmt_price, fmt_holding
+
         reason_emoji = {
             "Take Profit": "\U0001f7e2",
             "Stop Loss": "\U0001f534",
@@ -183,17 +191,25 @@ class TelegramNotifier:
         }
         emoji = reason_emoji.get(exit_reason, "\u2753")
         result_tag = "WIN" if pnl_usd >= 0 else "LOSS"
-        holding_str = self._format_timedelta(holding_time)
-        text = (
-            f"{emoji} *{exit_reason}*\n"
-            f"Exit Price: `{exit_price:.2f}`\n"
-            f"PnL: `{pnl_usd:+.2f}` USDT\n"
-            f"PnL %: `{pnl_pct:+.2f}%`\n"
-            f"Balance: `{balance:.2f}` USDT\n"
-            f"Held: `{holding_str}`\n"
-            f"Result: `{result_tag}`\n"
-            f"UTC: `{self._utc_now()}`"
+        holding_str = fmt_holding(holding_time.total_seconds())
+
+        # ROI from prices
+        roi_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 and exit_price > 0 else 0.0
+        if roi_pct == 0.0:
+            roi_pct = pnl_pct
+
+        lines = [f"{emoji} *{exit_reason}*"]
+        if symbol:
+            lines.append(f"Pair: `{symbol}`")
+        lines.append(
+            f"Entry: `{fmt_price(entry_price)}`  Exit: `{fmt_price(exit_price)}`"
+            if entry_price > 0 else f"Exit: `{fmt_price(exit_price)}`"
         )
+        lines.append(f"PnL: `{pnl_usd:+.2f}` USDT (`{pnl_pct:+.2f}%`)")
+        lines.append(f"ROI: `{roi_pct:+.2f}%`  Held: `{holding_str}`")
+        lines.append(f"Balance: `{balance:.2f}` USDT")
+        lines.append(f"Result: `{result_tag}`")
+        text = "\n".join(lines)
         self._send(text)
 
     def state_restored(

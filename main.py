@@ -171,7 +171,7 @@ def _start_worker(
             name,
         )
         return None
-    t = threading.Thread(target=target, name=name)
+    t = threading.Thread(target=target, name=name, daemon=True)
     t.start()
     return t
 
@@ -314,6 +314,16 @@ def _update_paper_on_closure(
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
 
+    qty = new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity
+
+    # Use ExecutionModel for accurate fee/slippage calculation
+    from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
+    sell_result = ExecutionModel.sell(exit_price, qty)
+    fill_price = sell_result["fill_price"]
+    fee = sell_result["fee"]
+    total_proceeds = sell_result["total_proceeds"]
+    pnl = total_proceeds - (new_pos.entry_price * qty)
+
     # Update paper_balance.json
     try:
         with open("data/paper_balance.json") as f:
@@ -332,8 +342,7 @@ def _update_paper_on_closure(
             "net_pnl": 0.0,
         }
 
-    pnl = new_pos.total_pnl
-    pb["final_balance"] = round(pb.get("final_balance", 10000.0) + pnl, 2)
+    pb["final_balance"] = round(pb.get("final_balance", 10000.0) + total_proceeds, 2)
     pb["final_equity"] = pb["final_balance"]
     pb["total_trades"] = pb.get("total_trades", 0) + 1
     if pnl > 0:
@@ -357,16 +366,15 @@ def _update_paper_on_closure(
         "symbol": symbol,
         "side": "SELL",
         "type": "MARKET",
-        "quantity": new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity,
-        "filled_quantity": new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity,
+        "quantity": qty,
+        "filled_quantity": qty,
         "entry_price": new_pos.entry_price,
-        "fill_price": exit_price,
-        "slippage": 0.0,
-        "entry_fee": 0.0,
-        "exit_price": exit_price,
+        "fill_price": round(fill_price, 6),
+        "slippage": round(fill_price - exit_price, 6),
+        "entry_fee": round(fee, 6),
+        "exit_price": round(fill_price, 6),
         "exit_fee": 0.0,
-        "total_cost": 0.0,
-        "total_proceeds": exit_price * (new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity),
+        "total_proceeds": round(total_proceeds, 2),
         "net_pnl": round(pnl, 2),
         "net_pnl_pct": round(new_pos.floating_pnl_pct, 2),
         "status": "CLOSED",
@@ -529,7 +537,11 @@ def _monitor_positions(
     # Fetch tickers for active symbols
     symbols = [p["symbol"] for p in active if "symbol" in p]
     try:
-        exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+        exchange = ccxt.binance({
+            "enableRateLimit": True,
+            "options": {"defaultType": "spot"},
+            "timeout": 15000,
+        })
         tickers = exchange.fetch_tickers(symbols)
     except Exception as exc:
         logger.debug(f"Monitor ticker fetch failed: {exc}")
@@ -683,6 +695,8 @@ def main() -> None:
     def _shutdown_handler(signum: int, _frame: Any) -> None:
         logger.info(f"Signal {signum} received — shutting down")
         shutdown.set()
+        # Force exit after 8s if graceful shutdown doesn't complete
+        threading.Timer(8.0, os._exit, args=[1]).start()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
@@ -705,7 +719,7 @@ def main() -> None:
     logger.info("Health Monitor started (every 60s)")
 
     # ------------------------------------------------------------------
-    #  Telegram Command Center — start BEFORE pipeline for responsiveness
+    #  Telegram Command Center — start BEFORE scheduler for responsiveness
     # ------------------------------------------------------------------
 
     center: Any = None
@@ -744,34 +758,40 @@ def main() -> None:
             logger.info("Telegram disabled — command center not started")
 
     # ------------------------------------------------------------------
-    #  Run pipeline once on startup
+    #  Startup — load state, recover positions, check TP/SL, update stats
     # ------------------------------------------------------------------
 
-    pipeline = Pipeline(config, logger, container=container)
-    last_pipeline_time: float = time.time()
-    try:
-        results = pipeline.run()
-    except Exception as exc:
-        logger.error(f"Pipeline failed: {exc}")
-        results = []
-
-    total_elapsed = time.time() - t0
-    if results:
-        summary_lines = _build_summary(results, config)
-        logger.summary(summary_lines)
-
-        if config.telegram_enabled:
-            logger.info("Sending Telegram notification...")
-            _send_telegram(config, summary_lines)
-
-        any_failed = any(not r.success for r in results)
-        if any_failed:
-            logger.error("Pipeline had failures — see logs for details")
-
-        # Send buy notifications for any open positions
-        _notify_existing_positions(logger, config)
+    if config.paper_mode:
+        try:
+            from scripts.paper_trading_engine import main as paper_main
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(paper_main)
+                fut.result(timeout=30)
+            logger.info("Paper engine state restored — positions recovered, TP/SL checked")
+        except concurrent.futures.TimeoutError:
+            logger.warning("Paper engine startup timed out — continuing")
+        except Exception as exc:
+            logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
     else:
-        logger.info("Pipeline did not produce results — skipping summary")
+        logger.info("Live mode — skipping paper engine startup")
+
+    # ------------------------------------------------------------------
+    #  Scheduler — automatic periodic pipeline execution
+    # ------------------------------------------------------------------
+
+    scheduler: Any = None
+    if config.auto_pipeline:
+        from scripts.pipeline_scheduler import PipelineScheduler
+
+        scheduler = PipelineScheduler(
+            pipeline_fn=container.run_pipeline,
+            interval=config.pipeline_interval_seconds,
+            logger=logger,
+            shutdown_event=shutdown,
+        )
+        container.inject_scheduler(scheduler)
+        scheduler.start()
 
     # ------------------------------------------------------------------
     #  Keep alive — monitor workers, health, shutdown
@@ -858,6 +878,10 @@ def main() -> None:
                 logger.info("Telegram thread stopped cleanly")
 
     # Stop health monitor (sets shutdown_event to wake up health thread)
+    if scheduler:
+        logger.info("Stopping Pipeline Scheduler...")
+        scheduler.stop()
+
     health.stop()
 
     # Remove PID file
@@ -882,5 +906,136 @@ def main() -> None:
     sys.exit(0)
 
 
+# ---------------------------------------------------------------------------
+#  CLI Entry Points
+# ---------------------------------------------------------------------------
+
+
+def _cli_setup() -> None:
+    from scripts.setup_wizard import run_setup_wizard
+    run_setup_wizard()
+
+
+def _cli_config() -> None:
+    from scripts.config_manager import display_config
+    print(display_config())
+
+
+def _cli_reset_config() -> None:
+    from scripts.config_manager import reset_env, display_config
+    from scripts.setup_wizard import run_setup_wizard
+    reset_env(backup=True)
+    print("Previous configuration backed up.\n")
+    run_setup_wizard()
+
+
+def _cli_wizard() -> None:
+    from scripts.wizard_menu import run_wizard_menu
+    run_wizard_menu()
+
+
+def _cli_diagnostics() -> None:
+    from scripts.diagnostics import run_diagnostics
+    result = run_diagnostics()
+    result.print_report()
+
+
+def _cli_backup() -> None:
+    from scripts.backup_restore import create_backup
+    try:
+        path = create_backup()
+        print(f"Backup created: {path}")
+    except Exception as exc:
+        print(f"Backup failed: {exc}")
+        sys.exit(1)
+
+
+def _cli_restore() -> None:
+    import sys
+    if len(sys.argv) < 3:
+        print("Usage: python3 main.py --restore <backup.zip>")
+        sys.exit(1)
+    backup_path = sys.argv[2]
+    from scripts.backup_restore import restore_backup
+    if not restore_backup(backup_path):
+        sys.exit(1)
+
+
+def _cli_export_config() -> None:
+    from scripts.config_import_export import export_config
+    include_secrets = "--include-secrets" in sys.argv
+    password = None
+    if "--password" in sys.argv:
+        idx = sys.argv.index("--password")
+        if idx + 1 < len(sys.argv):
+            password = sys.argv[idx + 1]
+    try:
+        path = export_config(include_secrets=include_secrets, password=password)
+        print(f"Configuration exported to {path}")
+    except Exception as exc:
+        print(f"Export failed: {exc}")
+        sys.exit(1)
+
+
+def _cli_import_config() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: python3 main.py --import-config <file.json> [--password <pass>] [--force]")
+        sys.exit(1)
+    config_path = sys.argv[2]
+    password = None
+    if "--password" in sys.argv:
+        idx = sys.argv.index("--password")
+        if idx + 1 < len(sys.argv):
+            password = sys.argv[idx + 1]
+    force = "--force" in sys.argv
+    from scripts.config_import_export import import_config
+    if not import_config(config_path, password=password, force=force):
+        sys.exit(1)
+
+
+def _cli_test_exchange() -> None:
+    from scripts.exchange_test import test_exchange
+    result = test_exchange()
+    print(result)
+
+
+def _cli_test_telegram() -> None:
+    from scripts.telegram_test import test_telegram
+    result = test_telegram()
+    print(f"\n=== Telegram Connection Test ===\n")
+    print(f"  {result}")
+
+
+def _cli_system_info() -> None:
+    from scripts.system_info import get_system_info
+    info = get_system_info()
+    print(info)
+
+
+CLI_DISPATCH: dict[str, callable] = {
+    "--setup": _cli_setup,
+    "--config": _cli_config,
+    "--reset-config": _cli_reset_config,
+    "--wizard": _cli_wizard,
+    "--diagnostics": _cli_diagnostics,
+    "--backup": _cli_backup,
+    "--restore": _cli_restore,
+    "--export-config": _cli_export_config,
+    "--import-config": _cli_import_config,
+    "--test-exchange": _cli_test_exchange,
+    "--test-telegram": _cli_test_telegram,
+    "--system": _cli_system_info,
+}
+
+
+def _run_cli() -> None:
+    """Dispatch to the appropriate CLI handler."""
+    for flag, handler in CLI_DISPATCH.items():
+        if flag in sys.argv:
+            handler()
+            sys.exit(0)
+
+
 if __name__ == "__main__":
+    _run_cli()
     main()

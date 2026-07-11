@@ -261,7 +261,7 @@ class TestNotificationMethods:
         assert "+3.00%" in text
         assert "10150" in text
         assert "WIN" in text
-        assert "04:30:00" in text
+        assert "4h 30m" in text
 
     def test_trade_closed_loss(self) -> None:
         _enable_telegram()
@@ -297,7 +297,7 @@ class TestNotificationMethods:
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
         assert "*Strategy Exit*" in text
-        assert "01:15:00" in text
+        assert "1h 15m" in text
 
     def test_state_restored(self) -> None:
         _enable_telegram()

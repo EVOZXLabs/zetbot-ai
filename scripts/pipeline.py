@@ -29,6 +29,16 @@ from scripts.logger import PipelineLogger
 
 
 STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
+SCANNER_OUTPUT = "data/scanner_results.json"
+
+
+def _touch_file(path: str) -> None:
+    """Update file mtime to now (create if missing)."""
+    try:
+        with open(path, "a"):
+            os.utime(path, None)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -104,6 +114,7 @@ class Pipeline:
         If any stage fails, subsequent stages are skipped and the
         pipeline returns immediately.
         """
+        self.results = []
         self.logger.pipeline_start()
         self._apply_config()
 
@@ -213,9 +224,11 @@ class Pipeline:
     def _run_scanner() -> None:
         from scripts import scanner
         scanner.main()
+        _touch_file("data/scanner_results.json")
 
     def _run_scanner_di(self) -> None:
         self.container.scanner.run()
+        _touch_file("data/scanner_results.json")
 
     @staticmethod
     def _run_decision() -> None:
@@ -242,9 +255,11 @@ class Pipeline:
         trade_executor.main()
 
     def _run_trade_di(self) -> None:
-        approved = self.container.risk.get_approved()
-        for plan in approved:
-            self.container.order.execute(plan)
+        from scripts import trade_executor
+        trade_executor.main()
+        # NOTE: Order execution happens in the Paper stage.
+        # The trade executor writes trade_plan.json; the paper engine
+        # reads it and opens positions via the execution engine.
 
     @staticmethod
     def _run_position() -> None:

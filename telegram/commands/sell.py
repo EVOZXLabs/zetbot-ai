@@ -59,6 +59,7 @@ class SellCommand(BaseCommand):
             fill_price = result.get("filled_price", 0)
 
         if status in ("FILLED", "EXECUTED"):
+            ctx.services.order.sync_paper_state(result)
             return (
                 f"\u2705 *Sell Executed*\n"
                 f"Symbol: `{symbol}`\n"

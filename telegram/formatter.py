@@ -1,4 +1,5 @@
-from typing import Any
+import datetime
+from typing import Any, Optional
 
 
 def bold(s: str) -> str:
@@ -25,10 +26,6 @@ def fmt_pnl(value: float) -> str:
     return f"{value:+,.2f}"
 
 
-def fmt_ratio(value: float) -> str:
-    return f"{value:.2%}"
-
-
 def fmt_time(seconds: float) -> str:
     h, rem = divmod(int(seconds), 3600)
     m, s = divmod(rem, 60)
@@ -41,3 +38,83 @@ def key_val(key: str, val: str) -> str:
 
 def listify(items: list[str], bullet: str = "•") -> str:
     return "\n".join(f"{bullet} {i}" for i in items)
+
+
+def time_ago(ts: Optional[str]) -> str:
+    if not ts:
+        return "N/A"
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = datetime.datetime.fromisoformat(ts)
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, TypeError):
+        return ts
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    delta = now - dt
+    secs = int(delta.total_seconds())
+    if secs < 0:
+        return "now"
+    if secs < 60:
+        return f"{secs}s ago"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+
+def time_ago_short(ts: Optional[str]) -> str:
+    """Compact version: now / Xm / Xh / Xd."""
+    ago = time_ago(ts)
+    return ago
+
+
+def dynamic_precision(price: float) -> int:
+    if price >= 1000:
+        return 2
+    if price >= 1:
+        return 4
+    if price >= 0.01:
+        return 6
+    return 8
+
+
+def fmt_price(price: float) -> str:
+    d = dynamic_precision(price)
+    return f"{price:.{d}f}"
+
+
+def fmt_pct(value: float) -> str:
+    return f"{value:+.2f}%"
+
+
+def fmt_holding(seconds: float) -> str:
+    if seconds < 60:
+        return "<1m"
+    hours = seconds // 3600
+    if hours < 1:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        if secs == 0:
+            return f"{mins}m"
+        return f"{mins}m {secs}s"
+    if hours < 24:
+        return f"{int(hours)}h {int((seconds % 3600) // 60)}m"
+    days = int(hours // 24)
+    rem_h = int(hours % 24)
+    return f"{days}d {rem_h}h"
+
+
+def fmt_compact_number(value: float) -> str:
+    if abs(value) >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"${value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"${value / 1_000:.2f}K"
+    return f"${value:.2f}"

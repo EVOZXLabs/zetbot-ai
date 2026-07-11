@@ -1,4 +1,5 @@
 from telegram.base_command import BaseCommand, CommandMeta
+from telegram.formatter import fmt_compact_number
 
 
 class PipelineCommand(BaseCommand):
