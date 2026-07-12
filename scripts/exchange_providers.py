@@ -90,6 +90,14 @@ class ExchangeProvider(Protocol):
         """True if this provider was constructed with API key + secret."""
         ...
 
+    def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+        """Return the ccxt ``params`` dict to tag an order with a client id.
+
+        The correct param name differs per exchange (e.g. Binance wants
+        ``newClientOrderId``, others accept the unified ``clientOrderId``).
+        """
+        ...
+
 
 # ======================================================================
 #  BaseProvider — shared CCXT logic
@@ -134,6 +142,14 @@ class BaseProvider:
     def has_credentials(self) -> bool:
         """True if this provider was constructed with API key + secret."""
         return bool(self._api_key and self._api_secret)
+
+    def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+        """Default: unified ccxt ``clientOrderId`` param.
+
+        Override per-exchange if the API needs a different key name
+        (see ``BinanceProvider``).
+        """
+        return {"clientOrderId": client_order_id}
 
     # -- Properties ------------------------------------------------------
 
@@ -254,6 +270,10 @@ class BinanceProvider(BaseProvider):
     CCXT_NAME = "binance"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
 
+    def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+        # Binance's spot API expects newClientOrderId, not clientOrderId.
+        return {"newClientOrderId": client_order_id}
+
 
 class BybitProvider(BaseProvider):
     CCXT_NAME = "bybit"
@@ -278,6 +298,9 @@ class TokocryptoProvider(BaseProvider):
     @property
     def ccxt_name(self) -> str:
         return "binance"
+
+    def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+        return {"newClientOrderId": client_order_id}
 
 
 class OKXProvider(BaseProvider):

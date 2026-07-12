@@ -27,6 +27,13 @@ from scripts.execution_engine import (
 )
 
 
+class OrderVerificationError(Exception):
+    """Raised when a retry cannot verify whether the previous LIVE order
+    attempt actually reached the exchange. Retries must stop here rather
+    than guess — resubmitting blindly risks a duplicate real-money fill.
+    """
+
+
 RETRY_MAX = 3
 RETRY_DELAY_SEC = 1.0
 
@@ -224,11 +231,50 @@ class OrderManager:
         return None
 
     def _execute_with_retry(self, request: OrderRequest) -> OrderResult:
-        """Execute with simple retry policy for transient failures."""
+        """Execute with a retry policy for transient failures.
+
+        For LIVE orders, every retry FIRST checks the exchange for an
+        order already tagged with this request's ``client_order_id``.
+        A network timeout doesn't mean the order failed — it may have
+        filled on the exchange while the response was lost. Resubmitting
+        blindly in that case would buy/sell twice. If we can't verify
+        either way, we stop and surface the ambiguity instead of guessing.
+        """
         last_error: Optional[str] = None
         max_retries = max(1, RETRY_MAX)
+        is_live = self._engine.mode == "LIVE"
 
         for attempt in range(max_retries):
+            if attempt > 0 and is_live:
+                try:
+                    existing = self._find_existing_live_order(request)
+                except OrderVerificationError as exc:
+                    return OrderResult(
+                        order_id=_generate_id("unverified_"),
+                        trace_id=request.trace_id,
+                        execution_id=_generate_id("exe_"),
+                        status="FAILED",
+                        symbol=request.symbol,
+                        side=request.side,
+                        type=request.type,
+                        amount=request.amount,
+                        error=(
+                            f"Retry aborted — could not confirm whether the "
+                            f"previous attempt reached the exchange ({exc}). "
+                            f"Check manually before resubmitting "
+                            f"(client_order_id={request.client_order_id})."
+                        ),
+                        retries=attempt,
+                        executor="order_manager",
+                        exchange=self._exchange.name,
+                        mode=self._engine.mode,
+                        timestamp=_now(),
+                    )
+                if existing is not None:
+                    return self._result_from_existing_order(
+                        request, existing, attempt,
+                    )
+
             result = self._engine.execute(request)
 
             if result.status not in ("FAILED",):
@@ -254,6 +300,96 @@ class OrderManager:
             executor="order_manager",
             exchange=self._exchange.name,
             mode=self._engine.mode,
+            timestamp=_now(),
+        )
+
+    def _find_existing_live_order(
+        self, request: OrderRequest,
+    ) -> Optional[dict[str, Any]]:
+        """Look up the exchange for an order already tagged with this
+        request's ``client_order_id``.
+
+        Returns the matching ccxt order dict if found, ``None`` if the
+        lookup succeeded and genuinely found nothing. Raises
+        ``OrderVerificationError`` if the lookup itself could not be
+        completed reliably (in which case the caller must NOT retry).
+        """
+        try:
+            provider = self._exchange.get_provider()
+            ex = provider._get_exchange()
+        except Exception as exc:
+            raise OrderVerificationError(
+                f"cannot reach exchange to verify: {exc}",
+            ) from exc
+
+        client_id = request.client_order_id
+        symbol = request.symbol
+        candidates: list[dict[str, Any]] = []
+
+        try:
+            if provider.has("fetchOpenOrders"):
+                candidates.extend(ex.fetch_open_orders(symbol) or [])
+            if provider.has("fetchClosedOrders"):
+                candidates.extend(ex.fetch_closed_orders(symbol, limit=20) or [])
+            elif provider.has("fetchOrders"):
+                candidates.extend(ex.fetch_orders(symbol, limit=20) or [])
+        except Exception as exc:
+            raise OrderVerificationError(
+                f"order lookup failed: {exc}",
+            ) from exc
+
+        if not provider.has("fetchOpenOrders") and not (
+            provider.has("fetchClosedOrders") or provider.has("fetchOrders")
+        ):
+            # No way to look anything up at all — never safe to guess.
+            raise OrderVerificationError(
+                f"{provider.name} supports no order-lookup method",
+            )
+
+        for order in candidates:
+            tag = order.get("clientOrderId") or order.get("client_order_id")
+            if tag and str(tag) == client_id:
+                return order
+        return None
+
+    def _result_from_existing_order(
+        self, request: OrderRequest, order: dict[str, Any], retries: int,
+    ) -> OrderResult:
+        """Convert a previously-found exchange order into an OrderResult
+        instead of resubmitting it."""
+        status_map = {
+            "closed": "FILLED",
+            "open": "EXECUTED",
+            "canceled": "CANCELLED",
+            "cancelled": "CANCELLED",
+            "expired": "CANCELLED",
+            "rejected": "REJECTED",
+        }
+        status = status_map.get(str(order.get("status", "")).lower(), "EXECUTED")
+        filled = float(order.get("filled", 0) or 0)
+        price = float(order.get("average") or order.get("price") or 0)
+        fee_info = order.get("fee") or {}
+        fee = float(fee_info.get("cost", 0) or 0) if isinstance(fee_info, dict) else 0.0
+        cost = float(order.get("cost", filled * price) or 0)
+
+        return OrderResult(
+            order_id=str(order.get("id", "")),
+            trace_id=request.trace_id,
+            execution_id=_generate_id("exe_"),
+            status=status,
+            symbol=request.symbol,
+            side=request.side,
+            type=request.type,
+            amount=request.amount,
+            filled_amount=filled,
+            filled_price=price,
+            fee=fee,
+            cost=cost,
+            error=None,
+            retries=retries,
+            executor="order_manager_verified",
+            exchange=self._exchange.name,
+            mode="LIVE",
             timestamp=_now(),
         )
 

@@ -66,9 +66,13 @@ class OrderRequest:
     Every order in the system uses this model regardless of mode.
     The ``trace_id`` links all attempts of the same logical trade.
     The ``execution_id`` distinguishes each retry.
+    The ``client_order_id`` is sent to the exchange on every LIVE attempt
+    for this request so a retry can never result in a duplicate fill —
+    see ``OrderManager._find_existing_live_order``.
     """
 
     trace_id: str = ""
+    client_order_id: str = ""
     symbol: str = ""
     side: str = "BUY"
     type: str = "MARKET"
@@ -82,6 +86,11 @@ class OrderRequest:
     def __post_init__(self) -> None:
         if not self.trace_id:
             self.trace_id = str(uuid.uuid4())
+        if not self.client_order_id:
+            # Deterministic from trace_id so every retry of the SAME
+            # logical order reuses the same exchange-side client id.
+            # Prefixed + truncated to stay within Binance's 36-char limit.
+            self.client_order_id = "zb" + self.trace_id.replace("-", "")[:34]
 
 
 @dataclass
@@ -199,6 +208,35 @@ def _now() -> str:
 def _generate_id(prefix: str = "") -> str:
     uid = uuid.uuid4().hex[:12]
     return f"{prefix}{uid}" if prefix else uid
+
+
+def _map_live_order_status(ccxt_order: dict[str, Any], requested_amount: float) -> str:
+    """Map a raw ccxt ``create_order`` response to our ``OrderStatus``.
+
+    A market order is NOT guaranteed to be fully filled by the time
+    ``create_order`` returns — some exchanges (or ccxt's own response)
+    can report ``open`` or a partial ``filled`` amount. This must not be
+    reported as a blanket "EXECUTED"/"FILLED", or downstream position
+    tracking will assume the trade fully settled when it may not have.
+
+    This is a best-effort snapshot of the create_order response only —
+    it is NOT a substitute for polling fetch_order() later to confirm
+    final settlement (order reconciliation — not implemented yet).
+    """
+    raw_status = str(ccxt_order.get("status") or "").lower()
+    filled = float(ccxt_order.get("filled", 0) or 0)
+
+    if raw_status in ("canceled", "cancelled", "expired"):
+        return "CANCELLED"
+    if raw_status == "rejected":
+        return "REJECTED"
+
+    if filled <= 0:
+        return "PENDING"
+    # Small tolerance for float / exchange rounding, not a real gap.
+    if requested_amount > 0 and filled < requested_amount * 0.999:
+        return "PARTIALLY_FILLED"
+    return "FILLED"
 
 
 # ======================================================================
@@ -441,20 +479,7 @@ class LiveExecutor:
                 request, f"Invalid amount: {amount}", self.name,
             )
 
-        # Validate API credentials on the active provider
-        try:
-            provider = exchange.get_provider()
-            balance = provider.fetch_balance()
-            if not balance or balance.get("free") is None:
-                return OrderResult.rejected(
-                    request,
-                    "Cannot validate live balance — check API credentials.",
-                    self.name,
-                )
-        except Exception as exc:
-            return OrderResult.failed(
-                request, f"Live API check failed: {exc}", self.name,
-            )
+        provider = exchange.get_provider()
 
         price = request.price
         if price is None:
@@ -466,27 +491,87 @@ class LiveExecutor:
                 request, f"Cannot determine price for {symbol}", self.name,
             )
 
+        # Validate the account is reachable/authenticated and (when
+        # possible) has enough balance — BEFORE submitting the order.
+        #
+        # Prefer the wallet adapter (LiveWalletAdapter has a ~10s cache)
+        # over calling provider.fetch_balance() directly on every single
+        # order: that was one extra authenticated API round-trip per
+        # order, adding latency and eating into exchange rate limits for
+        # no benefit once the wallet's own cache already exists.
+        free_balance: Optional[float] = None
+        try:
+            if wallet is not None:
+                free_balance = wallet.free_balance
+            else:
+                # No wallet adapter wired in (e.g. direct/test usage) —
+                # fall back to a raw check so we never skip validation.
+                balance = provider.fetch_balance()
+                if not balance or balance.get("free") is None:
+                    return OrderResult.rejected(
+                        request,
+                        "Cannot validate live balance — check API credentials.",
+                        self.name,
+                    )
+        except Exception as exc:
+            return OrderResult.failed(
+                request, f"Live balance check failed: {exc}", self.name,
+            )
+
+        if side == "BUY" and free_balance is not None:
+            est_cost = amount * price
+            if est_cost > free_balance:
+                return OrderResult.rejected(
+                    request,
+                    f"Insufficient balance: need ~{est_cost:.2f}, "
+                    f"have {free_balance:.2f}",
+                    self.name,
+                )
+
         try:
             ex = provider._get_exchange()
             order_type = "market" if request.type == "MARKET" else "limit"
+
+            # Round to the exchange's lot-size / tick-size BEFORE sending,
+            # or Binance/others reject with LOT_SIZE / PRICE_FILTER errors.
+            precise_amount = provider.amount_to_precision(symbol, amount)
+            precise_price = (
+                provider.price_to_precision(symbol, price)
+                if request.type == "LIMIT" else None
+            )
+
+            # Tag the order with our client_order_id so a retry can check
+            # "did this already land?" instead of blindly resubmitting —
+            # see OrderManager._find_existing_live_order.
+            id_params = provider.client_order_id_params(request.client_order_id)
+
             ccxt_order = ex.create_order(
                 symbol=symbol,
                 type=order_type,
                 side=side.lower(),
-                amount=amount,
-                price=price if request.type == "LIMIT" else None,
+                amount=precise_amount,
+                price=precise_price,
+                params=id_params,
             )
 
             elapsed = (time.time() - t0) * 1000
+            # NOTE: this status reflects ccxt's response to create_order()
+            # ONLY. Market orders are not always instantly final on every
+            # exchange — the response can still say "open"/partially
+            # filled. This is a best-effort snapshot, not a settlement
+            # confirmation; a later reconciliation pass (polling
+            # fetch_order by id/client_order_id) is needed before treating
+            # a position as fully opened/closed. Not implemented yet.
+            status = _map_live_order_status(ccxt_order, precise_amount)
             return OrderResult(
                 order_id=str(ccxt_order.get("id", _generate_id("live_"))),
                 trace_id=request.trace_id,
                 execution_id=_generate_id("exe_"),
-                status="EXECUTED",
+                status=status,
                 symbol=symbol,
                 side=side,
                 type=request.type,
-                amount=amount,
+                amount=precise_amount,
                 filled_amount=float(ccxt_order.get("filled", 0)),
                 filled_price=float(ccxt_order.get("price", price)),
                 fee=float(ccxt_order.get("fee", {}).get("cost", 0)),
