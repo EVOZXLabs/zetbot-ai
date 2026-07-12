@@ -735,6 +735,33 @@ def main() -> None:
             )
 
     # ------------------------------------------------------------------
+    #  LIVE-armed state from a PREVIOUS session — NEVER auto-reactivate.
+    #  A restart (crash, deploy, VPS reboot, ...) is not the operator
+    #  choosing to keep trading real money. If the last session left
+    #  live_armed.json with armed=true, reset it here and require a
+    #  fresh /golive + CONFIRM LIVE before any real order can be placed.
+    #  (in-memory LiveExecutor.ENABLED already defaults to False on
+    #  every process start regardless — this just makes the reset and
+    #  the reason for it visible/auditable.)
+    # ------------------------------------------------------------------
+    try:
+        prev_live_state = container.order.read_live_armed_state()
+    except Exception:
+        prev_live_state = {}
+
+    if prev_live_state.get("armed"):
+        logger.warning(
+            "Found LIVE-armed state from a previous session "
+            f"(armed at {prev_live_state.get('time', '?')}) — resetting. "
+            "Live trading requires /golive + CONFIRM LIVE again after "
+            "every restart."
+        )
+        try:
+            container.order.disarm_live(reason="process_restart")
+        except Exception as exc:
+            logger.error(f"Failed to reset live_armed.json on restart: {exc}")
+
+    # ------------------------------------------------------------------
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
