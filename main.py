@@ -710,6 +710,31 @@ def main() -> None:
     logger.info("Service Container initialised")
 
     # ------------------------------------------------------------------
+    #  LIVE mode status — surface this LOUDLY so nobody assumes they're
+    #  trading live just because PAPER_MODE=false. Engine mode now
+    #  follows config.paper_mode (Phase 1), but actual order execution
+    #  still requires an explicit enable_live() call (Phase 5 — not
+    #  wired to any startup flag on purpose) — until then, LIVE mode
+    #  silently falls back to the simulation executor.
+    # ------------------------------------------------------------------
+    if container.order.mode == "LIVE":
+        if container.order.is_live_enabled():
+            live_error = container.order.validate_live_ready()
+            if live_error:
+                logger.error(f"LIVE mode ARMED but misconfigured: {live_error}")
+            else:
+                logger.info(
+                    "LIVE mode ARMED — real orders will be submitted to "
+                    f"{config.exchange}."
+                )
+        else:
+            logger.info(
+                "Mode is LIVE but live execution is NOT armed "
+                "(enable_live() was never called) — orders will run "
+                "through the simulation executor, not the real exchange."
+            )
+
+    # ------------------------------------------------------------------
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
