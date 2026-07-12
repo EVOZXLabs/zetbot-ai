@@ -89,7 +89,7 @@ class ServiceContainer:
             exchange=self._exchange,
             wallet=self._wallet,
             risk=self._risk,
-            mode="PAPER",
+            mode="PAPER" if self._config_service.paper_mode else "LIVE",
         )
         self._position = _PositionAdapter(self._config_service)
         self._health = None  # created by main.py, injected later
