@@ -17,6 +17,16 @@ from typing import Any, Optional, Protocol, runtime_checkable
 import ccxt  # noqa: PLC0415
 
 
+class ExchangeAuthError(Exception):
+    """Raised when a live exchange call fails despite credentials being set.
+
+    Callers (wallet adapters, live executor) MUST treat this as fatal and
+    must NOT fall back to interpreting it as a zero/empty balance — doing
+    so silently would let the bot size or place orders against a wrong
+    balance.
+    """
+
+
 # ======================================================================
 #  ExchangeProvider Protocol
 # ======================================================================
@@ -47,7 +57,13 @@ class ExchangeProvider(Protocol):
         ...
 
     def fetch_balance(self) -> dict[str, Any]:
-        """Fetch account balance (empty in paper mode)."""
+        """Fetch account balance.
+
+        Raises ``ExchangeAuthError`` if credentials are set but the call
+        fails (auth error, network, etc.) — never silently returns an
+        empty/zero balance in that case. Returns ``{}`` only when no
+        credentials were provided (e.g. paper/scanning use).
+        """
         ...
 
     def get_markets(self) -> list[dict[str, Any]]:
@@ -70,6 +86,10 @@ class ExchangeProvider(Protocol):
         """Check if exchange supports a feature (e.g. 'fetchOHLCV')."""
         ...
 
+    def has_credentials(self) -> bool:
+        """True if this provider was constructed with API key + secret."""
+        ...
+
 
 # ======================================================================
 #  BaseProvider — shared CCXT logic
@@ -85,9 +105,11 @@ class BaseProvider:
     CCXT_NAME: str = ""
     CCXT_KWARGS: dict[str, Any] = {}
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str = "", api_secret: str = "") -> None:
         self._instance: Any = None
         self._markets_cache: dict[str, Any] = {}
+        self._api_key = api_key or ""
+        self._api_secret = api_secret or ""
 
     # -- CCXT instance ---------------------------------------------------
 
@@ -102,9 +124,16 @@ class BaseProvider:
                 "enableRateLimit": True,
                 "timeout": 15000,
             }
+            if self._api_key and self._api_secret:
+                kwargs["apiKey"] = self._api_key
+                kwargs["secret"] = self._api_secret
             kwargs.update(self.CCXT_KWARGS)
             self._instance = cls(kwargs)
         return self._instance
+
+    def has_credentials(self) -> bool:
+        """True if this provider was constructed with API key + secret."""
+        return bool(self._api_key and self._api_secret)
 
     # -- Properties ------------------------------------------------------
 
@@ -138,7 +167,17 @@ class BaseProvider:
     def fetch_balance(self) -> dict[str, Any]:
         try:
             return dict(self._get_exchange().fetch_balance())
-        except Exception:
+        except Exception as exc:
+            if self.has_credentials():
+                # We have API keys — a failure here means auth, permissions,
+                # or connectivity are broken. Surface it loudly instead of
+                # returning {} (which callers could misread as zero balance).
+                raise ExchangeAuthError(
+                    f"{self.name}: fetch_balance failed with credentials "
+                    f"set — {exc}"
+                ) from exc
+            # No credentials configured (paper/scanning use) — {} is the
+            # expected, harmless result.
             return {}
 
     def get_markets(self) -> list[dict[str, Any]]:
@@ -179,6 +218,32 @@ class BaseProvider:
         except Exception:
             return False
 
+    # -- Order precision (required before submitting live orders) --------
+
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        """Round *amount* to the symbol's lot-size step.
+
+        Exchanges reject orders whose amount doesn't match the market's
+        step size. Falls back to the raw amount if markets can't be loaded.
+        """
+        try:
+            ex = self._get_exchange()
+            if not ex.markets:
+                ex.load_markets()
+            return float(ex.amount_to_precision(symbol, amount))
+        except Exception:
+            return amount
+
+    def price_to_precision(self, symbol: str, price: float) -> float:
+        """Round *price* to the symbol's tick size (see ``amount_to_precision``)."""
+        try:
+            ex = self._get_exchange()
+            if not ex.markets:
+                ex.load_markets()
+            return float(ex.price_to_precision(symbol, price))
+        except Exception:
+            return price
+
 
 # ======================================================================
 #  Provider implementations
@@ -196,7 +261,13 @@ class BybitProvider(BaseProvider):
 
 
 class TokocryptoProvider(BaseProvider):
-    """Tokocrypto uses Binance's API (same ccxt class)."""
+    """Tokocrypto uses Binance's API (same ccxt class).
+
+    NOTE: this reuses BinanceProvider's auth flow as-is. If Tokocrypto's
+    API ever requires extra params (e.g. a broker/UID field) beyond plain
+    apiKey/secret, this class will need its own CCXT_KWARGS override —
+    not yet implemented since Tokocrypto isn't live-tested.
+    """
     CCXT_NAME = "binance"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
 

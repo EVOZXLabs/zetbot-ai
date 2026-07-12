@@ -34,6 +34,11 @@ class AppConfig:
     exchange: str = "binance"
     timeframe: str = "1h"
 
+    # Live trading credentials (required only when paper_mode is False)
+    api_key: str = ""
+    api_secret: str = ""
+    quote_currency: str = "USDT"
+
     # Paths
     data_dir: str = "data"
     logs_dir: str = "logs"
@@ -93,6 +98,9 @@ def load_config() -> AppConfig:
         paper_mode=os.getenv("PAPER_MODE", "true").lower() == "true",
         exchange=os.getenv("EXCHANGE", "binance"),
         timeframe=os.getenv("TIMEFRAME", "1h"),
+        api_key=os.getenv("API_KEY", ""),
+        api_secret=os.getenv("API_SECRET", ""),
+        quote_currency=os.getenv("QUOTE_CURRENCY", "USDT").upper(),
         data_dir=os.getenv("DATA_DIR", "data"),
         logs_dir=os.getenv("LOGS_DIR", "logs"),
         account_balance=float(os.getenv("ACCOUNT_BALANCE", "10000")),
@@ -195,6 +203,11 @@ def validate_config(config: AppConfig) -> None:
         errors.append("TAKER_FEE and MAKER_FEE must be non-negative")
     if config.slippage_bps < 0:
         errors.append(f"SLIPPAGE_BPS must be >= 0 (got {config.slippage_bps})")
+    if not config.paper_mode and (not config.api_key or not config.api_secret):
+        errors.append(
+            "PAPER_MODE=false requires API_KEY and API_SECRET to be set "
+            "(live trading cannot start without exchange credentials)"
+        )
 
     if errors:
         raise ConfigError("\n".join(errors))

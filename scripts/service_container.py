@@ -14,6 +14,7 @@ import time
 from typing import Any, Optional
 
 from scripts.exchange_manager import ExchangeManager
+from scripts.exchange_providers import ExchangeAuthError
 from scripts.order_manager import OrderManager
 from scripts.interfaces import (
     IConfigService,
@@ -70,10 +71,16 @@ class ServiceContainer:
         self._config_service = _ConfigAdapter(self._config)
         self._exchange = ExchangeManager(
             active=self._config_service.exchange,
+            api_key=self._config_service.api_key,
+            api_secret=self._config_service.api_secret,
         )
         self._metrics = _MetricsAdapter(config=self._config_service)
         self._notification = _NotificationAdapter(self._config_service)
-        self._wallet = _WalletAdapter(self._config_service)
+        self._wallet = (
+            _WalletAdapter(self._config_service)
+            if self._config_service.paper_mode
+            else _LiveWalletAdapter(self._config_service, self._exchange)
+        )
         self._scanner = _ScannerAdapter(self._config_service)
         self._strategy = _StrategyAdapter()
         self._risk = _RiskAdapter(self._config_service)
@@ -275,6 +282,131 @@ class _WalletAdapter:
 
     def snapshot(self) -> dict[str, Any]:
         return self._load()
+
+
+_BALANCE_CACHE_TTL_SEC = 10.0  # avoid hammering the exchange on every read
+
+
+class _LiveWalletAdapter:
+    """Fetches the REAL account balance from the exchange via CCXT.
+
+    Used instead of ``_WalletAdapter`` whenever ``config.paper_mode`` is
+    False. Never falls back to ``paper_balance.json`` — if the live
+    balance can't be fetched, it raises ``ExchangeAuthError`` rather than
+    pretending the balance is zero (or stale), because either of those
+    could cause the risk engine to size a position incorrectly.
+    """
+
+    def __init__(self, config: IConfigService, exchange: ExchangeManager) -> None:
+        self._config = config
+        self._exchange = exchange
+        self._quote = (getattr(config, "quote_currency", "") or "USDT").upper()
+        self._cache: dict[str, Any] = {}
+        self._cache_ts = 0.0
+
+    @staticmethod
+    def _extract(raw: dict[str, Any], quote: str, field: str) -> Optional[float]:
+        """Pull a numeric field out of ccxt's ``fetch_balance()`` shape.
+
+        ccxt returns both ``{"free": {"USDT": 1.2, ...}, ...}`` and a
+        flattened ``{"USDT": {"free": 1.2, "used": 0, "total": 1.2}, ...}``
+        — handle whichever is present.
+        """
+        bucket = raw.get(field)
+        if isinstance(bucket, dict) and quote in bucket:
+            try:
+                return float(bucket[quote])
+            except (TypeError, ValueError):
+                return None
+        per_currency = raw.get(quote)
+        if isinstance(per_currency, dict) and field in per_currency:
+            try:
+                return float(per_currency[field])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if self._cache and (now - self._cache_ts) < _BALANCE_CACHE_TTL_SEC:
+            return self._cache
+
+        provider = self._exchange.get_provider()
+        # provider.fetch_balance() itself raises ExchangeAuthError when
+        # credentials are set but the call fails — let that propagate.
+        raw = provider.fetch_balance()
+        if not raw:
+            raise ExchangeAuthError(
+                "Live balance fetch returned nothing — check API key, "
+                "secret, and permissions before trading live."
+            )
+
+        free = self._extract(raw, self._quote, "free")
+        total = self._extract(raw, self._quote, "total")
+        if free is None and total is None:
+            raise ExchangeAuthError(
+                f"Exchange balance response has no '{self._quote}' entry — "
+                f"check QUOTE_CURRENCY (currently '{self._quote}') and "
+                "API permissions."
+            )
+
+        snapshot = {
+            "final_balance": free if free is not None else total,
+            "final_equity": total if total is not None else free,
+            # Spot wallet balance alone doesn't carry trade-level PnL —
+            # these stay at 0.0 until live position tracking (Phase 5+)
+            # computes them from actual fills instead of paper state.
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+            "total_return_pct": 0.0,
+        }
+        self._cache = snapshot
+        self._cache_ts = now
+        return snapshot
+
+    @property
+    def balance(self) -> float:
+        return self._snapshot()["final_balance"]
+
+    @property
+    def equity(self) -> float:
+        return self._snapshot()["final_equity"]
+
+    @property
+    def realized_pnl(self) -> float:
+        return self._snapshot()["realized_pnl"]
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return self._snapshot()["unrealized_pnl"]
+
+    @property
+    def net_pnl(self) -> float:
+        return self._snapshot()["net_pnl"]
+
+    @property
+    def total_return_pct(self) -> float:
+        return self._snapshot()["total_return_pct"]
+
+    @property
+    def free_balance(self) -> float:
+        return self.balance
+
+    def reserve(self, amount: float) -> None:
+        pass  # the exchange itself enforces available balance at order time
+
+    def release(self, amount: float) -> None:
+        pass
+
+    def deduct(self, amount: float) -> None:
+        pass
+
+    def add(self, amount: float) -> None:
+        pass
+
+    def snapshot(self) -> dict[str, Any]:
+        return dict(self._snapshot())
 
 
 class _ScannerAdapter:

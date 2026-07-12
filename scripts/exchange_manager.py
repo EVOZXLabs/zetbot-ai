@@ -29,10 +29,19 @@ class ExchangeManager:
         mgr.get_ticker("BTC/USDT")          # now from Bybit
     """
 
-    def __init__(self, active: str = "binance") -> None:
+    def __init__(
+        self,
+        active: str = "binance",
+        api_key: str = "",
+        api_secret: str = "",
+    ) -> None:
         self._providers: dict[str, ExchangeProvider] = {}
         self._active_name: str = active.lower()
         self._lazy_errors: list[str] = []
+        # Credentials only apply to the provider matching `active`, since
+        # a single API key/secret pair is exchange-specific.
+        self._api_key = api_key or ""
+        self._api_secret = api_secret or ""
 
     # -- Provider access -------------------------------------------------
 
@@ -41,7 +50,12 @@ class ExchangeManager:
         if name not in self._providers:
             try:
                 cls = get_provider_class(name)
-                self._providers[name] = cls()
+                if name == self._active_name:
+                    self._providers[name] = cls(
+                        api_key=self._api_key, api_secret=self._api_secret,
+                    )
+                else:
+                    self._providers[name] = cls()
             except KeyError:
                 raise KeyError(f"Unsupported exchange: {name}") from None
         return self._providers[name]
