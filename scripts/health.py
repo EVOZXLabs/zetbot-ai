@@ -113,6 +113,11 @@ class HealthMonitor:
         else:
             scanner_status = "critical"
 
+        score = _compute_health_score(
+            internet_ok, exchange_ok, scanner_status,
+            scanner_age, api_age, uptime_sec,
+        )
+
         return {
             "version": BOT_VERSION,
             "uptime_sec": int(uptime_sec),
@@ -143,6 +148,7 @@ class HealthMonitor:
             "paper_mode": self._config.paper_mode,
             "realized_pnl": paper_data.get("realized_pnl", 0.0),
             "unrealized_pnl": paper_data.get("unrealized_pnl", 0.0),
+            "health_score": score,
         }
 
 
@@ -233,6 +239,32 @@ def _read_cpu_clock_tick() -> float:
 # ---------------------------------------------------------------------------
 #  Formatting
 # ---------------------------------------------------------------------------
+
+
+def _compute_health_score(
+    internet_ok: bool,
+    exchange_ok: bool,
+    scanner_status: str,
+    scanner_age: float,
+    api_age: float,
+    uptime_sec: float,
+) -> int:
+    score = 100
+    if not internet_ok:
+        score -= 15
+    if not exchange_ok:
+        score -= 20
+    if scanner_status == "stale":
+        score -= 10
+    elif scanner_status == "critical" or scanner_status == "no_data":
+        score -= 20
+    if api_age == float("inf"):
+        score -= 15
+    elif api_age > 3600:
+        score -= 5
+    if uptime_sec < 60:
+        score -= 5
+    return max(0, score)
 
 
 def _format_metrics(m: dict[str, Any]) -> str:

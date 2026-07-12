@@ -1,6 +1,5 @@
 import datetime
 import os
-import time
 
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_compact_number, time_ago
@@ -18,36 +17,30 @@ class StatusCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
+        m = ctx.services.metrics if ctx.services else None
+
         # Uptime
+        uptime_sec = 0
         if ctx.services is not None and ctx.services.health is not None:
             uptime_sec = ctx.services.health.uptime_sec
-        else:
-            uptime_sec = 0
         hours, rem = divmod(int(uptime_sec), 3600)
         minutes, seconds = divmod(rem, 60)
         runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-        # Financial data
-        if ctx.services is not None:
-            m = ctx.services.metrics
-            bal = m.balance()
-            eq = m.equity()
-            net_pnl = m.net_pnl()
-            open_pos = m.open_positions_count()
-            win_rate = 0.0
-            try:
-                wr = m.win_rate()
-                win_rate = wr if isinstance(wr, (int, float)) else 0.0
-            except Exception:
-                pass
+        # Financial data (single source: MetricsManager)
+        if m is not None:
+            a = m.account()
+            bal = a.balance
+            eq = a.equity
+            net_pnl = a.net_pnl
+            open_pos = a.open_positions
+            win_rate = a.win_rate
         else:
             pb = ctx.read_json("paper_balance.json")
-            pos_data = ctx.read_json("positions.json")
-            pos_list = pos_data.get("positions", [])
             bal = pb.get("final_balance", 0.0)
             eq = pb.get("final_equity", 0.0)
             net_pnl = pb.get("net_pnl", 0.0)
-            open_pos = sum(1 for p in pos_list if p.get("status") == "OPEN")
+            open_pos = 0
             win_rate = pb.get("win_rate", 0.0)
 
         paused = os.path.exists(PAUSE_FILE)
@@ -62,20 +55,16 @@ class StatusCommand(BaseCommand):
         if ctx.services is not None:
             sched = ctx.services.scheduler
             if sched is not None:
-                scheduler_status = sched.status
-                pipeline_status = sched.status
-                if scheduler_status == "stopped":
+                s_status = sched.status
+                if s_status == "stopped":
                     scheduler_status = "Stopped"
                     pipeline_status = "Stopped"
-                elif scheduler_status == "running":
+                elif s_status == "running":
                     scheduler_status = "Active"
                     pipeline_status = "Running..."
-                elif scheduler_status == "completed":
+                elif s_status.startswith("failed"):
                     scheduler_status = "Active"
-                    pipeline_status = "Idle"
-                elif scheduler_status.startswith("failed"):
-                    scheduler_status = "Active"
-                    pipeline_status = scheduler_status
+                    pipeline_status = s_status
                 else:
                     scheduler_status = "Active"
                     pipeline_status = "Idle"
@@ -96,7 +85,7 @@ class StatusCommand(BaseCommand):
             if ctx.services.health is not None:
                 try:
                     snap = ctx.services.health.snapshot()
-                    hs = snap.get("score")
+                    hs = snap.get("health_score")
                     if hs is not None:
                         health_score = f"{hs:.0f}"
                     scanner_time_raw = snap.get("scanner_time", "N/A")

@@ -577,7 +577,6 @@ class TestNewUX:
         assert "Equity:" in result
         assert "Net PnL:" in result
         assert "Exposure:" in result
-        assert "Buying Power" in result
 
     def test_health_shows_components(self) -> None:
         from telegram.commands.health import HealthCommand

@@ -450,183 +450,102 @@ class _NotificationAdapter:
 class _MetricsAdapter:
     """Metrics collector — single source of truth for all bot statistics.
 
-    Reads from the canonical JSON files written by the pipeline and engine so
-    that every command sees the same values.
+    Delegates to ``MetricsManager`` for file reads and delegates the
+    legacy in-memory interface to the execution engine.
     """
 
     def __init__(self, config: Optional[IConfigService] = None) -> None:
         self._trades: list[dict[str, Any]] = []
         self._config = config
+        from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+        self._mgr = MetricsManager(data_dir=(config.data_dir if config else "data"))
 
     # ------------------------------------------------------------------
-    #  JSON file readers (unified source of truth)
+    #  Account snapshot (single source of truth)
     # ------------------------------------------------------------------
 
-    def _data_dir(self) -> str:
-        if self._config is not None:
-            return self._config.data_dir
-        return "data"
-
-    def _read_json(self, filename: str) -> dict[str, Any]:
-        import json, os  # noqa: PLC0415
-        path = os.path.join(self._data_dir(), filename)
-        try:
-            with open(path) as f:
-                return dict(json.load(f))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    def _read_orders(self) -> list[dict[str, Any]]:
-        d = self._read_json("paper_orders.json")
-        return d if isinstance(d, list) else d.get("orders", [])
-
-    def _read_positions(self) -> list[dict[str, Any]]:
-        d = self._read_json("positions.json")
-        return d if isinstance(d, list) else d.get("positions", [])
-
-    # ------------------------------------------------------------------
-    #  Balance / PnL (from paper_balance.json)
-    # ------------------------------------------------------------------
+    def account(self):
+        return self._mgr.account()
 
     def balance_snapshot(self) -> dict[str, Any]:
-        return self._read_json("paper_balance.json")
+        return self._mgr._read_balance_pb()  # noqa: SLF001
 
-    @property
     def balance(self) -> float:
-        return self.balance_snapshot().get("final_balance", 0.0)
+        return self._mgr.account().balance
 
-    @property
     def equity(self) -> float:
-        pb = self.balance_snapshot()
-        bal = pb.get("final_balance", 0.0)
-        if self.open_positions_count() == 0:
-            return bal
-        return bal + pb.get("unrealized_pnl", 0.0)
+        return self._mgr.account().equity
 
-    @property
     def realized_pnl(self) -> float:
-        return self.balance_snapshot().get("realized_pnl", 0.0)
+        return self._mgr.account().realized_pnl
 
-    @property
     def unrealized_pnl(self) -> float:
-        pb = self.balance_snapshot()
-        if self.open_positions_count() == 0:
-            return 0.0
-        return pb.get("unrealized_pnl", 0.0)
+        return self._mgr.account().unrealized_pnl
 
-    @property
     def net_pnl(self) -> float:
-        pb = self.balance_snapshot()
-        realized = pb.get("realized_pnl", 0.0)
-        if self.open_positions_count() == 0:
-            return realized
-        return realized + pb.get("unrealized_pnl", 0.0)
+        return self._mgr.account().net_pnl
 
-    @property
     def total_return_pct(self) -> float:
-        return self.balance_snapshot().get("total_return_pct", 0.0)
+        return self._mgr.account().total_return_pct
 
     # ------------------------------------------------------------------
-    #  Legacy in-memory methods (used by tests & execution engine)
+    #  Positions / Trades
     # ------------------------------------------------------------------
+
+    def open_positions_count(self) -> int:
+        return self._mgr.open_positions_count()
+
+    def closed_positions_count(self) -> int:
+        return len(self._mgr.all_positions()) - self._mgr.open_positions_count()
+
+    def open_positions(self) -> list[dict[str, Any]]:
+        return self._mgr.open_positions()
+
+    def all_positions(self) -> list[dict[str, Any]]:
+        return self._mgr.all_positions()
+
+    def closed_orders(self) -> list[dict[str, Any]]:
+        return self._mgr.closed_orders()
+
+    def best_trade(self) -> dict[str, Any]:
+        cm = self._mgr.computed()
+        return cm.best_trade
+
+    def worst_trade(self) -> dict[str, Any]:
+        cm = self._mgr.computed()
+        return cm.worst_trade
 
     def total_trades(self) -> int:
-        return len(self._trades) or self.balance_snapshot().get("total_trades", 0)
+        return len(self._trades) or self._mgr.account().total_trades
 
     def winning_trades(self) -> int:
         wins = sum(1 for t in self._trades if t.get("net_pnl", 0) > 0)
-        return wins or self.balance_snapshot().get("winning_trades", 0)
+        return wins or self._mgr.account().winning_trades
 
     def losing_trades(self) -> int:
         losses = sum(1 for t in self._trades if t.get("net_pnl", 0) < 0)
-        return losses or self.balance_snapshot().get("losing_trades", 0)
+        return losses or self._mgr.account().losing_trades
 
     def win_rate(self) -> float:
         total = self.total_trades()
         if total > 0:
             return self.winning_trades() / total * 100.0
-        return self.balance_snapshot().get("win_rate", 0.0)
+        return self._mgr.account().win_rate
 
     def profit_factor(self) -> float:
         m = self.get_metrics()
-        pf = m.get("profit_factor", 0.0)
-        return pf or self.balance_snapshot().get("profit_factor", 0.0)
+        return m.get("profit_factor", 0.0) or self._mgr.account().profit_factor
 
     def gross_profit(self) -> float:
         m = self.get_metrics()
-        gp = m.get("gross_profit", 0.0)
-        return gp or self.balance_snapshot().get("gross_profit", 0.0)
+        return m.get("gross_profit", 0.0) or self._mgr.account().gross_profit
 
     def gross_loss(self) -> float:
         m = self.get_metrics()
-        gl = m.get("gross_loss", 0.0)
-        return gl or self.balance_snapshot().get("gross_loss", 0.0)
+        return m.get("gross_loss", 0.0) or self._mgr.account().gross_loss
 
     # ------------------------------------------------------------------
-    #  File-based accessors (single source of truth for commands)
-    # ------------------------------------------------------------------
-
-    def open_positions_count(self) -> int:
-        return sum(1 for p in self._read_positions() if p.get("status") == "OPEN")
-
-    def closed_positions_count(self) -> int:
-        return sum(
-            1 for p in self._read_positions()
-            if p.get("status") in ("CLOSED", "STOPPED", "TIMEOUT")
-        )
-
-    def balance(self) -> float:
-        return self.balance_snapshot().get("final_balance", 0.0)
-
-    def equity(self) -> float:
-        pb = self.balance_snapshot()
-        bal = pb.get("final_balance", 0.0)
-        if self.open_positions_count() == 0:
-            return bal
-        return bal + pb.get("unrealized_pnl", 0.0)
-
-    def realized_pnl(self) -> float:
-        return self.balance_snapshot().get("realized_pnl", 0.0)
-
-    def unrealized_pnl(self) -> float:
-        pb = self.balance_snapshot()
-        if self.open_positions_count() == 0:
-            return 0.0
-        return pb.get("unrealized_pnl", 0.0)
-
-    def net_pnl(self) -> float:
-        pb = self.balance_snapshot()
-        realized = pb.get("realized_pnl", 0.0)
-        if self.open_positions_count() == 0:
-            return realized
-        return realized + pb.get("unrealized_pnl", 0.0)
-
-    def total_return_pct(self) -> float:
-        return self.balance_snapshot().get("total_return_pct", 0.0)
-
-    def open_positions(self) -> list[dict[str, Any]]:
-        return [p for p in self._read_positions() if p.get("status") == "OPEN"]
-
-    def all_positions(self) -> list[dict[str, Any]]:
-        return self._read_positions()
-
-    def closed_orders(self) -> list[dict[str, Any]]:
-        return [o for o in self._read_orders() if o.get("status") == "CLOSED"]
-
-    def best_trade(self) -> dict[str, Any]:
-        closed = self.closed_orders()
-        if not closed:
-            return {}
-        return max(closed, key=lambda o: o.get("net_pnl", 0))
-
-    def worst_trade(self) -> dict[str, Any]:
-        closed = self.closed_orders()
-        if not closed:
-            return {}
-        return min(closed, key=lambda o: o.get("net_pnl", 0))
-
-    # ------------------------------------------------------------------
-    #  Legacy interface (in-memory trades, still used by execution engine)
+    #  Legacy in-memory interface (used by execution engine)
     # ------------------------------------------------------------------
 
     def record_trade(self, order: dict[str, Any]) -> None:
@@ -651,46 +570,24 @@ class _MetricsAdapter:
     def reset(self) -> None:
         self._trades.clear()
 
-    # ------------------------------------------------------------------
-    #  Full unified summary
-    # ------------------------------------------------------------------
-
-    def _derive_equity(self, balance: float, unrealized_pnl: float) -> float:
-        """If no open positions, equity = balance and unrealized pnl = 0."""
-        if self.open_positions_count() == 0:
-            return balance
-        return balance + unrealized_pnl
-
     def summary(self) -> dict[str, Any]:
-        pb = self.balance_snapshot()
-        bal = pb.get("final_balance", 0.0)
-        raw_unrealized = pb.get("unrealized_pnl", 0.0)
-        realized = pb.get("realized_pnl", 0.0)
-        net_pnl = pb.get("net_pnl", 0.0)
-        # Adjust: if no open positions, unrealized = 0 and equity = balance
-        open_count = self.open_positions_count()
-        if open_count == 0:
-            unrealized = 0.0
-        else:
-            unrealized = raw_unrealized
-        equity = bal + unrealized
+        a = self._mgr.account()
         return {
-            "balance": bal,
-            "equity": equity,
-            "realized_pnl": realized,
-            "unrealized_pnl": unrealized,
-            "net_pnl": realized + unrealized if open_count > 0 else realized,
-            "total_return_pct": pb.get("total_return_pct", 0.0),
-            "total_trades": pb.get("total_trades", 0),
-            "winning_trades": pb.get("winning_trades", 0),
-            "losing_trades": pb.get("losing_trades", 0),
-            "win_rate": pb.get("win_rate", 0.0),
-            "profit_factor": pb.get("profit_factor", 0.0),
-            "gross_profit": pb.get("gross_profit", 0.0),
-            "gross_loss": pb.get("gross_loss", 0.0),
-            "open_positions": open_count,
-            "closed_positions": self.closed_positions_count,
-            "closed_positions": self.closed_positions_count,
+            "balance": a.balance,
+            "equity": a.equity,
+            "realized_pnl": a.realized_pnl,
+            "unrealized_pnl": a.unrealized_pnl,
+            "net_pnl": a.net_pnl,
+            "total_return_pct": a.total_return_pct,
+            "total_trades": a.total_trades,
+            "winning_trades": a.winning_trades,
+            "losing_trades": a.losing_trades,
+            "win_rate": a.win_rate,
+            "profit_factor": a.profit_factor,
+            "gross_profit": a.gross_profit,
+            "gross_loss": a.gross_loss,
+            "open_positions": a.open_positions,
+            "closed_positions": self.closed_positions_count(),
             "best_trade": self.best_trade(),
             "worst_trade": self.worst_trade(),
         }

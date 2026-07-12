@@ -11,14 +11,15 @@ class BalanceCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        if ctx.services is not None:
-            m = ctx.services.metrics
-            bal = m.balance()
-            eq = m.equity()
-            realized_pnl = m.realized_pnl()
-            unrealized_pnl = m.unrealized_pnl()
-            net_pnl = m.net_pnl()
-            total_return_pct = m.total_return_pct()
+        m = ctx.services.metrics if ctx.services else None
+        if m is not None:
+            a = m.account()
+            bal = a.balance
+            eq = a.equity
+            realized_pnl = a.realized_pnl
+            unrealized_pnl = a.unrealized_pnl
+            net_pnl = a.net_pnl
+            total_return_pct = a.total_return_pct
         else:
             pb = ctx.read_json("paper_balance.json")
             if not pb:
