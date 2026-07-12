@@ -429,11 +429,12 @@ class SimulationExecutor:
 class LiveExecutor:
     """Live exchange order execution.
 
-    DISABLED by default.  Set ``ENABLE_LIVE_TRADING=true`` and provide
-    valid API credentials to activate.
+    DISABLED by default. Armed only via the operator confirmation flow:
+    ``/golive`` then replying ``CONFIRM LIVE`` (see
+    ``telegram/commands/live.py`` and ``OrderManager.arm_live()``).
 
     When disabled, every ``execute()`` call returns a REJECTED result.
-    When enabled, validates credentials and submits via CCXT.
+    When enabled, validates credentials/balance and submits via CCXT.
     """
 
     name = "live"
@@ -461,8 +462,8 @@ class LiveExecutor:
         if not self.ENABLED:
             return OrderResult.rejected(
                 request,
-                "Live trading is not enabled. "
-                "Set ENABLE_LIVE_TRADING=true and provide valid API credentials.",
+                "Live trading is not armed. "
+                "Run /golive and reply CONFIRM LIVE to arm real-money trading.",
                 self.name,
             )
 
@@ -659,8 +660,8 @@ class ExecutionEngine:
             return None
         if not LiveExecutor.is_enabled():
             return (
-                "Live trading is not enabled. "
-                "Set ENABLE_LIVE_TRADING=true to activate."
+                "Live trading is not armed. "
+                "Run /golive and reply CONFIRM LIVE to activate."
             )
         # Check API credentials by attempting a balance fetch
         try:
@@ -685,6 +686,92 @@ class ExecutionEngine:
 
     def is_live_enabled(self) -> bool:
         return LiveExecutor.is_enabled()
+
+    def live_readiness_report(self) -> dict[str, Any]:
+        """Full read-only diagnostic for /livecheck and /golive.
+
+        This NEVER arms anything — it only checks whether arming would
+        succeed. Every early-exit path leaves ``ready: False`` in place.
+        """
+        quote = (getattr(self._config, "quote_currency", "") or "USDT").upper()
+        report: dict[str, Any] = {
+            "mode": self._mode,
+            "armed": LiveExecutor.is_enabled(),
+            "exchange": getattr(self._exchange, "name", ""),
+            "api_key_set": bool(
+                (getattr(self._config, "api_key", "") or "")
+                and (getattr(self._config, "api_secret", "") or ""),
+            ),
+            "currency": quote,
+            "balance": None,
+            "connected": False,
+            "trading_permission": None,  # True / False / None(unknown)
+            "ready": False,
+            "reasons": [],
+        }
+
+        if self._mode != "LIVE":
+            report["reasons"].append(
+                f"Engine mode is {self._mode}, not LIVE — set "
+                "PAPER_MODE=false and restart the bot first.",
+            )
+            return report
+
+        if not report["api_key_set"]:
+            report["reasons"].append("API_KEY / API_SECRET not configured.")
+            return report
+
+        try:
+            provider = self._exchange.get_provider()
+            raw = provider.fetch_balance()
+        except Exception as exc:
+            report["reasons"].append(f"Exchange connection/auth failed: {exc}")
+            return report
+
+        if not raw:
+            report["reasons"].append(
+                "Balance fetch returned nothing — check API permissions.",
+            )
+            return report
+
+        report["connected"] = True
+
+        free = None
+        bucket = raw.get("free")
+        if isinstance(bucket, dict) and quote in bucket:
+            free = bucket[quote]
+        else:
+            per_currency = raw.get(quote)
+            if isinstance(per_currency, dict):
+                free = per_currency.get("free")
+        report["balance"] = free
+        if free is None:
+            report["reasons"].append(
+                f"Could not find '{quote}' in the balance response — "
+                "check QUOTE_CURRENCY.",
+            )
+
+        # Best-effort trading-permission check. Not every exchange exposes
+        # this uniformly through ccxt, so "unknown" is a valid, honest
+        # outcome — never assumed to be OK.
+        can_trade: Optional[bool] = None
+        info = raw.get("info")
+        if isinstance(info, dict):
+            if "canTrade" in info:
+                can_trade = bool(info.get("canTrade"))
+            elif "permissions" in info and isinstance(info.get("permissions"), list):
+                can_trade = "SPOT" in info["permissions"]
+        report["trading_permission"] = can_trade
+        if can_trade is False:
+            report["reasons"].append(
+                "Exchange account reports trading is NOT permitted "
+                "(read-only / restricted API key?).",
+            )
+
+        report["ready"] = (
+            not report["reasons"] and report["connected"] and free is not None
+        )
+        return report
 
 
 # ======================================================================

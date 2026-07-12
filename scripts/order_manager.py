@@ -10,6 +10,7 @@ import json
 import os
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -22,6 +23,7 @@ from scripts.execution_engine import (
     ExecutionEngine,
     ExecutionMetrics,
     _generate_id,
+    _map_live_order_status,
     _now,
     append_audit,
 )
@@ -34,8 +36,19 @@ class OrderVerificationError(Exception):
     """
 
 
+class LiveArmError(Exception):
+    """Raised by ``arm_live()`` when a fresh readiness check fails right
+    before flipping the switch — never enable_live() first and check
+    after."""
+
+
 RETRY_MAX = 3
 RETRY_DELAY_SEC = 1.0
+LIVE_ARMED_PATH = "data/live_armed.json"
+PENDING_LIVE_ORDERS_PATH = "data/pending_live_orders.json"
+RECONCILE_MAX_WAIT_SEC = 20.0
+RECONCILE_POLL_INTERVAL_SEC = 2.0
+RECONCILE_TERMINAL_STATUSES = ("FILLED", "CANCELLED", "REJECTED")
 
 
 class OrderManager:
@@ -96,11 +109,148 @@ class OrderManager:
         # ── 2. Execute with retry ───────────────────────────────────────
         result = self._execute_with_retry(request)
 
+        # ── 2b. Reconciliation (LIVE only) ──────────────────────────────
+        # A LIVE create_order() response isn't guaranteed final — poll
+        # the exchange until we know the REAL outcome, instead of letting
+        # callers (buy/sell commands, pipeline) treat a PENDING/PARTIAL
+        # snapshot as settled or as failed.
+        if self._engine.mode == "LIVE":
+            result = self._reconcile_live_order(result)
+
         # ── 3. Record & audit ──────────────────────────────────────────
         self._metrics.record(result)
         append_audit(self._result_to_audit(result))
 
         return result.to_dict() if was_dict else result
+
+    def _reconcile_live_order(self, result: OrderResult) -> OrderResult:
+        """Poll the exchange until a LIVE order reaches a terminal state
+        (FILLED / CANCELLED / REJECTED), or a bounded timeout elapses.
+
+        ``create_order()``'s own response is a snapshot, not a settlement
+        guarantee — some exchanges report ``open``/partial fills even for
+        market orders. This closes that gap so a PENDING/PARTIALLY_FILLED
+        result is never mistaken for "done" (or for "failed").
+        """
+        if result.status not in ("PENDING", "PARTIALLY_FILLED"):
+            return result
+        if not result.order_id or not result.symbol:
+            return result
+
+        self._persist_pending_order(result)
+
+        provider = self._exchange.get_provider()
+        deadline = time.time() + RECONCILE_MAX_WAIT_SEC
+        last = result
+
+        while time.time() < deadline:
+            time.sleep(RECONCILE_POLL_INTERVAL_SEC)
+            try:
+                raw = provider.fetch_order(last.order_id, last.symbol)
+            except Exception as exc:
+                # Couldn't confirm on this attempt — keep the last known
+                # state and keep trying until the deadline. Never invent
+                # a final status just because one poll failed.
+                last = replace(
+                    last,
+                    error=f"reconciliation check failed (will retry): {exc}",
+                )
+                continue
+
+            if not raw:
+                continue
+
+            status = _map_live_order_status(raw, last.amount)
+            filled = float(raw.get("filled", 0) or 0)
+            price = float(
+                raw.get("average") or raw.get("price") or last.filled_price or 0,
+            )
+            fee_info = raw.get("fee") or {}
+            fee = (
+                float(fee_info.get("cost", 0) or 0)
+                if isinstance(fee_info, dict) else last.fee
+            )
+            cost = float(raw.get("cost", filled * price) or 0)
+
+            last = replace(
+                last,
+                status=status,
+                filled_amount=filled,
+                filled_price=price,
+                fee=fee,
+                cost=cost,
+                error=None,
+            )
+
+            if status in RECONCILE_TERMINAL_STATUSES:
+                self._clear_pending_order(last.order_id)
+                return last
+
+            self._persist_pending_order(last)
+
+        # Timed out still open/partial. Surface this clearly — the order
+        # may well still be live on the exchange; it is NOT safe to treat
+        # it as either filled or failed. It stays recorded in
+        # data/pending_live_orders.json for manual follow-up.
+        return replace(
+            last,
+            error=(
+                (last.error + " " if last.error else "")
+                + f"Reconciliation timed out after {RECONCILE_MAX_WAIT_SEC:.0f}s — "
+                f"order {last.order_id} may still be open on the exchange; "
+                "check manually (see data/pending_live_orders.json)."
+            ),
+        )
+
+    @staticmethod
+    def _persist_pending_order(result: OrderResult) -> None:
+        """Best-effort audit trail of orders currently being reconciled,
+        so a crash mid-poll leaves something an operator can check —
+        this is NOT used to resume polling automatically on restart."""
+        try:
+            os.makedirs(os.path.dirname(PENDING_LIVE_ORDERS_PATH), exist_ok=True)
+            try:
+                with open(PENDING_LIVE_ORDERS_PATH) as f:
+                    data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                data = {}
+            data[result.order_id] = {
+                "symbol": result.symbol,
+                "side": result.side,
+                "status": result.status,
+                "amount": result.amount,
+                "filled_amount": result.filled_amount,
+                "trace_id": result.trace_id,
+                "updated": _now(),
+            }
+            with open(PENDING_LIVE_ORDERS_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _clear_pending_order(order_id: str) -> None:
+        try:
+            with open(PENDING_LIVE_ORDERS_PATH) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        if order_id in data:
+            data.pop(order_id, None)
+            try:
+                with open(PENDING_LIVE_ORDERS_PATH, "w") as f:
+                    json.dump(data, f, indent=2)
+            except Exception:
+                pass
+
+    def get_pending_live_orders(self) -> dict[str, Any]:
+        """Read-only view of orders still awaiting reconciliation
+        confirmation (used by e.g. a /pendingorders diagnostic)."""
+        try:
+            with open(PENDING_LIVE_ORDERS_PATH) as f:
+                return dict(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
     def get_orders(self) -> list[dict[str, Any]]:
         """Return all trade plans from the audit trail / stored plans."""
@@ -132,6 +282,80 @@ class OrderManager:
 
     def validate_live_ready(self) -> Optional[str]:
         return self._engine.validate_live_ready()
+
+    def live_readiness_report(self) -> dict[str, Any]:
+        """Read-only diagnostic — used by /livecheck and /golive. Never
+        arms anything by itself."""
+        return self._engine.live_readiness_report()
+
+    def arm_live(self, chat_id: str) -> dict[str, Any]:
+        """Actually flip the LIVE switch and persist an audit record.
+
+        Order matters here, deliberately:
+
+            1. re-validate readiness (fresh balance/connection/permission
+               check) — conditions can change in the seconds between
+               /golive and CONFIRM LIVE (API key revoked, balance
+               changed, permission changed, etc.)
+            2. only THEN call enable_live()
+            3. write the audit record last
+
+        If step 1 fails, we never reach enable_live() — raises
+        ``LiveArmError`` instead. If the audit write in step 3 fails,
+        the switch has already been flipped correctly (callers should
+        still treat trading as armed; the write failure only affects
+        the on-disk audit trail, not the live in-memory state).
+
+        Callers MUST have already obtained explicit operator
+        confirmation (see telegram/commands/live.py) — this method
+        itself does not ask for confirmation again, only validates.
+        """
+        report = self._engine.live_readiness_report()
+        if not report.get("ready"):
+            raise LiveArmError(
+                "Readiness check failed at arm time: "
+                + "; ".join(report.get("reasons") or ["unknown reason"])
+            )
+
+        self._engine.enable_live()
+        record = {
+            "armed": True,
+            "time": _now(),
+            "exchange": self._exchange.name,
+            "confirmed_by_chat": str(chat_id),
+        }
+        self._write_live_armed_state(record)
+        return record
+
+    def disarm_live(self, reason: str = "manual") -> dict[str, Any]:
+        self._engine.disable_live()
+        record = {"armed": False, "time": _now(), "reason": reason}
+        self._write_live_armed_state(record)
+        return record
+
+    @staticmethod
+    def _write_live_armed_state(record: dict[str, Any]) -> None:
+        try:
+            os.makedirs(os.path.dirname(LIVE_ARMED_PATH), exist_ok=True)
+            with open(LIVE_ARMED_PATH, "w") as f:
+                json.dump(record, f, indent=2)
+        except Exception:
+            pass  # best-effort audit trail only; arming itself already happened
+
+    @staticmethod
+    def read_live_armed_state() -> dict[str, Any]:
+        """Read the last-persisted arm/disarm record, if any.
+
+        IMPORTANT: this is an audit record only. Nothing in this class
+        (or anywhere at startup) may use this file's ``armed: true`` to
+        automatically call ``enable_live()`` — every process restart
+        requires a fresh /golive + CONFIRM LIVE from the operator.
+        """
+        try:
+            with open(LIVE_ARMED_PATH) as f:
+                return dict(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
     # -- State sync --------------------------------------------------------
 

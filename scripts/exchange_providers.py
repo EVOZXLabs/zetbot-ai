@@ -66,6 +66,18 @@ class ExchangeProvider(Protocol):
         """
         ...
 
+    def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
+        """Fetch the current state of a previously-submitted order.
+
+        Used for reconciliation — a ``create_order()`` response is not
+        guaranteed final, so callers poll this until the order reaches a
+        terminal state. Same error-handling contract as
+        ``fetch_balance()``: raises ``ExchangeAuthError`` when
+        credentials are set but the call fails, returns ``{}`` only when
+        no credentials are configured.
+        """
+        ...
+
     def get_markets(self) -> list[dict[str, Any]]:
         """Return all available markets."""
         ...
@@ -194,6 +206,16 @@ class BaseProvider:
                 ) from exc
             # No credentials configured (paper/scanning use) — {} is the
             # expected, harmless result.
+            return {}
+
+    def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
+        try:
+            return dict(self._get_exchange().fetch_order(order_id, symbol))
+        except Exception as exc:
+            if self.has_credentials():
+                raise ExchangeAuthError(
+                    f"{self.name}: fetch_order({order_id}) failed — {exc}"
+                ) from exc
             return {}
 
     def get_markets(self) -> list[dict[str, Any]]:
