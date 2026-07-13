@@ -762,6 +762,26 @@ def main() -> None:
             logger.error(f"Failed to reset live_armed.json on restart: {exc}")
 
     # ------------------------------------------------------------------
+    #  Unprotected LIVE positions — DETECT ONLY, never auto-create SL/TP.
+    #  A real position with no active protection needs an operator
+    #  decision (what stop/target?), not the bot guessing on restart.
+    # ------------------------------------------------------------------
+    if container.order.mode == "LIVE":
+        try:
+            unprotected = container.order.find_unprotected_live_positions()
+        except Exception as exc:
+            unprotected = []
+            logger.error(f"Could not check for unprotected live positions: {exc}")
+
+        if unprotected:
+            symbols = ", ".join(p.get("symbol", "?") for p in unprotected)
+            logger.warning(
+                f"LIVE positions with NO active protection found: {symbols} — "
+                "these have real holdings but no tracked stop-loss/take-profit. "
+                "Review manually (see data/live_protections.json / /positions)."
+            )
+
+    # ------------------------------------------------------------------
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
@@ -844,6 +864,28 @@ def main() -> None:
         )
         container.inject_scheduler(scheduler)
         scheduler.start()
+
+    # ------------------------------------------------------------------
+    #  Protection reconciliation scheduler — LIVE mode only.
+    #
+    #  This is what actually makes the synthetic-OCO in
+    #  scripts/protection_manager.py hold: without it, the sibling
+    #  stop-loss/take-profit order only gets cancelled when someone
+    #  runs /protectioncheck by hand. Started only when the engine mode
+    #  is already LIVE (not just because PAPER_MODE=false was set —
+    #  reconcile_all_protections() itself also no-ops in PAPER as a
+    #  second safety net either way).
+    # ------------------------------------------------------------------
+    protection_scheduler: Any = None
+    if container.order.mode == "LIVE":
+        from scripts.protection_scheduler import ProtectionScheduler
+
+        protection_scheduler = ProtectionScheduler(
+            order_manager=container.order,
+            interval=config.protection_reconcile_interval_seconds,
+            logger=logger,
+        )
+        protection_scheduler.start()
 
     # ------------------------------------------------------------------
     #  Keep alive — monitor workers, health, shutdown
@@ -933,6 +975,10 @@ def main() -> None:
     if scheduler:
         logger.info("Stopping Pipeline Scheduler...")
         scheduler.stop()
+
+    if protection_scheduler:
+        logger.info("Stopping Protection Scheduler...")
+        protection_scheduler.stop()
 
     health.stop()
 
