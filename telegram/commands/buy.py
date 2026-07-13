@@ -59,4 +59,23 @@ class BuyCommand(BaseCommand):
         message, should_sync = format_order_outcome("Buy", symbol, result)
         if should_sync:
             ctx.services.order.sync_position(result)
+
+        if ctx.services.order.mode == "LIVE" and should_sync:
+            record = ctx.services.order.get_protection_status(symbol)
+            if record is None:
+                message += (
+                    "\n\n\u26a0\ufe0f *No protection order attempted* "
+                    "(AUTO_PROTECT is off, or no order id to attach to)."
+                )
+            elif record.get("status") == "ACTIVE":
+                message += (
+                    f"\n\n\U0001f6e1\ufe0f Protection: SL `{record['stop_price']}` "
+                    f"/ TP `{record['take_profit_price']}` — ACTIVE"
+                )
+            elif record.get("status") in ("ERROR", "PARTIAL_ERROR"):
+                message += (
+                    f"\n\n\u274c *Protection FAILED*: {record.get('error')}\n"
+                    "This position may be UNPROTECTED — check manually."
+                )
+
         return message
