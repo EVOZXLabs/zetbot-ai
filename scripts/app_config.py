@@ -39,6 +39,13 @@ class AppConfig:
     api_secret: str = ""
     quote_currency: str = "USDT"
 
+    # Live protective orders (SL/TP) — off by default; a live BUY fill
+    # will NOT get automatic protection orders unless explicitly enabled.
+    auto_protect: bool = False
+    default_stop_pct: float = 3.0
+    default_take_profit_pct: float = 6.0
+    protection_reconcile_interval_seconds: float = 8.0
+
     # Paths
     data_dir: str = "data"
     logs_dir: str = "logs"
@@ -101,6 +108,12 @@ def load_config() -> AppConfig:
         api_key=os.getenv("API_KEY", ""),
         api_secret=os.getenv("API_SECRET", ""),
         quote_currency=os.getenv("QUOTE_CURRENCY", "USDT").upper(),
+        auto_protect=os.getenv("AUTO_PROTECT", "false").lower() == "true",
+        default_stop_pct=float(os.getenv("DEFAULT_STOP_PCT", "3.0")),
+        default_take_profit_pct=float(os.getenv("DEFAULT_TAKE_PROFIT_PCT", "6.0")),
+        protection_reconcile_interval_seconds=float(
+            os.getenv("PROTECTION_RECONCILE_INTERVAL_SECONDS", "8.0"),
+        ),
         data_dir=os.getenv("DATA_DIR", "data"),
         logs_dir=os.getenv("LOGS_DIR", "logs"),
         account_balance=float(os.getenv("ACCOUNT_BALANCE", "10000")),

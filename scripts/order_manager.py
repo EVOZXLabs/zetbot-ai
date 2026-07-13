@@ -117,6 +117,13 @@ class OrderManager:
         if self._engine.mode == "LIVE":
             result = self._reconcile_live_order(result)
 
+        # ── 2c. Position sync + protection (LIVE only) ──────────────────
+        if self._engine.mode == "LIVE" and result.status in (
+            "FILLED", "PARTIALLY_FILLED",
+        ):
+            self.sync_live_position(result)
+            self._handle_live_protection(request, result)
+
         # ── 3. Record & audit ──────────────────────────────────────────
         self._metrics.record(result)
         append_audit(self._result_to_audit(result))
@@ -251,6 +258,112 @@ class OrderManager:
                 return dict(json.load(f))
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
+
+    def _handle_live_protection(self, request: "OrderRequest", result: OrderResult) -> None:
+        """Best-effort: after a LIVE fill, either create protection
+        (BUY) or clean up now-orphaned protection (a SELL that leaves
+        the position flat).
+
+        Never raises — a protection failure must not look like the
+        entry/exit order itself failed (the trade already happened).
+        Failures ARE persisted to data/live_protections.json by
+        ProtectionManager itself and surfaced via
+        get_protection_status(), never silently dropped.
+        """
+        try:
+            from scripts.protection_manager import (  # noqa: PLC0415
+                ProtectionError,
+                ProtectionManager,
+            )
+            from scripts.live_position_sync import (  # noqa: PLC0415
+                LivePositionSync,
+                MissingEntryPriceError,
+            )
+        except Exception:
+            return
+
+        side = (request.side or "").upper()
+        symbol = request.symbol
+        quote = getattr(self._config, "quote_currency", "USDT")
+        pm = ProtectionManager(self._exchange, self._config)
+
+        if side == "BUY":
+            if not getattr(self._config, "auto_protect", False):
+                return
+            try:
+                syncer = LivePositionSync(self._exchange, quote_currency=quote)
+                positions = syncer.sync_positions([symbol])
+                position = next((p for p in positions if p["symbol"] == symbol), None)
+                if position is None:
+                    return
+                pm.create_protection(
+                    position,
+                    entry_order_id=result.order_id,
+                    stop_price=request.stop_loss,
+                    take_profit_price=request.take_profit,
+                )
+            except (ProtectionError, MissingEntryPriceError):
+                # Already recorded with status ERROR/PARTIAL_ERROR inside
+                # create_protection() — nothing more to do here.
+                pass
+            except Exception:
+                pass  # never let a protection bug affect the entry order's own result
+
+        elif side == "SELL":
+            try:
+                syncer = LivePositionSync(self._exchange, quote_currency=quote)
+                remaining = syncer.sync_positions([symbol])
+                still_held = any(
+                    p["symbol"] == symbol and (p.get("quantity") or 0) > 1e-8
+                    for p in remaining
+                )
+                if not still_held:
+                    pm.cancel_protection(symbol, reason="position closed")
+            except Exception:
+                pass
+
+    def get_protection_status(self, symbol: str) -> Optional[dict[str, Any]]:
+        """Read-only: current protection record for a symbol (None if
+        untracked). Used by /buy, /sell, /positions to tell the operator
+        whether a live position actually has SL/TP attached."""
+        if self._engine.mode != "LIVE":
+            return None
+        try:
+            from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+            return ProtectionManager(self._exchange, self._config).get_protection(symbol)
+        except Exception:
+            return None
+
+    def reconcile_all_protections(self) -> dict[str, Any]:
+        """Poll every ACTIVE protection record and cancel the sibling
+        leg wherever one side has filled. NOT scheduled automatically by
+        this method — call it periodically (scheduler job or a manual
+        command) for the synthetic-OCO behavior to actually hold."""
+        if self._engine.mode != "LIVE":
+            return {}
+        try:
+            from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+            return ProtectionManager(self._exchange, self._config).reconcile_all()
+        except Exception:
+            return {}
+
+    def find_unprotected_live_positions(self) -> list[dict[str, Any]]:
+        """Startup-recovery read: real LIVE positions that currently have
+        NO active protection record. Detection only — never auto-creates
+        orders, see ProtectionManager.find_unprotected_positions()."""
+        if self._engine.mode != "LIVE":
+            return []
+        try:
+            from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+            from scripts.live_position_sync import LivePositionSync  # noqa: PLC0415
+            quote = getattr(self._config, "quote_currency", "USDT")
+            syncer = LivePositionSync(self._exchange, quote_currency=quote)
+            positions = syncer.sync_all_positions()
+            return ProtectionManager(self._exchange, self._config).find_unprotected_positions(
+                positions,
+            )
+        except Exception:
+            return []
 
     def get_orders(self) -> list[dict[str, Any]]:
         """Return all trade plans from the audit trail / stored plans."""
