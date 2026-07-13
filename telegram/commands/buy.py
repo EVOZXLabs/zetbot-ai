@@ -58,5 +58,5 @@ class BuyCommand(BaseCommand):
         from telegram.commands._order_status import format_order_outcome  # noqa: PLC0415
         message, should_sync = format_order_outcome("Buy", symbol, result)
         if should_sync:
-            ctx.services.order.sync_paper_state(result)
+            ctx.services.order.sync_position(result)
         return message

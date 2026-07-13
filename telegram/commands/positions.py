@@ -15,6 +15,93 @@ class PositionsCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
+        if (
+            ctx.services is not None
+            and getattr(ctx.services, "order", None) is not None
+            and ctx.services.order.mode == "LIVE"
+        ):
+            return self._execute_live(ctx)
+        return self._execute_paper(ctx)
+
+    def _execute_live(self, ctx) -> str:
+        """LIVE positions — reconstructed straight from the exchange
+        (balance + trade history), NOT from any local trade-plan
+        simulation. See scripts/live_position_sync.py."""
+        from scripts.live_position_sync import (  # noqa: PLC0415
+            LivePositionSync,
+            merge_live_positions,
+        )
+        from scripts.exchange_providers import ExchangeAuthError  # noqa: PLC0415
+
+        exchange = ctx.services.exchange
+        quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+
+        try:
+            syncer = LivePositionSync(exchange, quote_currency=quote)
+            fresh = syncer.sync_all_positions()
+            merge_live_positions(fresh, synced_symbols=[p["symbol"] for p in fresh])
+            positions = fresh
+            sync_error = None
+        except ExchangeAuthError as exc:
+            positions = None
+            sync_error = str(exc)
+        except Exception as exc:
+            positions = None
+            sync_error = f"unexpected error: {exc}"
+
+        if positions is None:
+            from scripts.live_position_sync import load_live_positions  # noqa: PLC0415
+            cached = load_live_positions()
+            positions = list(cached.values())
+            header = (
+                f"\u26a0\ufe0f Live sync failed ({sync_error}) — showing "
+                "last cached data, may be stale.\n\n"
+            )
+        else:
+            header = ""
+
+        if not positions:
+            return "\U0001f7e2 *LIVE POSITIONS*\n\n" + header + "No open positions."
+
+        lines = ["\U0001f7e2 *LIVE POSITIONS*", ""]
+        if header:
+            lines.append(header)
+        for p in positions:
+            symbol = p.get("symbol", "?")
+            base = symbol.split("/")[0]
+            qty = p.get("quantity", 0) or 0
+            entry = p.get("entry_price")
+            current = p.get("current_price")
+            pnl_pct = p.get("pnl_pct")
+
+            lines.append(f"*{symbol}*")
+            lines.append(f"Amount:\n{qty:.6f} {base}")
+            lines.append("")
+            if entry is not None:
+                lines.append(f"Entry:\n{entry:,.4f}")
+            else:
+                lines.append(
+                    "Entry:\nUnknown (not enough trade history)\n"
+                    "\u26a0\ufe0f _Not eligible for SL/TP protection until "
+                    "this is resolved._",
+                )
+            lines.append("")
+            lines.append(
+                f"Current:\n{current:,.4f}" if current is not None
+                else "Current:\nUnknown",
+            )
+            lines.append("")
+            if pnl_pct is not None:
+                emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+                lines.append(f"PnL:\n{emoji} {pnl_pct:+.2f}%")
+            else:
+                lines.append("PnL:\nUnknown")
+            lines.append("")
+            lines.append(f"Exchange:\n{p.get('exchange', '?')}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def _execute_paper(self, ctx, args: str = "") -> str:
         if ctx.services is not None:
             open_positions = ctx.services.metrics.open_positions()
         else:
