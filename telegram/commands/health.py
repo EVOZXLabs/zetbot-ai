@@ -128,7 +128,7 @@ class HealthCommand(BaseCommand):
 
         return (
             f"{score_icon} *ZetBot {ver} Health*\n"
-            f"Score: `{score}/100`\n"
+            f"*Score:* `{score}/100`\n"
             f"\n"
             f"*Components*\n"
             f"Scanner: {scanner_icon} `{last_scan_rel}` {scanner_label}\n"
@@ -145,6 +145,14 @@ class HealthCommand(BaseCommand):
             f"Memory: `{rss_mb:.1f}MB` ({mem_pct:.1f}%)  {mem_icon} {mem_label} {mem_trend}\n"
             f"CPU:    `{cpu_pct:.1f}%`  {cpu_icon} {cpu_label}\n"
             f"Threads: `{thread_count}`\n"
+            f"\n"
+            f"*Positions*\n"
+            f"Open: `{open_positions}`\n"
+            f"Total: `{open_positions}`\n"
+            f"\n"
+            f"*Timestamps*\n"
+            f"Last Scan: `{last_scan_rel}`\n"
+            f"Last Trade: `{last_trade_rel}`\n"
             f"\n"
             f"*Account*\n"
             f"Equity: `${equity:,.2f}`  Cash: `${balance:,.2f}`\n"

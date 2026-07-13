@@ -245,6 +245,12 @@ def test_protocol_structural_check() -> None:
             return []
         def fetch_balance(self) -> dict[str, Any]:
             return {}
+        def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
+            return {}
+        def has_credentials(self) -> bool:
+            return False
+        def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+            return {}
         def get_markets(self) -> list[dict[str, Any]]:
             return []
         def health_check(self) -> bool:
