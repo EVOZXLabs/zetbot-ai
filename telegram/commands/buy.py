@@ -54,29 +54,9 @@ class BuyCommand(BaseCommand):
         )
 
         result = ctx.services.order.execute(request)
-        if hasattr(result, "status"):
-            status = result.status
-            error = result.error
-            filled = result.filled_amount
-            fill_price = result.filled_price
-        else:
-            status = result.get("status", "UNKNOWN")
-            error = result.get("error")
-            filled = result.get("filled_amount", 0)
-            fill_price = result.get("filled_price", 0)
 
-        if status in ("FILLED", "EXECUTED"):
+        from telegram.commands._order_status import format_order_outcome  # noqa: PLC0415
+        message, should_sync = format_order_outcome("Buy", symbol, result)
+        if should_sync:
             ctx.services.order.sync_paper_state(result)
-            return (
-                f"\u2705 *Buy Executed*\n"
-                f"Symbol: `{symbol}`\n"
-                f"Amount: `{filled:.6f}`\n"
-                f"Price: `{fill_price:.6f}`\n"
-                f"Executor: `{getattr(result, 'executor', result.get('executor', '?'))}`"
-            )
-        return (
-            f"\u274c *Buy Failed*\n"
-            f"Symbol: `{symbol}`\n"
-            f"Status: `{status}`\n"
-            f"Error: `{error or 'Unknown'}`"
-        )
+        return message
