@@ -395,6 +395,55 @@ class OrderManager:
 
         _sync_paper_files(sym, side.upper(), amt, price, cost, pnl)
 
+    def sync_position(self, result: Any) -> None:
+        """Mode-aware position sync — call this after a successful order
+        instead of choosing between sync_paper_state()/sync_live_position()
+        yourself. PAPER writes to data/positions.json (unchanged, existing
+        behavior); LIVE re-derives the real position from the exchange
+        and writes data/live_positions.json — separate files, separate
+        worlds, so PAPER's existing pipeline is untouched.
+        """
+        if self._engine.mode == "LIVE":
+            self.sync_live_position(result)
+        else:
+            self.sync_paper_state(result)
+
+    def sync_live_position(self, result: Any) -> None:
+        """Re-derive the REAL position for this order's symbol from the
+        exchange (balance + trade history) and update
+        data/live_positions.json.
+
+        Deliberately re-fetches from the exchange rather than trusting
+        the OrderResult's filled_amount/filled_price alone — the
+        exchange is the source of truth; this is a cache refresh
+        triggered by our own trade, not the record itself.
+        """
+        if self._engine.mode != "LIVE":
+            return
+
+        symbol = result.symbol if hasattr(result, "symbol") else result.get("symbol")
+        if not symbol:
+            return
+
+        try:
+            from scripts.live_position_sync import (  # noqa: PLC0415
+                LivePositionSync,
+                merge_live_positions,
+            )
+            syncer = LivePositionSync(
+                self._exchange,
+                quote_currency=getattr(self._config, "quote_currency", "USDT"),
+            )
+            fresh = syncer.sync_positions([symbol])
+            merge_live_positions(fresh, synced_symbols=[symbol])
+        except Exception:
+            # Best-effort: a failed sync must NOT crash the trade flow —
+            # the order itself already happened. /positions triggers its
+            # own fresh sync on demand, so this only means the cache
+            # stays stale until the next successful sync, not that the
+            # trade is lost.
+            pass
+
     @property
     def metrics(self) -> ExecutionMetrics:
         return self._metrics

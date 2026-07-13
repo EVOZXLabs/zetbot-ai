@@ -1,0 +1,246 @@
+"""Live spot position reconstruction — the exchange is the source of
+truth, positions.json-style caches are a convenience layer on top.
+
+Spot exchanges don't track "positions" the way futures/margin do —
+there's no server-side entry price or position record, only balances
+and trade history. This module:
+
+    - treats ``fetch_balance()`` as truth for QUANTITY currently held
+    - reconstructs an approximate ENTRY PRICE from the account's own
+      fills (``fetch_my_trades()``), not from any local cache
+
+Entry-price reconstruction is BEST-EFFORT, not accounting-grade: it
+walks fills newest-first, nets sells against the buys they closed out,
+and averages the buys that cover the currently-held quantity. If the
+fetched trade history doesn't go back far enough to fully account for
+the held quantity, entry_price comes back as ``None`` rather than a
+guess — a caller (e.g. Native SL/TP OCO, later) MUST treat that as
+"don't know the entry price", never default it to the current price.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from scripts.exchange_manager import ExchangeManager
+from scripts.exchange_providers import ExchangeAuthError
+
+LIVE_POSITIONS_PATH = "data/live_positions.json"
+DUST_THRESHOLD = 1e-8
+TRADE_HISTORY_LIMIT = 200
+
+
+class MissingEntryPriceError(Exception):
+    """Raised by ``require_entry_price()`` when a position has no known
+    entry price. Protective orders (SL/TP / OCO) MUST NOT be submitted
+    without a real entry price — there is nothing to size stop/target
+    levels off of, and guessing risks placing them at the wrong distance
+    from a price the bot doesn't actually know.
+    """
+
+
+def require_entry_price(position: dict[str, Any]) -> float:
+    """Guard used before submitting any protective order (SL/TP / OCO).
+
+    Raises ``MissingEntryPriceError`` if ``position["entry_price"]`` is
+    ``None`` (i.e. ``LivePositionSync`` couldn't fully reconstruct it
+    from trade history) — callers must stop and surface this to the
+    operator rather than substituting the current price or a guess.
+    """
+    entry = position.get("entry_price")
+    if entry is None:
+        raise MissingEntryPriceError(
+            f"Cannot create protection orders for {position.get('symbol', '?')}: "
+            "entry price unknown. Sync trade history first "
+            "(try /positions, or check fetch_my_trades coverage on the "
+            "exchange for this symbol)."
+        )
+    return entry
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class LivePositionSync:
+    """Rebuilds live spot positions directly from the exchange."""
+
+    def __init__(self, exchange: ExchangeManager, quote_currency: str = "USDT") -> None:
+        self._exchange = exchange
+        self._quote = (quote_currency or "USDT").upper()
+
+    @staticmethod
+    def _extract(balance: dict[str, Any], currency: str, field: str) -> Optional[float]:
+        bucket = balance.get(field)
+        if isinstance(bucket, dict) and currency in bucket:
+            try:
+                return float(bucket[currency])
+            except (TypeError, ValueError):
+                return None
+        per_currency = balance.get(currency)
+        if isinstance(per_currency, dict) and field in per_currency:
+            try:
+                return float(per_currency[field])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _reconstruct_entry_price(
+        self, provider: Any, symbol: str, held_qty: float,
+    ) -> Optional[float]:
+        try:
+            ex = provider._get_exchange()
+            trades = ex.fetch_my_trades(symbol, limit=TRADE_HISTORY_LIMIT)
+        except Exception:
+            return None
+        if not trades:
+            return None
+
+        remaining = held_qty
+        cost = 0.0
+        qty_accum = 0.0
+        for t in sorted(trades, key=lambda x: x.get("timestamp", 0) or 0, reverse=True):
+            side = (t.get("side") or "").lower()
+            amt = float(t.get("amount", 0) or 0)
+            price = float(t.get("price", 0) or 0)
+            if amt <= 0 or price <= 0:
+                continue
+            if side == "sell":
+                # A later sell means an earlier buy of this size doesn't
+                # belong to what we hold NOW — approximate offset, not
+                # exact FIFO/LIFO lot accounting.
+                remaining += amt
+                continue
+            if side == "buy":
+                take = min(amt, remaining)
+                if take <= 0:
+                    continue
+                cost += take * price
+                qty_accum += take
+                remaining -= take
+                if remaining <= DUST_THRESHOLD:
+                    break
+
+        if qty_accum <= 0 or remaining > DUST_THRESHOLD:
+            # Couldn't fully account for the held quantity within the
+            # fetched history window — refuse to guess.
+            return None
+        return cost / qty_accum
+
+    def sync_positions(self, symbols: list[str]) -> list[dict[str, Any]]:
+        """Return the CURRENT live position for each symbol (skips any
+        with no meaningful — i.e. above-dust — balance)."""
+        provider = self._exchange.get_provider()
+        balance = provider.fetch_balance()  # raises ExchangeAuthError w/ creds set
+        if not balance:
+            raise ExchangeAuthError("Position sync: balance fetch returned nothing.")
+
+        results: list[dict[str, Any]] = []
+        for symbol in symbols:
+            base = symbol.split("/")[0]
+            free = self._extract(balance, base, "free")
+            total = self._extract(balance, base, "total")
+            qty = total if total is not None else free
+            if qty is None or qty <= DUST_THRESHOLD:
+                continue
+
+            entry_price = self._reconstruct_entry_price(provider, symbol, qty)
+
+            current_price = None
+            try:
+                ticker = self._exchange.get_ticker(symbol)
+                current_price = ticker.get("last") or ticker.get("ask")
+            except Exception:
+                pass
+
+            pnl_pct = None
+            if entry_price and current_price:
+                pnl_pct = (current_price - entry_price) / entry_price * 100.0
+
+            results.append({
+                "symbol": symbol,
+                "quantity": qty,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "pnl_pct": pnl_pct,
+                "exchange": provider.name,
+                "source": "live_exchange_sync",
+                "synced_at": _now(),
+            })
+        return results
+
+    def sync_all_positions(self) -> list[dict[str, Any]]:
+        """Discover every non-dust holding directly from the account
+        balance (not just symbols the bot has traded before), and
+        reconstruct a position for each.
+
+        This is what makes the exchange the actual source of truth —
+        it will surface a position even if it came from a manual trade
+        on the exchange itself, not only from bot-driven /buy orders.
+
+        Candidates are filtered against ``load_markets()`` first, so
+        wallet dust / non-tradeable balances (staking tokens, referral
+        rewards, etc.) that don't correspond to an actual ``<asset>/quote``
+        market are skipped instead of producing noisy "Unknown" entries.
+        """
+        provider = self._exchange.get_provider()
+        balance = provider.fetch_balance()
+        if not balance:
+            raise ExchangeAuthError("Position sync: balance fetch returned nothing.")
+
+        free = balance.get("free") if isinstance(balance.get("free"), dict) else {}
+        total = balance.get("total") if isinstance(balance.get("total"), dict) else {}
+        currencies = set(free.keys()) | set(total.keys())
+        currencies.discard(self._quote)
+
+        markets = provider.load_markets()
+        candidates = [f"{c}/{self._quote}" for c in sorted(currencies)]
+        if markets:
+            # Only keep candidates that are an actual tradeable market —
+            # skip e.g. LDBTC (staking token) or referral-reward dust
+            # that isn't a real <asset>/<quote> pair on this exchange.
+            candidates = [s for s in candidates if s in markets]
+        # If load_markets() itself failed (returned {}), fall back to
+        # trying every candidate as-is — sync_positions() already
+        # tolerates a failed ticker/trades lookup per-symbol.
+
+        return self.sync_positions(candidates)
+
+
+def load_live_positions() -> dict[str, Any]:
+    try:
+        with open(LIVE_POSITIONS_PATH) as f:
+            return dict(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_live_positions(positions_by_symbol: dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(LIVE_POSITIONS_PATH), exist_ok=True)
+        with open(LIVE_POSITIONS_PATH, "w") as f:
+            json.dump(positions_by_symbol, f, indent=2)
+    except Exception:
+        pass  # best-effort cache write; the exchange remains the truth
+
+
+def merge_live_positions(
+    new_positions: list[dict[str, Any]], synced_symbols: list[str],
+) -> dict[str, Any]:
+    """Merge freshly-synced positions into the on-disk cache.
+
+    ``synced_symbols`` is every symbol that was just CHECKED (even ones
+    that came back with zero/dust balance) — any of those missing from
+    ``new_positions`` is removed from the cache (position closed / fully
+    sold), instead of lingering there stale forever.
+    """
+    current = load_live_positions()
+    for sym in synced_symbols:
+        current.pop(sym, None)
+    for pos in new_positions:
+        current[pos["symbol"]] = pos
+    save_live_positions(current)
+    return current
