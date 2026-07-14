@@ -692,11 +692,19 @@ def main() -> None:
         except OSError:
             pass
 
+    _force_exit_timer: threading.Timer | None = None
+
     def _shutdown_handler(signum: int, _frame: Any) -> None:
+        nonlocal _force_exit_timer
         logger.info(f"Signal {signum} received — shutting down")
         shutdown.set()
-        # Force exit after 8s if graceful shutdown doesn't complete
-        threading.Timer(8.0, os._exit, args=[1]).start()
+        # Force exit after 8s if graceful shutdown doesn't complete.
+        # Daemon so a leftover timer can never by itself keep the
+        # process alive; cancelled below once shutdown finishes cleanly.
+        if _force_exit_timer is None or not _force_exit_timer.is_alive():
+            _force_exit_timer = threading.Timer(8.0, os._exit, args=[1])
+            _force_exit_timer.daemon = True
+            _force_exit_timer.start()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
@@ -987,6 +995,12 @@ def main() -> None:
     logger.info("PID lock released")
 
     logger.info("ZetBot AI stopped")
+
+    # Graceful shutdown finished in time — disarm the force-exit safety
+    # net so it doesn't fire os._exit(1) a few seconds from now and
+    # turn this clean shutdown into a reported crash/timeout.
+    if _force_exit_timer is not None:
+        _force_exit_timer.cancel()
 
     # Suppress stdout/stderr to prevent late print() calls from
     # crashing during interpreter finalization (Fatal Python error:
