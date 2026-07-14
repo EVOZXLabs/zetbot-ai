@@ -462,7 +462,7 @@ class LiveExecutor:
         if not self.ENABLED:
             return OrderResult.rejected(
                 request,
-                "Live trading is not armed. "
+                "Live trading is not enabled (not armed). "
                 "Run /golive and reply CONFIRM LIVE to arm real-money trading.",
                 self.name,
             )
@@ -660,7 +660,7 @@ class ExecutionEngine:
             return None
         if not LiveExecutor.is_enabled():
             return (
-                "Live trading is not armed. "
+                "Live trading is not enabled (not armed). "
                 "Run /golive and reply CONFIRM LIVE to activate."
             )
         # Check API credentials by attempting a balance fetch

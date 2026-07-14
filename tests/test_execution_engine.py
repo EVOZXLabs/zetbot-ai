@@ -217,6 +217,9 @@ class TestLiveExecutor:
 
     def test_execute_when_enabled_uses_live_executor(self) -> None:
         LiveExecutor.enable()
+    
+        self.wallet.free_balance = 10000.0
+
         req = OrderRequest(symbol="BTC/USDT", side="BUY", amount=0.1)
         result = self.executor.execute(req, self.config, self.exchange, self.wallet)
         # When enabled, it tries live (and with mocks it may succeed)
@@ -224,7 +227,11 @@ class TestLiveExecutor:
 
     def test_enable_disable(self) -> None:
         LiveExecutor.enable()
+
+
         assert LiveExecutor.is_enabled() is True
+
+        self.wallet.free_balance = 10000.0
 
         mock_ex = MagicMock()
         mock_ex.fetch_balance.return_value = {"free": {"USDT": 10000.0}}
@@ -233,6 +240,11 @@ class TestLiveExecutor:
         provider = MagicMock()
         provider._get_exchange.return_value = mock_ex
         provider.fetch_balance.return_value = {"free": {"USDT": 10000.0}}
+       
+        provider.amount_to_precision.side_effect = lambda symbol, amount: amount
+        provider.price_to_precision.side_effect = lambda symbol, price: price
+        provider.client_order_id_params.return_value = {}
+       
         self.exchange.get_provider.return_value = provider
 
         req = OrderRequest(symbol="BTC/USDT", side="BUY", amount=0.1)
