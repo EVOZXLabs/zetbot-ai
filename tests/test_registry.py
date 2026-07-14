@@ -114,6 +114,10 @@ class TestCommandMeta:
     def test_usage_format(self) -> None:
         r = _fresh_registry()
         for m in r.get_all_commands():
+            if m.hidden:
+                # Hidden commands (e.g. the literal "CONFIRM LIVE" reply)
+                # are intentionally not invoked via "/" slash syntax.
+                continue
             assert m.usage.startswith("/"), (
                 f"'{m.name}' usage must start with /"
             )

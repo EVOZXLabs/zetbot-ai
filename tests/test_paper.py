@@ -8,6 +8,7 @@ StrategyEngine integration.
 
 from datetime import datetime, timezone
 
+import pandas as pd
 import pytest
 
 from bot.paper import PaperTrader
