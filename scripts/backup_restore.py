@@ -44,16 +44,21 @@ def create_backup() -> str:
     backup_path = os.path.join(BACKUP_DIR, f"backup-{ts}.zip")
 
     with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        written: set[str] = set()
+
         for path in INCLUDE_PATHS:
-            if os.path.exists(path):
+            if os.path.exists(path) and path not in written:
                 zf.write(path, path)
+                written.add(path)
 
         for directory in INCLUDE_DIRS:
             if os.path.isdir(directory):
                 for root, _dirs, files in os.walk(directory):
                     for fname in files:
                         fpath = os.path.join(root, fname)
-                        zf.write(fpath, fpath)
+                        if fpath not in written:
+                            zf.write(fpath, fpath)
+                            written.add(fpath)
 
         from scripts.config_import_export import VERSION
         info = {
