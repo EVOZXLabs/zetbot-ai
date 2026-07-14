@@ -1187,7 +1187,7 @@ def _run_cli() -> None:
     for flag, handler in CLI_DISPATCH.items():
         if flag in sys.argv:
             handler()
-    os._exit(0)
+            os._exit(0)
 
 
 if __name__ == "__main__":
