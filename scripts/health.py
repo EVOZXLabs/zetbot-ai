@@ -57,6 +57,7 @@ class HealthMonitor:
         self._thread = threading.Thread(
             target=self._run,
             name="HealthMonitor",
+            daemon=True,
         )
         self._thread.start()
 

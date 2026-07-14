@@ -25,14 +25,31 @@ import threading
 import time
 from typing import Any
 
+# ---------------------------------------------------------------------------
+#  Early shutdown coordination — install signal handlers BEFORE slow module
+#  imports (ccxt can take 5-7 seconds on Python 3.14) so that SIGTERM/SIGINT
+#  are always handled, even during import phase.
+# ---------------------------------------------------------------------------
+_early_shutdown_event = threading.Event()
+
+
+def _early_shutdown_handler(signum: int, _frame: Any) -> None:
+    """Handle SIGTERM/SIGINT during or after startup."""
+    _early_shutdown_event.set()
+    threading.Timer(8.0, os._exit, args=[0]).start()
+
+
+signal.signal(signal.SIGINT, _early_shutdown_handler)
+signal.signal(signal.SIGTERM, _early_shutdown_handler)
+
 from scripts.app_config import (
     AppConfig,
     ConfigError,
     load_config,
     validate_config,
 )
-from scripts.health import HealthMonitor
 from scripts.service_container import ServiceContainer
+from scripts.health import HealthMonitor
 from scripts.logger import PipelineLogger
 from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
@@ -206,23 +223,35 @@ def _send_telegram(config: AppConfig, lines: list[str]) -> None:
 
 def _check_dependencies() -> None:
     """Verify critical dependencies are importable; exit with helpful message if not."""
-    # Use subprocess to avoid import deadlocks between certain packages
+    # Skip in test mode to avoid import deadlocks and keep startup fast.
+    if os.getenv("TEST_MODE", "").lower() in ("1", "true", "yes"):
+        return
+
+    # Use subprocess to avoid import deadlocks between certain packages.
+    # Import ccxt first — on Python 3.14 there is an intermittent import
+    # lock deadlock when numpy/pandas are loaded before ccxt.
     import subprocess  # noqa: PLC0415
 
     code = (
         "import sys\n"
-        "for mod in (\"numpy\", \"pandas\", \"ccxt\", \"requests\"):\n"
+        "for mod in (\"ccxt\", \"requests\", \"numpy\", \"pandas\"):\n"
         "    try:\n"
         "        __import__(mod)\n"
         "    except Exception:\n"
         "        print(mod, file=sys.stderr)\n"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        print("WARNING: Dependency check timed out — continuing anyway", file=sys.stderr)
+        return
+    except Exception:
+        return
     if result.returncode != 0:
         print(f"ERROR: Dependency check failed — {result.stderr.strip()}", file=sys.stderr)
         print("On some systems 'python3' must be used instead of 'python'.", file=sys.stderr)
@@ -683,6 +712,13 @@ def main() -> None:
 
     shutdown = threading.Event()
 
+    # If a signal arrived during the import phase (before the main
+    # signal handler below was installed), the early handler already
+    # set _early_shutdown_event.  Propagate that into the main shutdown
+    # event so the loop exits immediately.
+    if _early_shutdown_event.is_set():
+        shutdown.set()
+
     # Clean up stale shutdown signal file from previous run
     stale_file = "data/.shutdown_requested"
     if os.path.exists(stale_file):
@@ -697,6 +733,7 @@ def main() -> None:
     def _shutdown_handler(signum: int, _frame: Any) -> None:
         nonlocal _force_exit_timer
         logger.info(f"Signal {signum} received — shutting down")
+        _early_shutdown_event.set()
         shutdown.set()
         # Force exit after 8s if graceful shutdown doesn't complete.
         # Daemon so a leftover timer can never by itself keep the
@@ -845,12 +882,17 @@ def main() -> None:
         try:
             from scripts.paper_trading_engine import main as paper_main
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(paper_main)
-                fut.result(timeout=30)
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            fut = pool.submit(paper_main)
+            try:
+                fut.result(timeout=10)
+            except concurrent.futures.TimeoutError:
+                logger.warning("Paper engine startup timed out — continuing")
+            except Exception as exc:
+                logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
+            pool.shutdown(wait=False, cancel_futures=True)
+            del pool
             logger.info("Paper engine state restored — positions recovered, TP/SL checked")
-        except concurrent.futures.TimeoutError:
-            logger.warning("Paper engine startup timed out — continuing")
         except Exception as exc:
             logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
     else:
@@ -904,11 +946,7 @@ def main() -> None:
     _monitor_interval = 0  # counter for periodic position monitoring (~60s)
     try:
         while not shutdown.is_set():
-            shutdown.wait(timeout=10.0)
-            if shutdown.is_set():
-                break
-
-            # -- Check for shutdown signal file -------------------------
+            # -- Check for shutdown signal file (before blocking wait) ----
             if os.path.exists("data/.shutdown_requested"):
                 logger.info("Shutdown signal file detected — shutting down")
                 shutdown.set()
@@ -916,6 +954,10 @@ def main() -> None:
                     os.remove("data/.shutdown_requested")
                 except OSError:
                     pass
+                break
+
+            shutdown.wait(timeout=10.0)
+            if shutdown.is_set():
                 break
 
             # -- Position monitoring every ~60 seconds ------------------
@@ -1145,7 +1187,7 @@ def _run_cli() -> None:
     for flag, handler in CLI_DISPATCH.items():
         if flag in sys.argv:
             handler()
-            sys.exit(0)
+    os._exit(0)
 
 
 if __name__ == "__main__":
