@@ -756,7 +756,7 @@ def main() -> None:
         """
         nonlocal _force_exit_timer
         if _force_exit_timer is None or not _force_exit_timer.is_alive():
-            _force_exit_timer = threading.Timer(20.0, os._exit, args=[1])
+            _force_exit_timer = threading.Timer(15.0, os._exit, args=[1])
             _force_exit_timer.daemon = True
             _force_exit_timer.start()
 
@@ -764,7 +764,7 @@ def main() -> None:
         logger.info(f"Signal {signum} received — shutting down")
         _early_shutdown_event.set()
         shutdown.set()
-        # Force exit after 20s if graceful shutdown doesn't complete.
+        # Force exit after 15s if graceful shutdown doesn't complete.
         _arm_force_exit_timer()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
@@ -1040,7 +1040,7 @@ def main() -> None:
         logger.info("Stopping Telegram Command Center...")
         center.stop()
         if tg_thread and tg_thread.is_alive():
-            tg_thread.join(timeout=5.0)
+            tg_thread.join(timeout=3.0)
             if tg_thread.is_alive():
                 logger.warning(
                     "Telegram thread did not stop within timeout"
