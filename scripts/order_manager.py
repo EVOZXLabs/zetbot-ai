@@ -73,11 +73,13 @@ class OrderManager:
         wallet: Any,
         risk: Any,
         mode: str = "PAPER",
+        safeguard: Any = None,
     ) -> None:
         self._config = config
         self._exchange = exchange
         self._wallet = wallet
         self._risk = risk
+        self._safeguard = safeguard
         self._engine = ExecutionEngine(exchange, config, wallet, mode)
         self._metrics = ExecutionMetrics()
 
@@ -98,6 +100,14 @@ class OrderManager:
             request = trade_plan
         else:
             request = self._plan_to_request(trade_plan) if isinstance(trade_plan, dict) else trade_plan
+
+        # ── 0. SafeGuard check (paused/limits/cooldown) ────────────────
+        if self._safeguard is not None and request.side == "BUY":
+            ok, reason = self._safeguard.can_open_new_position()
+            if not ok:
+                return OrderResult.rejected(
+                    request, reason, "order_manager",
+                )
 
         # ── 1. Risk validation ──────────────────────────────────────────
         risk_result = self._validate_risk(request)
@@ -670,7 +680,10 @@ class OrderManager:
             if attempt < max_retries - 1:
                 time.sleep(RETRY_DELAY_SEC * (attempt + 1))
 
-        # All retries exhausted
+        # All retries exhausted — record exchange failure for cooldown
+        if self._safeguard is not None:
+            self._safeguard.record_exchange_failure()
+
         return OrderResult(
             order_id=_generate_id("fail_"),
             trace_id=request.trace_id,
@@ -806,6 +819,7 @@ class OrderManager:
 
 def _sync_paper_files(
     symbol: str, side: str, amount: float, price: float, cost: float, pnl: float,
+    fee: float = 0.0,
 ) -> None:
     """Write a manual trade to ``paper_orders.json`` and ``paper_balance.json``."""
     from datetime import datetime, timezone  # noqa: PLC0415
@@ -862,7 +876,7 @@ def _sync_paper_files(
         pb["final_balance"] = round(pb.get("final_balance", 10000.0) - cost, 2)
         pb["final_equity"] = pb["final_balance"]
     elif side == "SELL":
-        proceeds = amount * price
+        proceeds = amount * price - fee
         pb["final_balance"] = round(pb.get("final_balance", 10000.0) + proceeds, 2)
         pb["final_equity"] = pb["final_balance"]
         pb["total_trades"] = pb.get("total_trades", 0) + 1

@@ -130,10 +130,28 @@ class PositionsCommand(BaseCommand):
             roi_pct = ((current - entry) / entry * 100) if entry > 0 else 0.0
             dist_entry = ((current - entry) / entry * 100) if entry > 0 else 0.0
 
-            sl = p.get("stop_loss", 0.0)
+            sl = p.get("current_stop") or p.get("stop_loss", 0.0)
             tp1 = p.get("tp1", 0.0)
             tp2 = p.get("tp2", 0.0)
             tp3 = p.get("tp3", 0.0)
+
+            # Load TP targets from trade_plan.json if missing in position state
+            plan_data = ctx.read_json("trade_plan.json")
+            plans = {
+                x.get("symbol"): x
+                for x in plan_data.get("plans", [])
+            }
+
+            plan = plans.get(symbol, {})
+
+            if not tp1:
+                tp1 = plan.get("tp1", 0.0)
+
+            if not tp2:
+                tp2 = plan.get("tp2", 0.0)
+
+            if not tp3:
+                tp3 = plan.get("tp3", 0.0)
 
             # Remaining distance as % (positive means room before hit)
             rem_sl = ((current - sl) / current * 100) if current > 0 and sl > 0 else 0.0
@@ -141,10 +159,10 @@ class PositionsCommand(BaseCommand):
             rem_tp2 = ((tp2 - current) / current * 100) if current > 0 and tp2 > 0 and not p.get("tp2_hit") else 0.0
             rem_tp3 = ((tp3 - current) / current * 100) if current > 0 and tp3 > 0 and not p.get("tp3_hit") else 0.0
 
-            size = p.get("position_size_usdt", 0)
+            size = p.get("position_size_usdt") or p.get("cost_basis", 0.0) or (entry * p.get("quantity", 0.0))
             exposure_pct = (size / equity * 100) if equity > 0 else 0.0
 
-            entry_time_raw = p.get("entry_time", "")
+            entry_time_raw = p.get("opened_at", p.get("entry_time", ""))
             holding_str = "N/A"
             entry_time_str = "N/A"
             if entry_time_raw:
@@ -162,6 +180,8 @@ class PositionsCommand(BaseCommand):
 
             # Risk/Reward
             rr = ((tp1 - entry) / (entry - sl)) if entry > 0 and sl > 0 and (entry - sl) > 0 else 0.0
+            if not rr:
+                rr = plan.get("risk_reward", 0.0)
             risk_pct = ((entry - sl) / entry * 100) if entry > 0 and sl > 0 else 0.0
             reward_pct = ((tp1 - entry) / entry * 100) if entry > 0 and tp1 > 0 else 0.0
 

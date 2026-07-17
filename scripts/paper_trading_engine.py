@@ -62,6 +62,7 @@ class Order:
     created_at: str
     filled_at: str
     closed_at: str
+    exit_reason: str = ""
 
 
 @dataclass
@@ -82,6 +83,8 @@ class VirtualPosition:
     tp2_sold: bool = False
     tp3_sold: bool = False
     opened_at: str = ""      # ISO timestamp of first open
+    signal_time: str = ""
+    closure_notified: bool = False
 
 
 @dataclass
@@ -495,8 +498,30 @@ class PaperTradingEngine:
             },
             "equity_history": [asdict(s) for s in self.equity_history],
         }
+    
         with open(STATE_PATH, "w") as f:
             json.dump(state, f, indent=2, default=str)
+
+        # Sync positions.json for Telegram/reporting
+        positions_data = {
+            "generated": datetime.now(timezone.utc).isoformat(),
+            "total_positions": len(self.positions),
+            "active_count": sum(
+                1 for vp in self.positions.values()
+                if vp.status in ("OPEN", "TRAILING", "BREAKEVEN", "PARTIAL")
+            ),
+            "closed_count": sum(
+                1 for vp in self.positions.values()
+                if vp.status in ("CLOSED", "STOPPED", "TIMEOUT")
+            ),
+            "positions": [
+                asdict(vp)
+                for vp in self.positions.values()
+            ]
+        }
+
+        with open("data/positions.json", "w") as f:
+            json.dump(positions_data, f, indent=2, default=str)
 
     def run(self) -> dict[str, Any]:
         """Full paper trading pipeline."""
@@ -531,11 +556,14 @@ class PaperTradingEngine:
             vp = self.positions.get(symbol)
             if vp is not None and vp.status == "OPEN":
                 continue
-            self._execute_plan(plan, pos_map.get(symbol))
-            self.equity_history.append(
-                self.wallet.snapshot(
-                    position_value=self._total_position_value(),
-                    unrealized_pnl_value=self._total_unrealized_pnl(),
+            order = self._execute_plan(plan,
+            pos_map.get(symbol))
+
+            if order is not None:
+                self.equity_history.append(
+                    self.wallet.snapshot(
+            position_value=self._total_position_value(),
+            unrealized_pnl_value=self._total_unrealized_pnl(),
                 )
             )
 
@@ -600,7 +628,7 @@ class PaperTradingEngine:
             data = json.load(f)
         return {p["symbol"]: p for p in data.get("positions", [])}
 
-    def _execute_plan(self, plan: dict, pos_state: dict | None) -> Order:
+    def _execute_plan(self, plan: dict, pos_state: dict | None) -> Order | None:
         symbol = plan["symbol"]
         entry = plan["entry_price"]
         plan_qty = plan["quantity"]
@@ -608,6 +636,17 @@ class PaperTradingEngine:
 
         now_ts = datetime.now(timezone.utc).isoformat()
         order_id = _next_order_id()
+
+        plan_signal = plan.get("signal_time", "")
+
+        vp = self.positions.get(symbol)
+
+
+        if (
+            vp is not None
+            and vp.signal_time == plan_signal
+        ):
+            return None
 
         # --- Scale-down if position exceeds free balance ---
         unit_cost = ExecutionModel.buy(entry, 1.0)["total_cost"]
@@ -675,6 +714,7 @@ class PaperTradingEngine:
             cost_basis=total_cost,
             status="OPEN",
             opened_at=now_ts,
+            signal_time=plan.get("signal_time", ""),
         )
 
         # Send BUY OPENED notification
@@ -742,7 +782,8 @@ class PaperTradingEngine:
                     (sell_result["total_proceeds"] / cost_part - 1) * 100, 2
                 ) if cost_part > 0 else 0.0,
                 status="CLOSED",
-                created_at=now_ts, filled_at=now_ts, closed_at=now_ts,
+                created_at=vp.opened_at, filled_at=vp.opened_at, closed_at=now_ts,
+                exit_reason="Take Profit",
             ))
 
             setattr(vp, sold_attr, True)
@@ -756,19 +797,23 @@ class PaperTradingEngine:
             vp.realized_pnl = round(realized_pnl, 2)
             vp.total_pnl = round(realized_pnl, 2)
 
-            # Determine exit reason: all filled via TP hits
-            exit_reason = "Take Profit"
-            holding_time = self._calc_holding_time(vp.opened_at, now_ts)
-            self._notify_close(
-                symbol=vp.symbol,
-                exit_price=vp.current_price,
-                total_pnl=vp.total_pnl,
-                balance=self.wallet.balance,
-                exit_reason=exit_reason,
-                holding_time=holding_time,
-                entry_price=vp.entry_price,
-                cost_basis=vp.cost_basis,
+            exit_reason = self._resolve_exit_reason(
+                "Take Profit", pos_status, tp1_hit, tp2_hit, tp3_hit,
+                vp.total_pnl,
             )
+            holding_time = self._calc_holding_time(vp.opened_at, now_ts)
+            if not vp.closure_notified:
+                self._notify_close(
+                    symbol=vp.symbol,
+                    exit_price=vp.current_price,
+                    total_pnl=vp.total_pnl,
+                    balance=self.wallet.balance,
+                    exit_reason=exit_reason,
+                    holding_time=holding_time,
+                    entry_price=vp.entry_price,
+                    cost_basis=vp.cost_basis,
+                )
+                vp.closure_notified = True
             return
 
         if pos_status in ("CLOSED", "STOPPED", "TIMEOUT") and remaining_qty > 0.0:
@@ -784,6 +829,21 @@ class PaperTradingEngine:
             cost_part = vp.cost_basis * (remaining_qty / total_qty)
             close_pnl = sell_result["total_proceeds"] - cost_part
             realized_pnl += close_pnl
+
+            # Determine exit reason from position status
+            if pos_status == "STOPPED":
+                raw_reason = "Stop Loss"
+            elif pos_status == "TIMEOUT":
+                raw_reason = "Strategy Exit"
+            elif tp3_hit or tp2_hit or tp1_hit:
+                raw_reason = "Take Profit"
+            else:
+                raw_reason = "Strategy Exit"
+
+            exit_reason = self._resolve_exit_reason(
+                raw_reason, pos_status, tp1_hit, tp2_hit, tp3_hit,
+                round(realized_pnl, 2),
+            )
 
             self.orders.append(Order(
                 id=_next_order_id(), symbol=symbol,
@@ -802,7 +862,8 @@ class PaperTradingEngine:
                     (sell_result["total_proceeds"] / cost_part - 1) * 100, 2
                 ) if cost_part > 0 else 0.0,
                 status="CLOSED",
-                created_at=now_ts, filled_at=now_ts, closed_at=now_ts,
+                created_at=vp.opened_at, filled_at=vp.opened_at, closed_at=now_ts,
+                exit_reason=exit_reason,
             ))
 
             vp.status = "CLOSED"
@@ -812,27 +873,20 @@ class PaperTradingEngine:
             vp.unrealized_pnl = 0.0
             vp.total_pnl = round(realized_pnl, 2)
 
-            # Determine exit reason
-            if pos_status == "STOPPED":
-                exit_reason = "Stop Loss"
-            elif pos_status == "TIMEOUT":
-                exit_reason = "Strategy Exit"
-            elif tp3_hit or tp2_hit or tp1_hit:
-                exit_reason = "Take Profit"
-            else:
-                exit_reason = "Strategy Exit"
 
             holding_time = self._calc_holding_time(vp.opened_at, now_ts)
-            self._notify_close(
-                symbol=vp.symbol,
-                exit_price=exit_price,
-                total_pnl=vp.total_pnl,
-                balance=self.wallet.balance,
-                exit_reason=exit_reason,
-                holding_time=holding_time,
-                entry_price=vp.entry_price,
-                cost_basis=vp.cost_basis,
-            )
+            if not vp.closure_notified:
+                self._notify_close(
+                    symbol=vp.symbol,
+                    exit_price=exit_price,
+                    total_pnl=vp.total_pnl,
+                    balance=self.wallet.balance,
+                    exit_reason=exit_reason,
+                    holding_time=holding_time,
+                    entry_price=vp.entry_price,
+                    cost_basis=vp.cost_basis,
+                )
+                vp.closure_notified = True
         else:
             cost_remaining = vp.cost_basis * (remaining_qty / total_qty) \
                 if total_qty > 0 else 0.0
@@ -843,6 +897,22 @@ class PaperTradingEngine:
             )
             vp.realized_pnl = round(realized_pnl, 2)
             vp.total_pnl = round(vp.realized_pnl + vp.unrealized_pnl, 2)
+
+    @staticmethod
+    def _resolve_exit_reason(
+        raw_reason: str,
+        pos_status: str,
+        tp1_hit: bool,
+        tp2_hit: bool,
+        tp3_hit: bool,
+        total_pnl: float,
+    ) -> str:
+        """Reclassify exit reason so 'Take Profit' never appears with negative PnL."""
+        if raw_reason == "Take Profit" and total_pnl < 0:
+            if pos_status == "STOPPED":
+                return "Stop Loss"
+            return "Strategy Exit"
+        return raw_reason
 
     def _calc_holding_time(self, opened_at: str, closed_at: str) -> timedelta:
         """Calculate holding duration between two ISO timestamps."""
@@ -904,27 +974,37 @@ class PaperTradingEngine:
                       f"entry={o.entry_price:.6f}")
             print()
 
-        # Trade history
+        # Trade history (last 5 only)
         closed = [o for o in self.orders if o.status == "CLOSED"]
+
         if closed:
-            closed.sort(key=lambda o: o.net_pnl, reverse=True)
-            print(f"  TRADE HISTORY ({len(closed)} closes):")
+            print(f"  LAST 5 CLOSED TRADES ({len(closed)} total):")
+
             hdr = (
-                f"  {'#':>3s} {'Pair':>12s} {'Side':>5s} "
-                f"{'PnL $':>10s} {'PnL%':>7s} {'Entry':>10s} "
-                f"{'Exit':>10s} {'Fees':>7s}"
-            )
+        f"  {'#':>4s} {'Pair':>12s} {'Side':>5s} "
+        f"{'PnL $':>10s} {'PnL%':>7s} "
+        f"{'Entry':>10s} {'Exit':>10s} {'Fees':>7s}"
+        )
+
             print(hdr)
             print(f"  {'-' * (len(hdr) - 2)}")
 
-            for i, o in enumerate(closed, 1):
+            last_closed = closed[-5:]
+            start_no = len(closed) - len(last_closed) + 1
+
+            for i, o in enumerate(last_closed, start_no):
                 tot_fee = o.entry_fee + o.exit_fee
+
                 print(
-                    f"  {i:3d} {o.symbol:>12s} {o.side:>5s} "
-                    f"{o.net_pnl:>+10.2f} {o.net_pnl_pct:>+7.2f} "
-                    f"{o.entry_price:>10.4f} {o.exit_price:>10.4f} "
-                    f"{tot_fee:>7.4f}"
-                )
+                f"  {i:4d} {o.symbol:>12s} {o.side:>5s} "
+                f"{o.net_pnl:>+10.2f} {o.net_pnl_pct:>+7.2f} "
+                f"{o.entry_price:>10.4f} {o.exit_price:>10.4f} "
+                f"{tot_fee:>7.4f}"
+            )
+
+            print()
+        else:
+            print("  No closed trades.")
             print()
 
 
@@ -1022,6 +1102,7 @@ def main() -> None:
 
     if not metrics:
         return
+
 
     PaperExport.orders_csv(engine.orders, "data/paper_orders.csv")
     PaperExport.orders_json(engine.orders, "data/paper_orders.json")

@@ -372,6 +372,25 @@ class TradeExecutor:
         for risk in approved:
             decision = decision_map.get(risk.symbol)
 
+            previous_signal = ""
+
+            try:
+                with open("data/trade_plan.json") as f:
+                    old = json.load(f)
+
+                for p in old.get("plans", []):
+                    if (
+                        p.get("symbol") == risk.symbol
+                        and abs(
+                            p.get("entry_price", 0.0) - risk.entry_price
+                        ) < 1e-8
+                    ):
+                        previous_signal = p.get("signal_time", "")
+                        break
+
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+
             quantity = _round_quantity(
                 risk.position_value / risk.entry_price
                 if risk.entry_price > 0 else 0.0
@@ -411,7 +430,7 @@ class TradeExecutor:
                 recommendation=decision.recommendation
                 if decision else "",
                 confidence=confidence,
-                signal_time=signal_ts,
+                signal_time=previous_signal or signal_ts,
                 status=status,
                 rejection_reason=reason,
             ))

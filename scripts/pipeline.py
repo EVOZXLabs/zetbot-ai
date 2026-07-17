@@ -236,8 +236,16 @@ class Pipeline:
         decision_engine.main()
 
     def _run_decision_di(self) -> None:
-        data = self.container.scanner.get_results()
-        self.container.strategy.evaluate(data)
+        from scripts import decision_engine
+
+        engine = decision_engine.DecisionEngine()
+        decisions = engine.run()
+
+        report = decision_engine.DecisionReport()
+        report.to_json(
+                decisions,
+                "data/decision_results.json"
+        )
 
     @staticmethod
     def _run_risk() -> None:
@@ -245,9 +253,8 @@ class Pipeline:
         risk_manager.main()
 
     def _run_risk_di(self) -> None:
-        decisions = self.container.strategy.get_decisions()
-        self.container.risk.approve(decisions, self.container.wallet,
-                                    self.container.position)
+        from scripts import risk_manager
+        risk_manager.main()
 
     @staticmethod
     def _run_trade() -> None:
@@ -278,5 +285,12 @@ class Pipeline:
         paper_trading_engine.main()
 
     def _run_paper_di(self) -> None:
+        # Check safety guards before executing new orders
+        if self.container is not None:
+            ok, reason = self.container.safeguard.can_open_new_position()
+            if not ok:
+                self.logger.info(f"Pipeline paper stage skipped: {reason}")
+                return
+
         from scripts import paper_trading_engine
         paper_trading_engine.main()

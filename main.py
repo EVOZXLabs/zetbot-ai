@@ -245,7 +245,7 @@ def _check_dependencies() -> None:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
     except subprocess.TimeoutExpired:
         print("WARNING: Dependency check timed out — continuing anyway", file=sys.stderr)
@@ -351,7 +351,11 @@ def _update_paper_on_closure(
     fill_price = sell_result["fill_price"]
     fee = sell_result["fee"]
     total_proceeds = sell_result["total_proceeds"]
-    pnl = total_proceeds - (new_pos.entry_price * qty)
+
+    # Use same ExecutionModel for cost basis so both sides include slippage
+    buy_result = ExecutionModel.buy(new_pos.entry_price, qty)
+    cost_basis = buy_result["total_cost"]
+    pnl = total_proceeds - cost_basis
 
     # Update paper_balance.json
     try:
@@ -407,10 +411,11 @@ def _update_paper_on_closure(
         "net_pnl": round(pnl, 2),
         "net_pnl_pct": round(new_pos.floating_pnl_pct, 2),
         "status": "CLOSED",
-        "created_at": now_ts,
-        "filled_at": now_ts,
+        "created_at": new_pos.entry_time,
+        "filled_at": new_pos.entry_time,
         "closed_at": now_ts,
-    }
+        "exit_reason": exit_reason,
+        }
     try:
         with open("data/paper_orders.json") as f:
             orders_data = json.load(f)
@@ -645,18 +650,28 @@ def _monitor_positions(
 
         changed = True
 
-        # Detect status change → notify closure
-        if old_status != new_pos.status and new_pos.status in (
-            "CLOSED", "STOPPED", "TIMEOUT"
-        ):
-            _notify_closure(logger, config, sym, new_pos, current_price, _exit_reason_map)
+        # Detect status change → notify closure once
+        if (
+             old_status != new_pos.status
+    and new_pos.status in ("CLOSED", "STOPPED", "TIMEOUT")
+    and not pos.get("closure_notified", False)
+    ):
+            _notify_closure(
+                logger,
+                config,
+                sym,
+                new_pos,
+                current_price,
+            _exit_reason_map,
+    )
+            pos["closure_notified"] = True
 
-    if changed:
-        try:
-            with open("data/positions.json", "w") as f:
-                json.dump({"positions": positions}, f, indent=2)
-        except OSError as exc:
-            logger.error(f"Failed to write positions.json: {exc}")
+        if changed:
+            try:
+                with open("data/positions.json", "w") as f:
+                    json.dump({"positions": positions}, f, indent=2)
+            except OSError as exc:
+                logger.error(f"Failed to write positions.json: {exc}")
 
 
 def main() -> None:
