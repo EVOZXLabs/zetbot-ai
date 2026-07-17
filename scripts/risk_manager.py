@@ -25,6 +25,8 @@ from typing import Any
 
 SCANNER_PATH = "data/scanner_results.json"
 DECISION_PATH = "data/decision_results.json"
+PAPER_STATE_PATH = "data/paper_state.json"
+LIVE_POSITIONS_PATH = "data/live_positions.json"
 
 # Account config (all overridable via module-level vars)
 ACCOUNT_BALANCE = 10_000.0
@@ -334,6 +336,37 @@ class TradeValidator:
 # -------------------------------------------------------------------
 
 
+def _count_open_positions() -> int:
+    """Count positions that are genuinely open right now, carried over
+    from previous pipeline cycles.
+
+    Without this, ``TradeValidator.open_positions`` only ever reflected
+    trades approved within the current batch — so ``MAX_OPEN_POSITIONS``
+    was silently reset to 0 every run and could never account for
+    positions still open from earlier cycles, letting real exposure
+    grow past the configured cap.
+    """
+    count = 0
+    try:
+        with open(PAPER_STATE_PATH) as f:
+            paper_state = json.load(f)
+        for vp in paper_state.get("positions", {}).values():
+            if vp.get("status") == "OPEN":
+                count += 1
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    try:
+        with open(LIVE_POSITIONS_PATH) as f:
+            live_positions = json.load(f)
+        if isinstance(live_positions, dict):
+            count += len(live_positions)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    return count
+
+
 class DataLoader:
     """Load and merge scanner + decision data."""
 
@@ -435,6 +468,7 @@ class RiskManager:
         print("  [2/3] Evaluating risk …", flush=True)
         results: list[RiskResult] = []
         approved_count = 0
+        base_open_positions = _count_open_positions()
 
         for dec in decisions:
             scanner = scanner_map.get(dec.symbol)
@@ -473,7 +507,7 @@ class RiskManager:
             reward_amt = pos_size * (tp2 - scanner.price)
 
             # Validate
-            self.validator.open_positions = approved_count
+            self.validator.open_positions = base_open_positions + approved_count
             self.validator.daily_risk_used = sum(
                 r.risk_amount for r in results
                 if r.approval == "APPROVED"

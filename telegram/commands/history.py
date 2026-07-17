@@ -88,10 +88,15 @@ class HistoryCommand(BaseCommand):
 
             chunks.append(
                 f"{emoji} *{symbol}*\n"
-                f"BUY: `{buy_time}`  SELL: `{time_str}`\n"
-                f"Entry: `{fmt_price(entry)}`  Exit: `{fmt_price(exit_p)}`\n"
-                f"Holding: `{hold}`  PnL: `${pnl:+,.2f}` ({pnl_pct:+.2f}%)\n"
-                f"ROI: `{roi_pct:+.2f}%`  Reason: `{reason}`  Result: {result}"
+                f"Result   : {result}\n"
+                f"Reason   : `{reason}`\n"
+                f"Entry    : `{fmt_price(entry)}`\n"
+                f"Exit     : `{fmt_price(exit_p)}`\n"
+                f"PnL      : `${pnl:+,.2f}` ({pnl_pct:+.2f}%)\n"
+                f"ROI      : `{roi_pct:+.2f}%`\n"
+                f"Holding  : `{hold}`\n"
+                f"BUY      : `{buy_time}`\n"
+                f"SELL     : `{time_str}`"
             )
 
         # Summary

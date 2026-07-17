@@ -16,6 +16,7 @@ from typing import Any, Optional
 from scripts.exchange_manager import ExchangeManager
 from scripts.exchange_providers import ExchangeAuthError
 from scripts.order_manager import OrderManager
+from scripts.safety_limits import SafeGuard
 from scripts.interfaces import (
     IConfigService,
     IExchangeManager,
@@ -43,6 +44,9 @@ class ServiceContainer:
         self._logger = logger
         self._bootstrapped = False
         self._daemon_start_time: float = time.time()
+
+        # SafeGuard — pre-trade safety gate
+        self._safeguard: Optional[SafeGuard] = None
 
         # Service instances (lazy / bootstrapped)
         self._config_service: Optional[IConfigService] = None
@@ -76,6 +80,15 @@ class ServiceContainer:
         )
         self._metrics = _MetricsAdapter(config=self._config_service)
         self._notification = _NotificationAdapter(self._config_service)
+        self._safeguard = SafeGuard(
+            max_daily_loss_pct=self._config_service.max_daily_loss_pct,
+            max_consecutive_losses=self._config_service.max_consecutive_losses,
+            max_daily_trades=self._config_service.max_daily_trades,
+            exchange_failure_window=self._config_service.exchange_failure_window_seconds,
+            exchange_max_failures=self._config_service.exchange_max_failures,
+            atr_spike_multiplier=self._config_service.atr_spike_multiplier,
+        )
+        self._safeguard.set_account_balance(self._config_service.account_balance)
         self._wallet = (
             _WalletAdapter(self._config_service)
             if self._config_service.paper_mode
@@ -90,6 +103,7 @@ class ServiceContainer:
             wallet=self._wallet,
             risk=self._risk,
             mode="PAPER" if self._config_service.paper_mode else "LIVE",
+            safeguard=self._safeguard,
         )
         self._position = _PositionAdapter(self._config_service)
         self._health = None  # created by main.py, injected later
@@ -166,6 +180,11 @@ class ServiceContainer:
     def scheduler(self) -> Any:
         """Optional PipelineScheduler injected after creation."""
         return self._scheduler
+
+    @property
+    def safeguard(self) -> SafeGuard:
+        assert self._safeguard is not None
+        return self._safeguard
 
     @property
     def metrics(self) -> IMetricsManager:

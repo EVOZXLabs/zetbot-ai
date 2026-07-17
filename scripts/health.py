@@ -66,7 +66,7 @@ class HealthMonitor:
         if self._shutdown_event is not None:
             self._shutdown_event.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=3.0)
 
     def snapshot(self) -> dict[str, Any]:
         if self._last_snapshot is None:

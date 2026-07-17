@@ -94,20 +94,24 @@ def fmt_pct(value: float) -> str:
 
 
 def fmt_holding(seconds: float) -> str:
+    if seconds <= 0:
+        return "0s"
+
+    seconds = int(round(seconds))
+
     if seconds < 60:
-        return "<1m"
-    hours = seconds // 3600
-    if hours < 1:
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
-        if secs == 0:
-            return f"{mins}m"
-        return f"{mins}m {secs}s"
+        return f"{seconds}s"
+
+    mins, secs = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins}m" if secs == 0 else f"{mins}m {secs}s"
+
+    hours, mins = divmod(mins, 60)
     if hours < 24:
-        return f"{int(hours)}h {int((seconds % 3600) // 60)}m"
-    days = int(hours // 24)
-    rem_h = int(hours % 24)
-    return f"{days}d {rem_h}h"
+        return f"{hours}h" if mins == 0 else f"{hours}h {mins:02d}m"
+
+    days, hours = divmod(hours, 24)
+    return f"{days}d" if hours == 0 else f"{days}d {hours:02d}h"
 
 
 def fmt_compact_number(value: float) -> str:

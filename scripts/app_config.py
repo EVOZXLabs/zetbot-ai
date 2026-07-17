@@ -87,6 +87,14 @@ class AppConfig:
     tp2_sell_pct: float = 30.0
     tp3_sell_pct: float = 40.0
 
+    # Safety limits
+    max_daily_loss_pct: float = 5.0
+    max_consecutive_losses: int = 3
+    max_daily_trades: int = 20
+    exchange_failure_window_seconds: int = 300
+    exchange_max_failures: int = 3
+    atr_spike_multiplier: float = 3.0
+
     # Paper trading
     taker_fee: float = 0.001
     maker_fee: float = 0.00075
@@ -136,6 +144,12 @@ def load_config() -> AppConfig:
         stop_atr_multiplier=float(os.getenv("STOP_ATR_MULTIPLIER", "1.5")),
         stop_fixed_pct=float(os.getenv("STOP_FIXED_PCT", "5.0")),
         max_position_size_pct=float(os.getenv("MAX_POSITION_SIZE_PCT", "0.6")),
+        max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "5.0")),
+        max_consecutive_losses=int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3")),
+        max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "20")),
+        exchange_failure_window_seconds=int(os.getenv("EXCHANGE_FAILURE_WINDOW_SECONDS", "300")),
+        exchange_max_failures=int(os.getenv("EXCHANGE_MAX_FAILURES", "3")),
+        atr_spike_multiplier=float(os.getenv("ATR_SPIKE_MULTIPLIER", "3.0")),
         trail_atr_multiplier=float(os.getenv("TRAIL_ATR_MULTIPLIER", "2.0")),
         max_holding_candles=int(os.getenv("MAX_HOLDING_CANDLES", "48")),
         tp1_sell_pct=float(os.getenv("TP1_SELL_PCT", "30.0")),

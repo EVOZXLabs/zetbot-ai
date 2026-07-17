@@ -86,7 +86,7 @@ class PipelineScheduler:
             self._shutdown_event.set()
 
         if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=10.0)
+            self._thread.join(timeout=3.0)
             if self._thread.is_alive():
                 self._log.warning("PipelineScheduler thread did not exit cleanly")
 

@@ -40,8 +40,13 @@ class WalletCommand(BaseCommand):
             pos_list = pos_data.get("positions", []) if pos_data else []
             positions = [p for p in pos_list if p.get("status") == "OPEN"]
 
-        pos_value = sum(p.get("position_size_usdt", 0) for p in positions)
-        exposure_pct = (pos_value / eq * 100) if eq > 0 else 0.0
+        pos_value = sum(
+            p.get("position_size_usdt", 0)
+            or p.get("cost_basis", 0)
+            or (p.get("entry_price", 0) * p.get("quantity", 0))
+            for p in positions
+        )
+        exposure_pct = (pos_value / (eq + pos_value) * 100) if (eq + pos_value) > 0 else 0.0
 
         return (
             f"\U0001f911 *Wallet*\n"

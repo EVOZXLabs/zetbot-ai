@@ -42,6 +42,12 @@ def _early_shutdown_handler(signum: int, _frame: Any) -> None:
 signal.signal(signal.SIGINT, _early_shutdown_handler)
 signal.signal(signal.SIGTERM, _early_shutdown_handler)
 
+# Capture launch time BEFORE slow module-level imports (ccxt can take
+# 5-7 s on Python 3.14) so we can distinguish genuinely stale shutdown
+# signal files (from a previous run) from files created during our own
+# import phase (e.g. by a test or external tool).
+_PROCESS_LAUNCH_TIME: float = time.time()
+
 from scripts.app_config import (
     AppConfig,
     ConfigError,
@@ -245,7 +251,7 @@ def _check_dependencies() -> None:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
     except subprocess.TimeoutExpired:
         print("WARNING: Dependency check timed out — continuing anyway", file=sys.stderr)
@@ -351,7 +357,11 @@ def _update_paper_on_closure(
     fill_price = sell_result["fill_price"]
     fee = sell_result["fee"]
     total_proceeds = sell_result["total_proceeds"]
-    pnl = total_proceeds - (new_pos.entry_price * qty)
+
+    # Use same ExecutionModel for cost basis so both sides include slippage
+    buy_result = ExecutionModel.buy(new_pos.entry_price, qty)
+    cost_basis = buy_result["total_cost"]
+    pnl = total_proceeds - cost_basis
 
     # Update paper_balance.json
     try:
@@ -407,10 +417,11 @@ def _update_paper_on_closure(
         "net_pnl": round(pnl, 2),
         "net_pnl_pct": round(new_pos.floating_pnl_pct, 2),
         "status": "CLOSED",
-        "created_at": now_ts,
-        "filled_at": now_ts,
+        "created_at": new_pos.entry_time,
+        "filled_at": new_pos.entry_time,
         "closed_at": now_ts,
-    }
+        "exit_reason": exit_reason,
+        }
     try:
         with open("data/paper_orders.json") as f:
             orders_data = json.load(f)
@@ -645,18 +656,28 @@ def _monitor_positions(
 
         changed = True
 
-        # Detect status change → notify closure
-        if old_status != new_pos.status and new_pos.status in (
-            "CLOSED", "STOPPED", "TIMEOUT"
-        ):
-            _notify_closure(logger, config, sym, new_pos, current_price, _exit_reason_map)
+        # Detect status change → notify closure once
+        if (
+             old_status != new_pos.status
+    and new_pos.status in ("CLOSED", "STOPPED", "TIMEOUT")
+    and not pos.get("closure_notified", False)
+    ):
+            _notify_closure(
+                logger,
+                config,
+                sym,
+                new_pos,
+                current_price,
+            _exit_reason_map,
+    )
+            pos["closure_notified"] = True
 
-    if changed:
-        try:
-            with open("data/positions.json", "w") as f:
-                json.dump({"positions": positions}, f, indent=2)
-        except OSError as exc:
-            logger.error(f"Failed to write positions.json: {exc}")
+        if changed:
+            try:
+                with open("data/positions.json", "w") as f:
+                    json.dump({"positions": positions}, f, indent=2)
+            except OSError as exc:
+                logger.error(f"Failed to write positions.json: {exc}")
 
 
 def main() -> None:
@@ -719,29 +740,42 @@ def main() -> None:
     if _early_shutdown_event.is_set():
         shutdown.set()
 
-    # Clean up stale shutdown signal file from previous run
+    # Clean up stale shutdown signal file from a *previous* run only.
+    # Files created after this process launched (e.g. by a test or
+    # external tool during our import phase) must be preserved so the
+    # keep-alive loop can observe them.
     stale_file = "data/.shutdown_requested"
     if os.path.exists(stale_file):
         try:
-            os.remove(stale_file)
-            logger.info("Cleaned up stale shutdown signal file from previous run")
+            if os.path.getmtime(stale_file) < _PROCESS_LAUNCH_TIME:
+                os.remove(stale_file)
+                logger.info("Cleaned up stale shutdown signal file from previous run")
         except OSError:
             pass
 
     _force_exit_timer: threading.Timer | None = None
 
-    def _shutdown_handler(signum: int, _frame: Any) -> None:
+    def _arm_force_exit_timer() -> None:
+        """Guarantee the process exits within a bounded time even if
+        graceful shutdown hangs (e.g. a worker thread fails to join).
+
+        Shared by both the signal-based shutdown path and the shutdown
+        signal-file path so neither can hang indefinitely. Daemon so a
+        leftover timer can never by itself keep the process alive;
+        cancelled once shutdown finishes cleanly.
+        """
         nonlocal _force_exit_timer
+        if _force_exit_timer is None or not _force_exit_timer.is_alive():
+            _force_exit_timer = threading.Timer(15.0, os._exit, args=[1])
+            _force_exit_timer.daemon = True
+            _force_exit_timer.start()
+
+    def _shutdown_handler(signum: int, _frame: Any) -> None:
         logger.info(f"Signal {signum} received — shutting down")
         _early_shutdown_event.set()
         shutdown.set()
-        # Force exit after 8s if graceful shutdown doesn't complete.
-        # Daemon so a leftover timer can never by itself keep the
-        # process alive; cancelled below once shutdown finishes cleanly.
-        if _force_exit_timer is None or not _force_exit_timer.is_alive():
-            _force_exit_timer = threading.Timer(8.0, os._exit, args=[1])
-            _force_exit_timer.daemon = True
-            _force_exit_timer.start()
+        # Force exit after 15s if graceful shutdown doesn't complete.
+        _arm_force_exit_timer()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
@@ -943,25 +977,44 @@ def main() -> None:
 
     logger.info("ZetBot AI is running. Press Ctrl+C to stop.")
 
+    _debug_shutdown = os.getenv("DEBUG_SHUTDOWN", "").lower() in ("1", "true", "yes")
+    if _debug_shutdown:
+        logger.info(
+            f"[shutdown-debug] cwd={os.getcwd()!r} "
+            f"watch_path={os.path.abspath('data/.shutdown_requested')!r} "
+            f"main_thread={threading.current_thread().name!r}"
+        )
+
     _monitor_interval = 0  # counter for periodic position monitoring (~60s)
+    _debug_tick = 0
     try:
         while not shutdown.is_set():
+            if _debug_shutdown:
+                _debug_tick += 1
+                logger.info(
+                    f"[shutdown-debug] tick={_debug_tick} "
+                    f"exists={os.path.exists('data/.shutdown_requested')}"
+                )
+
             # -- Check for shutdown signal file (before blocking wait) ----
             if os.path.exists("data/.shutdown_requested"):
                 logger.info("Shutdown signal file detected — shutting down")
                 shutdown.set()
+                # Bound total shutdown time the same way the signal
+                # handlers do, in case a worker thread fails to join.
+                _arm_force_exit_timer()
                 try:
                     os.remove("data/.shutdown_requested")
                 except OSError:
                     pass
                 break
 
-            shutdown.wait(timeout=10.0)
+            shutdown.wait(timeout=1.0)
             if shutdown.is_set():
                 break
 
             # -- Position monitoring every ~60 seconds ------------------
-            _monitor_interval += 10
+            _monitor_interval += 1
             if _monitor_interval >= 60:
                 _monitor_interval = 0
                 _monitor_positions(logger, config, center)
@@ -1013,7 +1066,7 @@ def main() -> None:
         logger.info("Stopping Telegram Command Center...")
         center.stop()
         if tg_thread and tg_thread.is_alive():
-            tg_thread.join(timeout=12.0)
+            tg_thread.join(timeout=3.0)
             if tg_thread.is_alive():
                 logger.warning(
                     "Telegram thread did not stop within timeout"
@@ -1187,7 +1240,7 @@ def _run_cli() -> None:
     for flag, handler in CLI_DISPATCH.items():
         if flag in sys.argv:
             handler()
-    os._exit(0)
+            os._exit(0)
 
 
 if __name__ == "__main__":

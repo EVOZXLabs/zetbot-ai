@@ -19,4 +19,4 @@ class PauseCommand(BaseCommand):
         os.makedirs("data", exist_ok=True)
         with open(PAUSE_FILE, "w") as f:
             f.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
-        return "\u23f8\ufe0f *Trading Paused*\nNew trades will not be opened."
+        return "\u23f8\ufe0f *Trading Paused*\nNew trades will not be opened.\nExisting positions continue to be managed."

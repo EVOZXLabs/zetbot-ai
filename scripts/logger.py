@@ -148,6 +148,7 @@ class PipelineLogger:
 
     @staticmethod
     def _write_console(msg: str, **kwargs: Any) -> None:
+        kwargs.setdefault("flush", True)
         print(msg, **kwargs)
 
     def _write_log(self, msg: str) -> None:
