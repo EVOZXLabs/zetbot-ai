@@ -967,9 +967,25 @@ def main() -> None:
 
     logger.info("ZetBot AI is running. Press Ctrl+C to stop.")
 
+    _debug_shutdown = os.getenv("DEBUG_SHUTDOWN", "").lower() in ("1", "true", "yes")
+    if _debug_shutdown:
+        logger.info(
+            f"[shutdown-debug] cwd={os.getcwd()!r} "
+            f"watch_path={os.path.abspath('data/.shutdown_requested')!r} "
+            f"main_thread={threading.current_thread().name!r}"
+        )
+
     _monitor_interval = 0  # counter for periodic position monitoring (~60s)
+    _debug_tick = 0
     try:
         while not shutdown.is_set():
+            if _debug_shutdown:
+                _debug_tick += 1
+                logger.info(
+                    f"[shutdown-debug] tick={_debug_tick} "
+                    f"exists={os.path.exists('data/.shutdown_requested')}"
+                )
+
             # -- Check for shutdown signal file (before blocking wait) ----
             if os.path.exists("data/.shutdown_requested"):
                 logger.info("Shutdown signal file detected — shutting down")
