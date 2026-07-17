@@ -24,6 +24,8 @@ from typing import Any
 
 RISK_RESULTS_PATH = "data/risk_results.json"
 DECISION_RESULTS_PATH = "data/decision_results.json"
+PAPER_STATE_PATH = "data/paper_state.json"
+LIVE_POSITIONS_PATH = "data/live_positions.json"
 
 # Simulated exchange requirements (Binance spot defaults)
 EXCHANGE_MIN_NOTIONAL = 10.0        # $10 minimum order value
@@ -161,6 +163,37 @@ class DataLoader:
 # ---------------------------------------------------------------------------
 #  Execution validator
 # ---------------------------------------------------------------------------
+
+
+def _count_open_positions() -> int:
+    """Count positions genuinely open right now, carried over from
+    previous pipeline cycles.
+
+    Without this, ``ExecutionValidator._used_positions`` only ever
+    reflected trades approved within the current batch — so
+    ``MAX_OPEN_POSITIONS`` was silently reset to 0 every run and could
+    never account for positions still open from earlier cycles,
+    letting real exposure grow past the configured cap.
+    """
+    count = 0
+    try:
+        with open(PAPER_STATE_PATH) as f:
+            paper_state = json.load(f)
+        for vp in paper_state.get("positions", {}).values():
+            if vp.get("status") == "OPEN":
+                count += 1
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    try:
+        with open(LIVE_POSITIONS_PATH) as f:
+            live_positions = json.load(f)
+        if isinstance(live_positions, dict):
+            count += len(live_positions)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    return count
 
 
 class ExecutionValidator:
@@ -306,6 +339,11 @@ class TradeExecutor:
 
         t0 = time.time()
 
+        # Seed with real open positions carried over from prior cycles —
+        # otherwise MAX_OPEN_POSITIONS only ever counted this batch and
+        # could never see exposure already on the books.
+        self.validator._used_positions = _count_open_positions()
+
         # 1. Load data
         print("  [1/4] Loading data … ", end="", flush=True)
         all_risks = DataLoader.load_risk_results(RISK_RESULTS_PATH)
@@ -316,6 +354,15 @@ class TradeExecutor:
         # 2. Filter approved
         approved = [r for r in all_risks if r.approval == "APPROVED"]
         print(f"  [2/4] Approved trades  : {len(approved)}")
+
+        # /pause must block NEW positions from being opened. It must NOT
+        # be treated as cosmetic status-only — this is the actual gate.
+        # Existing open positions are still reconciled/closed downstream
+        # (position_manager / paper engine handle them independent of
+        # trade_plan.json READY entries), so pausing only stops new entries.
+        trading_paused = os.path.exists("data/.paused")
+        if trading_paused:
+            print("  [2/4] Trading PAUSED — no new positions will be opened.")
 
         # 3. Validate & build execution plans
         print("  [3/4] Validating …", flush=True)
@@ -336,6 +383,8 @@ class TradeExecutor:
             )
 
             status, reason = self.validator.validate(risk, decision)
+            if trading_paused and status == "READY":
+                status, reason = "REJECTED", "Trading paused (see /resume)"
 
             if status == "READY":
                 self.validator.commit(risk)

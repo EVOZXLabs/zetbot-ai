@@ -768,6 +768,25 @@ class ExecutionEngine:
                 "(read-only / restricted API key?).",
             )
 
+        # Withdrawal permission must NEVER be present on a bot's API key —
+        # if the key (and thus this running process / its on-disk secrets)
+        # is ever compromised, a withdrawal-capable key lets funds be
+        # moved off-exchange entirely, not just traded. Treat this as
+        # disqualifying rather than a soft warning.
+        can_withdraw: Optional[bool] = None
+        if isinstance(info, dict):
+            if "canWithdraw" in info:
+                can_withdraw = bool(info.get("canWithdraw"))
+            elif isinstance(info.get("permissions"), list):
+                can_withdraw = "WITHDRAWALS" in info["permissions"]
+        report["can_withdraw"] = can_withdraw
+        if can_withdraw is True:
+            report["reasons"].append(
+                "API key has WITHDRAWAL permission — this is unsafe for "
+                "an automated bot. Create a new key with trading-only "
+                "permission (no withdrawal) before going live.",
+            )
+
         report["ready"] = (
             not report["reasons"] and report["connected"] and free is not None
         )
