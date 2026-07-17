@@ -42,6 +42,12 @@ def _early_shutdown_handler(signum: int, _frame: Any) -> None:
 signal.signal(signal.SIGINT, _early_shutdown_handler)
 signal.signal(signal.SIGTERM, _early_shutdown_handler)
 
+# Capture launch time BEFORE slow module-level imports (ccxt can take
+# 5-7 s on Python 3.14) so we can distinguish genuinely stale shutdown
+# signal files (from a previous run) from files created during our own
+# import phase (e.g. by a test or external tool).
+_PROCESS_LAUNCH_TIME: float = time.time()
+
 from scripts.app_config import (
     AppConfig,
     ConfigError,
@@ -734,12 +740,16 @@ def main() -> None:
     if _early_shutdown_event.is_set():
         shutdown.set()
 
-    # Clean up stale shutdown signal file from previous run
+    # Clean up stale shutdown signal file from a *previous* run only.
+    # Files created after this process launched (e.g. by a test or
+    # external tool during our import phase) must be preserved so the
+    # keep-alive loop can observe them.
     stale_file = "data/.shutdown_requested"
     if os.path.exists(stale_file):
         try:
-            os.remove(stale_file)
-            logger.info("Cleaned up stale shutdown signal file from previous run")
+            if os.path.getmtime(stale_file) < _PROCESS_LAUNCH_TIME:
+                os.remove(stale_file)
+                logger.info("Cleaned up stale shutdown signal file from previous run")
         except OSError:
             pass
 
