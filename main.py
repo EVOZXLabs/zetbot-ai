@@ -745,18 +745,27 @@ def main() -> None:
 
     _force_exit_timer: threading.Timer | None = None
 
-    def _shutdown_handler(signum: int, _frame: Any) -> None:
+    def _arm_force_exit_timer() -> None:
+        """Guarantee the process exits within a bounded time even if
+        graceful shutdown hangs (e.g. a worker thread fails to join).
+
+        Shared by both the signal-based shutdown path and the shutdown
+        signal-file path so neither can hang indefinitely. Daemon so a
+        leftover timer can never by itself keep the process alive;
+        cancelled once shutdown finishes cleanly.
+        """
         nonlocal _force_exit_timer
-        logger.info(f"Signal {signum} received — shutting down")
-        _early_shutdown_event.set()
-        shutdown.set()
-        # Force exit after 8s if graceful shutdown doesn't complete.
-        # Daemon so a leftover timer can never by itself keep the
-        # process alive; cancelled below once shutdown finishes cleanly.
         if _force_exit_timer is None or not _force_exit_timer.is_alive():
             _force_exit_timer = threading.Timer(8.0, os._exit, args=[1])
             _force_exit_timer.daemon = True
             _force_exit_timer.start()
+
+    def _shutdown_handler(signum: int, _frame: Any) -> None:
+        logger.info(f"Signal {signum} received — shutting down")
+        _early_shutdown_event.set()
+        shutdown.set()
+        # Force exit after 8s if graceful shutdown doesn't complete.
+        _arm_force_exit_timer()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
@@ -965,6 +974,9 @@ def main() -> None:
             if os.path.exists("data/.shutdown_requested"):
                 logger.info("Shutdown signal file detected — shutting down")
                 shutdown.set()
+                # Bound total shutdown time the same way the signal
+                # handlers do, in case a worker thread fails to join.
+                _arm_force_exit_timer()
                 try:
                     os.remove("data/.shutdown_requested")
                 except OSError:
