@@ -604,8 +604,11 @@ class PaperTradingEngine:
     # ------------------------------------------------------------------
 
     def _load_plans(self, path: str) -> list[dict]:
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
         return [
             p for p in data.get("plans", [])
             if p.get("status") == "READY"

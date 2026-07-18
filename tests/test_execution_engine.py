@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import unittest.mock
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -562,3 +563,79 @@ def test_order_manager_has_iordermanager_methods() -> None:
     assert hasattr(mgr, 'validate_live_ready')
     assert hasattr(mgr, 'get_metrics_summary')
     assert hasattr(mgr, 'get_audit_trail')
+
+
+# ---------------------------------------------------------------------------
+#  PlanExport: regression tests for trade_plan.json always-written contract
+# ---------------------------------------------------------------------------
+
+
+class TestPlanExportEmpty:
+    """Verify PlanExport.to_json/to_csv always write, even with empty plans."""
+
+    def test_to_json_empty_plans_writes_file(self, tmp_path: Any) -> None:
+        from scripts.trade_executor import PlanExport
+        path = str(tmp_path / "trade_plan.json")
+        PlanExport.to_json([], path)
+        assert os.path.exists(path)
+        with open(path) as f:
+            data = json.load(f)
+        assert data["total_plans"] == 0
+        assert data["plans"] == []
+
+    def test_to_csv_empty_plans_writes_file(self, tmp_path: Any) -> None:
+        from scripts.trade_executor import PlanExport
+        path = str(tmp_path / "trade_plan.csv")
+        PlanExport.to_csv([], path)
+        assert os.path.exists(path)
+        with open(path) as f:
+            lines = f.readlines()
+        assert len(lines) == 1  # header only
+
+
+class TestTradeExecutorMainAlwaysWritesJson:
+    """Regression: main() must always write trade_plan.json."""
+
+    def test_main_writes_json_when_no_plans(self, tmp_path: Any) -> None:
+        os.makedirs("data", exist_ok=True)
+        from scripts import trade_executor
+
+        with (
+            unittest.mock.patch.object(trade_executor, "TradeExecutor") as MockExec,
+        ):
+            MockExec.return_value.run.return_value = []
+            with unittest.mock.patch("builtins.print"):
+                trade_executor.main()
+
+        assert os.path.exists("data/trade_plan.json")
+        with open("data/trade_plan.json") as f:
+            data = json.load(f)
+        assert data["total_plans"] == 0
+
+    def test_main_writes_csv_when_no_plans(self) -> None:
+        from scripts import trade_executor
+
+        with unittest.mock.patch.object(trade_executor, "TradeExecutor") as MockExec:
+            MockExec.return_value.run.return_value = []
+            with unittest.mock.patch("builtins.print"):
+                trade_executor.main()
+
+        assert os.path.exists("data/trade_plan.csv")
+
+
+class TestPaperEngineLoadPlansMissingFile:
+    """Regression: _load_plans must not crash on missing file."""
+
+    def test_load_plans_missing_file_returns_empty(self) -> None:
+        from scripts.paper_trading_engine import PaperTradingEngine
+        engine = PaperTradingEngine.__new__(PaperTradingEngine)
+        result = engine._load_plans("/nonexistent/path/trade_plan.json")
+        assert result == []
+
+    def test_load_plans_invalid_json_returns_empty(self, tmp_path: Any) -> None:
+        from scripts.paper_trading_engine import PaperTradingEngine
+        bad = tmp_path / "bad.json"
+        bad.write_text("not json{{{")
+        engine = PaperTradingEngine.__new__(PaperTradingEngine)
+        result = engine._load_plans(str(bad))
+        assert result == []

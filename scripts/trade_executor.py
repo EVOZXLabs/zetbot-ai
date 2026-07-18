@@ -572,14 +572,16 @@ def main() -> None:
     executor = TradeExecutor()
     plans = executor.run()
 
+    csv_path = "data/trade_plan.csv"
+    json_path = "data/trade_plan.json"
+
     if not plans:
-        print("  No execution plans generated.  Exiting.")
+        print("  No execution plans generated.  Writing empty plan file.")
+        PlanExport.to_csv([], csv_path)
+        PlanExport.to_json([], json_path)
         return
 
-    csv_path = "data/trade_plan.csv"
     PlanExport.to_csv(plans, csv_path)
-
-    json_path = "data/trade_plan.json"
     PlanExport.to_json(plans, json_path)
 
     print(f"\n  Completed at  : {datetime.now(timezone.utc).isoformat()}")
