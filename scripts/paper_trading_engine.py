@@ -445,7 +445,7 @@ class PaperTradingEngine:
             reason_emoji = emoji_map.get(exit_reason, "❓")
             holding_str = fmt_holding(holding_time.total_seconds())
 
-            insight = ai_insight(reasons=[exit_reason], is_buy=False)
+            insight = ai_insight(reasons=[exit_reason], is_buy=False, exit_reason=exit_reason)
 
             text = build_message(
                 header(),
@@ -907,10 +907,13 @@ class PaperTradingEngine:
 
     def _calc_holding_time(self, opened_at: str, closed_at: str) -> timedelta:
         """Calculate holding duration between two ISO timestamps."""
+        if not opened_at or not closed_at:
+            return timedelta()
         try:
             open_dt = datetime.fromisoformat(opened_at)
             close_dt = datetime.fromisoformat(closed_at)
-            return close_dt - open_dt
+            result = close_dt - open_dt
+            return result if result.total_seconds() > 0 else timedelta()
         except (ValueError, TypeError):
             return timedelta()
 
@@ -1000,8 +1003,11 @@ class PaperTradingEngine:
 
 
 def _fmt_pf(pf: float) -> str:
-    if pf == float("inf"):
-        return "inf"
+    import math
+    if math.isinf(pf):
+        return "\u221e"
+    if math.isnan(pf):
+        return "N/A"
     return f"{pf:.2f}"
 
 

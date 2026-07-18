@@ -122,3 +122,12 @@ def fmt_compact_number(value: float) -> str:
     if abs(value) >= 1_000:
         return f"${value / 1_000:.2f}K"
     return f"${value:.2f}"
+
+
+def fmt_pf(value: float) -> str:
+    import math
+    if math.isinf(value):
+        return "\u221e"
+    if math.isnan(value):
+        return "N/A"
+    return f"{value:.2f}"

@@ -2,7 +2,7 @@ import csv
 from datetime import datetime, timezone
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number, fmt_holding
+from telegram.formatter import fmt_compact_number, fmt_holding, fmt_pf
 from telegram.ui import (
     header, SEPARATOR, pnl_emoji, confidence_bar, build_message,
 )
@@ -75,7 +75,7 @@ class SummaryCommand(BaseCommand):
             f"📈 Win Rate: {confidence_bar(win_rate)}",
             f"{SEPARATOR}\n"
             f"💰 PnL: {fmt_compact_number(today_pnl)}\n"
-            f"📐 Profit Factor: {pf:.2f}",
+            f"📐 Profit Factor: {fmt_pf(pf)}",
         ]
 
         if avg_hold := self._avg_holding(executions):

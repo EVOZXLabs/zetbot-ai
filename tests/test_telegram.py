@@ -436,3 +436,237 @@ class TestEdgeCases:
             mock_post.return_value = resp
             result = n._send("test")
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+#  Regression tests: Trade Notification correctness
+# ---------------------------------------------------------------------------
+
+
+class TestTradeNotificationRegression:
+    """Regression tests for trade_closed notification bugs."""
+
+    def test_profitable_trade_shows_nonzero_pnl(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=51_000.0, pnl_usd=150.0, pnl_pct=3.0,
+                balance=10_150.0, exit_reason="Take Profit",
+                holding_time=timedelta(hours=4, minutes=30),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "+150.00" in text
+        assert "+2.00%" in text
+        assert "$+150" in text
+
+    def test_losing_trade_shows_negative_pnl(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=49_000.0, pnl_usd=-200.0, pnl_pct=-2.0,
+                balance=9_800.0, exit_reason="Stop Loss",
+                holding_time=timedelta(hours=2),
+                symbol="ETH/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "-200.00" in text
+        assert "-2.00%" in text
+
+    def test_tp_exit_shows_correct_insight(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=51_250.0, pnl_usd=125.0, pnl_pct=2.5,
+                balance=10_125.0, exit_reason="Take Profit",
+                holding_time=timedelta(hours=6),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "TP reached" in text or "Target hit" in text or "profit secured" in text
+
+    def test_sl_exit_shows_correct_insight(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=49_250.0, pnl_usd=-75.0, pnl_pct=-1.5,
+                balance=9_925.0, exit_reason="Stop Loss",
+                holding_time=timedelta(hours=3),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "Stop Loss" in text or "protected capital" in text or "loss capped" in text
+
+    def test_strategy_exit_shows_correct_insight(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=50_500.0, pnl_usd=50.0, pnl_pct=1.0,
+                balance=10_050.0, exit_reason="Strategy Exit",
+                holding_time=timedelta(hours=1, minutes=15),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "Strategy" in text or "Signal" in text or "Trend" in text or "strategy" in text
+
+    def test_held_duration_nonzero(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=51_000.0, pnl_usd=100.0, pnl_pct=2.0,
+                balance=10_100.0, exit_reason="Take Profit",
+                holding_time=timedelta(hours=5, minutes=30),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "5h" in text
+
+    def test_held_short_duration(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=50_100.0, pnl_usd=10.0, pnl_pct=0.2,
+                balance=10_010.0, exit_reason="Strategy Exit",
+                holding_time=timedelta(seconds=45),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "45s" in text
+
+    def test_held_days_duration(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=52_000.0, pnl_usd=2000.0, pnl_pct=4.0,
+                balance=12_000.0, exit_reason="Take Profit",
+                holding_time=timedelta(days=2, hours=4),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "2d" in text
+
+    def test_all_required_fields_present(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=51_000.0, pnl_usd=150.0, pnl_pct=3.0,
+                balance=10_150.0, exit_reason="Take Profit",
+                holding_time=timedelta(hours=4, minutes=30),
+                symbol="BTC/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "Entry" in text
+        assert "Exit" in text
+        assert "Profit" in text
+        assert "Held" in text
+        assert "AI Insight" in text
+        assert "Balance" in text
+
+    def test_no_zero_pnl_for_real_trades(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        with patch.object(n, "_send") as mock_send:
+            n.trade_closed(
+                exit_price=50_100.0, pnl_usd=25.0, pnl_pct=0.5,
+                balance=10_025.0, exit_reason="Take Profit",
+                holding_time=timedelta(minutes=15),
+                symbol="SOL/USDT", entry_price=50_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "+25.00" in text
+        profit_line = [l for l in text.split("\n") if "Profit" in l or "+" in l]
+        assert any("+25" in l for l in profit_line)
+
+
+class TestDailySummaryProfitFactor:
+    """Regression tests for Profit Factor display in daily summary."""
+
+    def test_profit_factor_normal(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        stats = {
+            "total_trades": 10, "win_count": 7, "loss_count": 3,
+            "win_rate": 70.0, "total_profit": 250.0,
+            "profit_factor": 2.5, "average_win": 50.0,
+            "average_loss": -16.67,
+        }
+        with patch.object(n, "_send") as mock_send:
+            n.daily_summary(stats, balance=10_250.0)
+        text = mock_send.call_args[0][0]
+        assert "2.50" in text
+
+    def test_profit_factor_infinity(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        stats = {
+            "total_trades": 5, "win_count": 5, "loss_count": 0,
+            "win_rate": 100.0, "total_profit": 500.0,
+            "profit_factor": float("inf"), "average_win": 100.0,
+            "average_loss": 0.0,
+        }
+        with patch.object(n, "_send") as mock_send:
+            n.daily_summary(stats, balance=10_500.0)
+        text = mock_send.call_args[0][0]
+        assert "\u221e" in text
+
+    def test_profit_factor_zero(self) -> None:
+        _enable_telegram()
+        n = TelegramNotifier()
+        stats = {
+            "total_trades": 3, "win_count": 0, "loss_count": 3,
+            "win_rate": 0.0, "total_profit": -300.0,
+            "profit_factor": 0.0, "average_win": 0.0,
+            "average_loss": -100.0,
+        }
+        with patch.object(n, "_send") as mock_send:
+            n.daily_summary(stats, balance=9_700.0)
+        text = mock_send.call_args[0][0]
+        assert "0.00" in text
+
+
+class TestFmtPF:
+    """Regression tests for fmt_pf formatter."""
+
+    def test_fmt_pf_normal(self) -> None:
+        from telegram.formatter import fmt_pf
+        assert fmt_pf(2.5) == "2.50"
+
+    def test_fmt_pf_infinity(self) -> None:
+        from telegram.formatter import fmt_pf
+        assert fmt_pf(float("inf")) == "\u221e"
+
+    def test_fmt_pf_nan(self) -> None:
+        from telegram.formatter import fmt_pf
+        assert fmt_pf(float("nan")) == "N/A"
+
+    def test_fmt_pf_zero(self) -> None:
+        from telegram.formatter import fmt_pf
+        assert fmt_pf(0.0) == "0.00"
+
+
+class TestAIInsightContextual:
+    """Regression tests for contextual AI Insight on close."""
+
+    def test_tp_insight(self) -> None:
+        from telegram.ui import ai_insight
+        result = ai_insight(is_buy=False, exit_reason="Take Profit")
+        assert "TP" in result or "target" in result.lower() or "profit" in result.lower()
+
+    def test_sl_insight(self) -> None:
+        from telegram.ui import ai_insight
+        result = ai_insight(is_buy=False, exit_reason="Stop Loss")
+        assert "Stop Loss" in result or "capital" in result or "loss" in result.lower()
+
+    def test_strategy_exit_insight(self) -> None:
+        from telegram.ui import ai_insight
+        result = ai_insight(is_buy=False, exit_reason="Strategy Exit")
+        assert "strategy" in result.lower() or "Signal" in result or "Trend" in result or "exit" in result.lower()

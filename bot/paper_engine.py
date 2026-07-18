@@ -149,6 +149,8 @@ class PaperTradingEngine:
                     balance=self._paper._balance,
                     exit_reason=trade["exit_reason"],
                     holding_time=trade["holding_time"],
+                    symbol=symbol,
+                    entry_price=trade.get("entry_price", 0.0),
                 )
                 logger.info(
                     "Trade closed — %s PnL=%+.2f (%+.2f%%)",

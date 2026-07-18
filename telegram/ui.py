@@ -115,12 +115,32 @@ def pnl_emoji(value: float) -> str:
 
 # ── AI Insight ────────────────────────────────────────────────────────
 
+_EXIT_INSIGHTS: dict[str, list[str]] = {
+    "Take Profit": [
+        "TP reached successfully.",
+        "Target hit — profit secured.",
+        "Exit at target level executed.",
+    ],
+    "Stop Loss": [
+        "Stop Loss protected capital.",
+        "Risk managed — loss capped.",
+        "SL triggered to limit downside.",
+    ],
+    "Strategy Exit": [
+        "Strategy signaled exit.",
+        "Signal reversed — position closed.",
+        "Trend shifted — orderly exit.",
+    ],
+}
+
+
 def ai_insight(
     recommendation: str = "",
     reasons: Optional[list[str]] = None,
     trend: str = "",
     confidence: float = 0.0,
     is_buy: bool = True,
+    exit_reason: str = "",
 ) -> str:
     """Generate a short AI insight from available strategy outputs.
 
@@ -128,7 +148,13 @@ def ai_insight(
     """
     parts: list[str] = []
 
-    if trend:
+    # Exit-reason insights (highest priority for sell notifications)
+    if not is_buy and exit_reason in _EXIT_INSIGHTS:
+        parts.append(_EXIT_INSIGHTS[exit_reason][0])
+    elif not is_buy and exit_reason:
+        parts.append(f"{exit_reason} exit executed.")
+
+    if trend and len(parts) < 2:
         trend_lower = trend.lower()
         if is_buy:
             if "up" in trend_lower or "bull" in trend_lower:
@@ -139,7 +165,7 @@ def ai_insight(
                 parts.append(f"Trend: {trend}.")
         else:
             if "up" in trend_lower or "bull" in trend_lower:
-                parts.append("Trend still bullish.")
+                parts.append("Trend still bullish — momentum weakening.")
             elif "down" in trend_lower or "bear" in trend_lower:
                 parts.append("Downtrend confirmed.")
             else:

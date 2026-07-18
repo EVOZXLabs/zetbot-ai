@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number, fmt_holding
+from telegram.formatter import fmt_compact_number, fmt_holding, fmt_pf
 from telegram.ui import header, SEPARATOR, progress_bar, pnl_emoji, build_message
 
 
@@ -98,7 +98,7 @@ class PerformanceCommand(BaseCommand):
             return (
                 f"*{label}*\n"
                 f"Trades: {m['trades']}  WR: {m['win_rate']:.0f}%\n"
-                f"PF: {m['profit_factor']:.2f}  E: {m['expectancy']:+.2f}\n"
+                f"PF: {fmt_pf(m['profit_factor'])}  E: {m['expectancy']:+.2f}\n"
                 f"Avg Win: {fmt_compact_number(m['avg_win'])}  "
                 f"Avg Loss: {fmt_compact_number(m['avg_loss'])}\n"
                 f"Avg Hold: {fmt_holding(m['avg_holding'])}"

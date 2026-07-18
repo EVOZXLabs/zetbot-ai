@@ -212,13 +212,14 @@ class TelegramNotifier:
             f"💰 Entry\n{fp(entry_price)}\n\n"
             f"🚪 Exit\n{fp(exit_price)}",
             f"{SEPARATOR}\n"
-            f"📈 Profit\n{pnl_emoji(pnl_usd)} ${pnl_usd:+,.2f}\n\n"
+            f"📈 Profit\n{pnl_emoji(pnl_usd)} ${pnl_usd:+,.2f} ({roi_pct:+.2f}%)\n\n"
             f"🕒 Held\n{holding_str}",
         ]
 
         insight = ai_insight(
             reasons=[exit_reason],
             is_buy=False,
+            exit_reason=exit_reason,
         )
         blocks.append(f"{SEPARATOR}\n🧠 *AI Insight*\n{insight}")
         blocks.append(f"{SEPARATOR}\n💹 Balance\n${balance:,.2f}")
@@ -263,6 +264,7 @@ class TelegramNotifier:
         from telegram.ui import (
             header, SEPARATOR, wib_now, confidence_bar, build_message,
         )
+        from telegram.formatter import fmt_pf
 
         if stats.get("total_trades", 0) == 0:
             text = build_message(
@@ -286,7 +288,7 @@ class TelegramNotifier:
                 f"✅ Wins: {win_count}  ❌ Losses: {loss_count}\n"
                 f"📈 Win Rate: {confidence_bar(win_rate)}",
                 f"💰 PnL: ${total_pnl:+,.2f}\n"
-                f"📐 Profit Factor: {pf:.2f}\n"
+                f"📐 Profit Factor: {fmt_pf(pf)}\n"
                 f"💹 Balance: ${balance:,.2f}",
                 f"🕐 {wib_now()}",
             )
