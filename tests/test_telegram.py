@@ -670,3 +670,191 @@ class TestAIInsightContextual:
         from telegram.ui import ai_insight
         result = ai_insight(is_buy=False, exit_reason="Strategy Exit")
         assert "strategy" in result.lower() or "Signal" in result or "Trend" in result or "exit" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+#  Regression: Runtime bugs — Dollar PnL=$0 and Held Duration=0s
+#  Root cause: main.py _monitor_positions reads positions.json (VirtualPosition)
+#  and builds TradePlan. When trade_plan.json lacks the plan, fallbacks failed.
+# ---------------------------------------------------------------------------
+
+
+class TestVirtualPositionFields:
+    """VirtualPosition must carry TP/SL/signal_time for main.py fallback."""
+
+    def test_new_fields_persisted_in_asdict(self) -> None:
+        from dataclasses import asdict
+        from scripts.paper_trading_engine import VirtualPosition
+        vp = VirtualPosition(
+            symbol="JASMY/USDT", order_id="O1",
+            quantity=1000.0, remaining_qty=1000.0,
+            entry_price=0.0045, current_price=0.0046,
+            unrealized_pnl=1.0, realized_pnl=0.0, total_pnl=1.0,
+            cost_basis=4.5, status="OPEN",
+            opened_at="2026-01-15T10:00:00+00:00",
+            signal_time="2026-01-15T10:00:00+00:00",
+            tp1=0.0048, tp2=0.0050, tp3=0.0055,
+            stop_loss=0.0042, position_size_usdt=4.5,
+        )
+        d = asdict(vp)
+        assert d["tp1"] == 0.0048
+        assert d["tp2"] == 0.0050
+        assert d["tp3"] == 0.0055
+        assert d["stop_loss"] == 0.0042
+        assert d["signal_time"] == "2026-01-15T10:00:00+00:00"
+        assert d["position_size_usdt"] == 4.5
+
+    def test_old_state_without_new_fields_loads(self) -> None:
+        from scripts.paper_trading_engine import VirtualPosition
+        old_dict = {
+            "symbol": "CFX/USDT", "order_id": "O2",
+            "quantity": 500.0, "remaining_qty": 500.0,
+            "entry_price": 0.045, "current_price": 0.046,
+            "unrealized_pnl": 0.5, "realized_pnl": 0.0, "total_pnl": 0.5,
+            "cost_basis": 22.5, "status": "OPEN",
+            "tp1_sold": False, "tp2_sold": False, "tp3_sold": False,
+            "opened_at": "2026-01-15T10:00:00+00:00",
+            "signal_time": "2026-01-15T10:00:00+00:00",
+            "closure_notified": False,
+        }
+        vp = VirtualPosition(**old_dict)
+        assert vp.tp1 == 0.0
+        assert vp.stop_loss == 0.0
+        assert vp.signal_time == "2026-01-15T10:00:00+00:00"
+
+    def test_signal_time_not_entry_time(self) -> None:
+        from scripts.paper_trading_engine import VirtualPosition
+        vp = VirtualPosition(
+            symbol="X", order_id="O", quantity=1, remaining_qty=1,
+            entry_price=1.0, current_price=1.0,
+            unrealized_pnl=0, realized_pnl=0, total_pnl=0,
+            cost_basis=1.0, status="OPEN",
+            signal_time="2026-01-15T10:00:00+00:00",
+        )
+        from dataclasses import asdict
+        d = asdict(vp)
+        assert "entry_time" not in d
+        assert d["signal_time"] == "2026-01-15T10:00:00+00:00"
+
+
+class TestMonitorTradePlanFallback:
+    """main.py _monitor_positions must fall back to pos dict when plan_data is empty."""
+
+    def test_quantity_falls_back_to_pos(self) -> None:
+        pos = {"quantity": 1000.0, "entry_price": 0.0045}
+        plan_data = {}
+        qty = plan_data.get("quantity", pos.get("quantity", 0.0))
+        assert qty == 1000.0
+
+    def test_signal_time_uses_opened_at(self) -> None:
+        pos = {"signal_time": "", "opened_at": "2026-01-15T10:00:00+00:00"}
+        st = pos.get("signal_time") or pos.get("opened_at", "")
+        assert st == "2026-01-15T10:00:00+00:00"
+
+    def test_signal_time_prefers_signal_time(self) -> None:
+        pos = {"signal_time": "2026-01-15T10:00:00+00:00",
+               "opened_at": "2026-01-15T09:55:00+00:00"}
+        st = pos.get("signal_time") or pos.get("opened_at", "")
+        assert st == "2026-01-15T10:00:00+00:00"
+
+    def test_tp_sl_fall_back_to_pos(self) -> None:
+        pos = {"tp1": 0.0048, "tp2": 0.0050, "tp3": 0.0055, "stop_loss": 0.0042}
+        plan_data = {}
+        tp1 = plan_data.get("tp1", pos.get("tp1", 0.0))
+        tp2 = plan_data.get("tp2", pos.get("tp2", 0.0))
+        tp3 = plan_data.get("tp3", pos.get("tp3", 0.0))
+        sl = plan_data.get("stop_loss", pos.get("stop_loss", 0.0))
+        assert tp1 == 0.0048
+        assert tp2 == 0.0050
+        assert tp3 == 0.0055
+        assert sl == 0.0042
+
+
+class TestMonitorPositionSimulation:
+    """Simulate the exact runtime flow: VirtualPosition → pos dict → TradePlan → PositionSimulator."""
+
+    def test_nonzero_pnl_with_empty_plan_data(self) -> None:
+        from dataclasses import asdict
+        from datetime import datetime, timezone
+        from scripts.paper_trading_engine import VirtualPosition
+        from scripts.position_manager import PositionSimulator, TradePlan
+
+        vp = VirtualPosition(
+            symbol="JASMY/USDT", order_id="O1",
+            quantity=1000.0, remaining_qty=1000.0,
+            entry_price=0.00451135, current_price=0.00457,
+            unrealized_pnl=0.05865, realized_pnl=0.0, total_pnl=0.05865,
+            cost_basis=4.51135, status="OPEN",
+            opened_at="2026-01-15T10:00:00+00:00",
+            signal_time="2026-01-15T10:00:00+00:00",
+            tp1=0.0048, tp2=0.0050, tp3=0.0055,
+            stop_loss=0.0042, position_size_usdt=4.51,
+        )
+        pos = asdict(vp)
+
+        plan_data = {}
+        plan = TradePlan(
+            symbol=pos["symbol"],
+            entry_price=plan_data.get("entry_price", pos.get("entry_price", 0.0)),
+            position_size_usdt=plan_data.get("position_size_usdt", pos.get("position_size_usdt", 0.0)),
+            quantity=plan_data.get("quantity", pos.get("quantity", 0.0)),
+            stop_loss=plan_data.get("stop_loss", pos.get("stop_loss", 0.0)),
+            tp1=plan_data.get("tp1", pos.get("tp1", 0.0)),
+            tp2=plan_data.get("tp2", pos.get("tp2", 0.0)),
+            tp3=plan_data.get("tp3", pos.get("tp3", 0.0)),
+            risk_amount=0.0, reward_amount=0.0, risk_reward=0.0,
+            probability=0.0, recommendation="", confidence=0.0,
+            signal_time=pos.get("signal_time") or pos.get("opened_at", ""),
+            status="", rejection_reason="",
+        )
+
+        now = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        result = PositionSimulator.simulate(plan, 0.00457, 0.5, "MIXED", now)
+
+        assert result.quantity > 0, "quantity must be non-zero"
+        assert result.remaining_qty > 0, "remaining_qty must be non-zero"
+        assert result.total_pnl != 0.0, "total_pnl must not be 0"
+        assert result.holding_hours > 0, "holding_hours must be non-zero"
+
+    def test_nonzero_pnl_with_empty_plan_data_loss(self) -> None:
+        from dataclasses import asdict
+        from datetime import datetime, timezone
+        from scripts.paper_trading_engine import VirtualPosition
+        from scripts.position_manager import PositionSimulator, TradePlan
+
+        vp = VirtualPosition(
+            symbol="CFX/USDT", order_id="O2",
+            quantity=500.0, remaining_qty=500.0,
+            entry_price=0.045954, current_price=0.04575,
+            unrealized_pnl=-0.102, realized_pnl=0.0, total_pnl=-0.102,
+            cost_basis=22.977, status="OPEN",
+            opened_at="2026-01-15T10:00:00+00:00",
+            signal_time="2026-01-15T10:00:00+00:00",
+            tp1=0.050, tp2=0.055, tp3=0.060,
+            stop_loss=0.042, position_size_usdt=22.98,
+        )
+        pos = asdict(vp)
+
+        plan_data = {}
+        plan = TradePlan(
+            symbol=pos["symbol"],
+            entry_price=plan_data.get("entry_price", pos.get("entry_price", 0.0)),
+            position_size_usdt=plan_data.get("position_size_usdt", pos.get("position_size_usdt", 0.0)),
+            quantity=plan_data.get("quantity", pos.get("quantity", 0.0)),
+            stop_loss=plan_data.get("stop_loss", pos.get("stop_loss", 0.0)),
+            tp1=plan_data.get("tp1", pos.get("tp1", 0.0)),
+            tp2=plan_data.get("tp2", pos.get("tp2", 0.0)),
+            tp3=plan_data.get("tp3", pos.get("tp3", 0.0)),
+            risk_amount=0.0, reward_amount=0.0, risk_reward=0.0,
+            probability=0.0, recommendation="", confidence=0.0,
+            signal_time=pos.get("signal_time") or pos.get("opened_at", ""),
+            status="", rejection_reason="",
+        )
+
+        now = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        result = PositionSimulator.simulate(plan, 0.04575, 0.5, "MIXED", now)
+
+        assert result.quantity > 0, "quantity must be non-zero"
+        assert result.remaining_qty > 0, "remaining_qty must be non-zero"
+        assert result.total_pnl != 0.0, "total_pnl must not be 0"
+        assert result.holding_hours > 0, "holding_hours must be non-zero"

@@ -85,6 +85,11 @@ class VirtualPosition:
     opened_at: str = ""      # ISO timestamp of first open
     signal_time: str = ""
     closure_notified: bool = False
+    tp1: float = 0.0
+    tp2: float = 0.0
+    tp3: float = 0.0
+    stop_loss: float = 0.0
+    position_size_usdt: float = 0.0
 
 
 @dataclass
@@ -706,6 +711,11 @@ class PaperTradingEngine:
             status="OPEN",
             opened_at=now_ts,
             signal_time=plan.get("signal_time", ""),
+            tp1=plan.get("tp1", 0.0),
+            tp2=plan.get("tp2", 0.0),
+            tp3=plan.get("tp3", 0.0),
+            stop_loss=plan.get("stop_loss", 0.0),
+            position_size_usdt=plan.get("position_size_usdt", 0.0),
         )
 
         # Send BUY OPENED notification

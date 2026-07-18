@@ -296,21 +296,16 @@ def _notify_closure(
     )
 
     # Update paper balance & orders to reflect the closure
-    _update_paper_on_closure(logger, symbol, new_pos, exit_price, exit_reason)
+    # Returns (pnl, new_balance) — use THESE for the notification
+    # to guarantee Telegram matches the actual balance change.
+    pnl, new_balance = _update_paper_on_closure(
+        logger, symbol, new_pos, exit_price, exit_reason,
+    )
 
     # Send Telegram notification
     if not config.telegram_enabled:
         logger.debug(f"Telegram disabled, skipping close notification for {symbol}")
         return
-
-    # Read latest balance after update
-    balance = 0.0
-    try:
-        with open("data/paper_balance.json") as f:
-            pb = json.load(f)
-        balance = pb.get("final_balance", 0.0)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
 
     try:
         from bot.telegram import TelegramNotifier  # noqa: PLC0415
@@ -328,9 +323,9 @@ def _notify_closure(
         holding_secs = new_pos.holding_hours * 3600
         notifier.trade_closed(
             exit_price=exit_price,
-            pnl_usd=new_pos.total_pnl,
+            pnl_usd=pnl,
             pnl_pct=new_pos.floating_pnl_pct,
-            balance=balance,
+            balance=new_balance,
             exit_reason=exit_reason,
             holding_time=timedelta(seconds=holding_secs),
             symbol=symbol,
@@ -346,8 +341,12 @@ def _update_paper_on_closure(
     new_pos: Any,
     exit_price: float,
     exit_reason: str,
-) -> None:
-    """Update paper balance and order history when a position closes."""
+) -> tuple[float, float]:
+    """Update paper balance and order history when a position closes.
+
+    Returns:
+        Tuple of (pnl, new_balance) for the caller to use in notifications.
+    """
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
 
@@ -435,6 +434,8 @@ def _update_paper_on_closure(
             json.dump(orders_data, f, indent=2)
     except OSError as exc:
         logger.warning(f"Failed to update paper_orders.json: {exc}")
+
+    return pnl, pb["final_balance"]
 
 
 def _notify_buy_opened(
@@ -613,8 +614,8 @@ def _monitor_positions(
             plan = TradePlan(
                 symbol=sym,
                 entry_price=plan_data.get("entry_price", pos.get("entry_price", 0.0)),
-                position_size_usdt=plan_data.get("position_size_usdt", 0.0),
-                quantity=plan_data.get("quantity", 0.0),
+                position_size_usdt=plan_data.get("position_size_usdt", pos.get("position_size_usdt", 0.0)),
+                quantity=plan_data.get("quantity", pos.get("quantity", 0.0)),
                 stop_loss=plan_data.get("stop_loss", pos.get("stop_loss", 0.0)),
                 tp1=plan_data.get("tp1", pos.get("tp1", 0.0)),
                 tp2=plan_data.get("tp2", pos.get("tp2", 0.0)),
@@ -625,7 +626,7 @@ def _monitor_positions(
                 probability=plan_data.get("probability", 0.0),
                 recommendation=plan_data.get("recommendation", ""),
                 confidence=plan_data.get("confidence", 0.0),
-                signal_time=pos.get("entry_time", ""),
+                signal_time=pos.get("signal_time") or pos.get("opened_at", ""),
                 status="",
                 rejection_reason="",
             )
