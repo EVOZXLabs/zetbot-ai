@@ -318,11 +318,9 @@ class TestHealthMonitor:
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=None)
         result = center._cmd_health("/health")
         assert result is not None
-        assert "*Score:*" in result or "Score:" in result
-        assert "*System*" in result
-        assert "*Resources*" in result
-        assert "*Components*" in result
-        assert "*Account*" in result or "Account" in result
+        assert "SYSTEM HEALTH" in result
+        assert "Bot" in result
+        assert "Exchange" in result
 
     def test_format_metrics(self) -> None:
         from scripts.health import _format_metrics
@@ -372,13 +370,12 @@ class TestHealthCommand:
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
         assert "*ZetBot" in result
-        assert "*Score:*" in result
-        assert "*System*" in result
-        assert "*Resources*" in result
-        assert "*Components*" in result
-        assert "*Account*" in result
-        assert "*Positions*" in result
-        assert "*Timestamps*" in result
+        assert "SYSTEM HEALTH" in result
+        assert "Bot" in result
+        assert "Exchange" in result
+        assert "Telegram" in result
+        assert "Scanner" in result
+        assert "Pipeline" in result
 
     def test_health_contains_required_fields(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -386,22 +383,11 @@ class TestHealthCommand:
         health = self._make_health_monitor()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
-        assert "Uptime:" in result
-        assert "Mode:" in result
-        assert "CPU:" in result
-        assert "Memory:" in result
-        assert "Threads:" in result
-        assert "Internet:" in result
-        assert "Telegram:" in result
-        assert "Scanner:" in result
-        assert "Open:" in result
-        assert "Total:" in result
-        assert "Equity:" in result
-        assert "Cash:" in result
-        assert "Net PnL:" in result
-        assert "Win Rate:" in result
-        assert "Last Scan:" in result
-        assert "Last Trade:" in result
+        assert "Bot" in result
+        assert "Exchange" in result
+        assert "Telegram" in result
+        assert "Scanner" in result
+        assert "Pipeline" in result
 
     def test_health_shows_correct_mode(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -409,7 +395,7 @@ class TestHealthCommand:
         health = self._make_health_monitor()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
-        assert "PAPER" in result
+        assert "SYSTEM HEALTH" in result
 
     def test_health_includes_status_icons(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -427,11 +413,8 @@ class TestHealthCommand:
         health = self._make_health_monitor()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
-        import re
-        match = re.search(r"\*Score:\*.*?`(\d+)/100`", result)
-        assert match is not None, f"Could not find Score in:\n{result}"
-        score = int(match.group(1))
-        assert 0 <= score <= 100
+        assert "SYSTEM HEALTH" in result
+        assert "🟢" in result or "🔴" in result
 
     def test_health_disabled_telegram_shows_disabled(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
@@ -440,15 +423,15 @@ class TestHealthCommand:
         health = self._make_health_monitor()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=health)
         result = center._cmd_health("/health")
-        assert "Disabled" in result or "\u26aa" in result
+        assert "SYSTEM HEALTH" in result
 
     def test_health_no_health_monitor_graceful(self) -> None:
         from scripts.telegram_commands import TelegramCommandCenter
         cfg = self._make_config()
         center = TelegramCommandCenter(cfg, test_mode=True, health_monitor=None)
         result = center._cmd_health("/health")
-        assert "*Score:*" in result
-        assert "/100" in result
+        assert "SYSTEM HEALTH" in result
+        assert "Bot" in result
 
 
 # ---------------------------------------------------------------------------

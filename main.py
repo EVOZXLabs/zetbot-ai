@@ -333,6 +333,8 @@ def _notify_closure(
             balance=balance,
             exit_reason=exit_reason,
             holding_time=timedelta(seconds=holding_secs),
+            symbol=symbol,
+            entry_price=new_pos.entry_price,
         )
     except Exception as exc:
         logger.warning(f"Failed to send close notification for {symbol}: {exc}")

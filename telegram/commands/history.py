@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
-from typing import Optional
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_price, fmt_pct, fmt_holding, time_ago
+from telegram.formatter import fmt_price, fmt_holding, time_ago
+from telegram.ui import header, SEPARATOR, pnl_emoji, build_message
 
 
 class HistoryCommand(BaseCommand):
@@ -45,12 +45,13 @@ class HistoryCommand(BaseCommand):
                 })
 
         if not closed_orders:
-            return "No completed trades yet."
+            return f"{header()}\n\nNo completed trades yet."
 
         closed_orders.sort(key=lambda o: o.get("closed_at", "") or "", reverse=True)
         shown = closed_orders[:limit]
 
-        chunks = [f"\U0001f4cb *Trade History* (last {len(shown)})"]
+        blocks = [header(), f"📋 *TRADE HISTORY* (last {len(shown)})\n{SEPARATOR}"]
+
         for o in shown:
             symbol = o.get("symbol", "?")
             entry = o.get("entry_price", 0)
@@ -59,73 +60,27 @@ class HistoryCommand(BaseCommand):
             pnl_pct = o.get("net_pnl_pct", 0)
             reason = o.get("exit_reason", "?")
             closed_at = o.get("closed_at", "")
+            filled = o.get("filled_at", "")
 
-            emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-
-            # Holding time
             hold = ""
-            filled = o.get("filled_at", "")
-            closed = o.get("closed_at", "")
-            if filled and closed:
+            if filled and closed_at:
                 try:
                     fdt = datetime.fromisoformat(filled.replace("Z", "+00:00"))
-                    cdt = datetime.fromisoformat(closed.replace("Z", "+00:00"))
-                    hold_sec = (cdt - fdt).total_seconds()
-                    hold = fmt_holding(hold_sec)
+                    cdt = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+                    hold = fmt_holding((cdt - fdt).total_seconds())
                 except (ValueError, TypeError):
                     pass
 
-            # PnL% from prices
-            if entry > 0 and exit_p > 0:
-                roi_pct = ((exit_p - entry) / entry * 100)
-            else:
-                roi_pct = float(pnl_pct) if pnl_pct else 0.0
+            result = f"{pnl_emoji(pnl)} WIN" if pnl >= 0 else f"{pnl_emoji(pnl)} LOSS"
 
-            result = "\U0001f7e2 WIN" if pnl >= 0 else "\U0001f534 LOSS"
-
-            time_str = time_ago(closed_at)
-            buy_time = time_ago(filled) if filled else time_str
-
-            chunks.append(
-                f"{emoji} *{symbol}*\n"
-                f"Result   : {result}\n"
-                f"Reason   : `{reason}`\n"
-                f"Entry    : `{fmt_price(entry)}`\n"
-                f"Exit     : `{fmt_price(exit_p)}`\n"
-                f"PnL      : `${pnl:+,.2f}` ({pnl_pct:+.2f}%)\n"
-                f"ROI      : `{roi_pct:+.2f}%`\n"
-                f"Holding  : `{hold}`\n"
-                f"BUY      : `{buy_time}`\n"
-                f"SELL     : `{time_str}`"
+            block = (
+                f"{pnl_emoji(pnl)} *{symbol}*\n"
+                f"💰 Entry {fmt_price(entry)}\n"
+                f"🚪 Exit {fmt_price(exit_p)}\n"
+                f"📈 PnL ${pnl:+,.2f}\n"
+                f"🕒 Held {hold}\n"
+                f"📋 {reason}"
             )
+            blocks.append(block)
 
-        # Summary
-        pnls = [o.get("net_pnl", 0) for o in closed_orders]
-        wins = [p for p in pnls if p >= 0]
-        losses = [p for p in pnls if p < 0]
-        avg_hold_sec = 0.0
-        hold_count = 0
-        for o in closed_orders:
-            filled = o.get("filled_at", "")
-            closed = o.get("closed_at", "")
-            if filled and closed:
-                try:
-                    fdt = datetime.fromisoformat(filled.replace("Z", "+00:00"))
-                    cdt = datetime.fromisoformat(closed.replace("Z", "+00:00"))
-                    avg_hold_sec += (cdt - fdt).total_seconds()
-                    hold_count += 1
-                except (ValueError, TypeError):
-                    pass
-        avg_hold_sec = avg_hold_sec / hold_count if hold_count > 0 else 0.0
-        avg_win = sum(wins) / len(wins) if wins else 0.0
-        avg_loss = sum(losses) / len(losses) if losses else 0.0
-
-        chunks.append(
-            f"\n*Summary ({len(closed_orders)} total)*\n"
-            f"Average Hold: `{fmt_holding(avg_hold_sec)}`\n"
-            f"Average ROI: `{(sum(pnls) / len(pnls) if pnls else 0):+.2f}%`\n"
-            f"Average Win: `${avg_win:+,.2f}`\n"
-            f"Average Loss: `${avg_loss:+,.2f}`"
-        )
-
-        return "\n\n".join(chunks)
+        return f"\n━━━━━━━━━━━━━━━━━━\n\n".join(blocks)

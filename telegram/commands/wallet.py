@@ -1,5 +1,8 @@
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number
+from telegram.ui import (
+    header, SEPARATOR, pnl_emoji, exposure_bar, progress_bar,
+    build_message,
+)
 
 
 class WalletCommand(BaseCommand):
@@ -28,7 +31,7 @@ class WalletCommand(BaseCommand):
             pb = ctx.read_json("paper_balance.json")
             pos_data = ctx.read_json("positions.json")
             if not pb:
-                return "No wallet data yet.  Run `/pipeline` first."
+                return "No wallet data yet. Run `/pipeline` first."
             bal = pb.get("final_balance", 0.0)
             eq = pb.get("final_equity", 0.0)
             net_pnl = pb.get("net_pnl", 0.0)
@@ -46,17 +49,17 @@ class WalletCommand(BaseCommand):
             or (p.get("entry_price", 0) * p.get("quantity", 0))
             for p in positions
         )
-        exposure_pct = (pos_value / (eq + pos_value) * 100) if (eq + pos_value) > 0 else 0.0
+        exposure_pct = (pos_value / eq * 100) if eq > 0 else 0.0
 
-        return (
-            f"\U0001f911 *Wallet*\n"
-            f"Cash: `{fmt_compact_number(bal)}`\n"
-            f"In Position: `{fmt_compact_number(pos_value)}`\n"
-            f"Equity: `{fmt_compact_number(eq)}`\n"
-            f"Exposure: `{exposure_pct:.1f}%`\n"
-            f"\n"
-            f"Net PnL: `{net_pnl:+,.2f}` ({total_return_pct:+.2f}%)\n"
-            f"Realized: `{realized_pnl:+,.2f}`  "
-            f"Unrealized: `{unrealized_pnl:+,.2f}`\n"
-            f"Win Rate: `{win_rate:.1f}%` (`{total_trades}` trades)"
+        return build_message(
+            header(),
+            f"👛 *WALLET*\n{SEPARATOR}",
+            f"Cash\n${bal:,.2f}\n\nIn Position\n${pos_value:,.2f}",
+            f"{SEPARATOR}\n"
+            f"Equity\n${eq:,.2f}\n\n"
+            f"Exposure\n{exposure_bar(exposure_pct)}",
+            f"{SEPARATOR}\n"
+            f"📈 Net PnL\n{pnl_emoji(net_pnl)} ${net_pnl:+,.2f} ({total_return_pct:+.2f}%)\n\n"
+            f"🏆 Win Rate\n{progress_bar(win_rate, 100, 10)} {win_rate:.1f}%\n"
+            f"📊 Trades: {total_trades}",
         )

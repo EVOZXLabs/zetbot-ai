@@ -12,7 +12,7 @@ class HelpCommand(BaseCommand):
     )
 
     _SECTIONS = {
-        "Trading": ["status", "positions", "signals", "history", "portfolio", "performance", "wallet", "summary", "market"],
+        "Trading": ["status", "positions", "signals", "detail", "history", "portfolio", "performance", "wallet", "summary", "market"],
         "Monitoring": ["health", "scan", "pipeline", "version", "logs"],
         "Account": ["balance", "exchange", "exchanges"],
         "System": ["help", "pause", "resume", "config", "reload", "restart", "shutdown"],

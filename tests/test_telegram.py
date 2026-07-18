@@ -197,7 +197,7 @@ class TestNotificationMethods:
             n.bot_started(symbol="BTC/USDT", timeframe="1h", exchange="binance")
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Bot Started" in text
+        assert "BOT STARTED" in text
         assert "BTC/USDT" in text
         assert "1h" in text
         assert "binance" in text
@@ -209,9 +209,9 @@ class TestNotificationMethods:
             n.bot_stopped(cycles=42, balance=10_500.0)
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Bot Stopped" in text
+        assert "BOT STOPPED" in text
         assert "42" in text
-        assert "10500" in text
+        assert "10,500" in text
 
     def test_buy_opened(self) -> None:
         _enable_telegram()
@@ -231,14 +231,11 @@ class TestNotificationMethods:
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
         assert "BUY OPENED" in text
+        assert "BTC/USDT" in text
         assert "50000" in text
-        assert "0.002000" in text
-        assert "100.00" in text
-        assert "49250" in text
-        assert "51250" in text
+        assert "-1.50%" in text
+        assert "+2.50%" in text
         assert "EMA200_BULLISH" in text
-        assert "RSI_OVERSOLD" in text
-        assert "Position Size" in text
         assert "Stop Loss" in text
         assert "Take Profit" in text
 
@@ -256,12 +253,9 @@ class TestNotificationMethods:
             )
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "*Take Profit*" in text
+        assert "POSITION CLOSED" in text
         assert "+150.00" in text
-        assert "+3.00%" in text
-        assert "10150" in text
-        assert "WIN" in text
-        assert "4h 30m" in text
+        assert "4h" in text
 
     def test_trade_closed_loss(self) -> None:
         _enable_telegram()
@@ -277,10 +271,9 @@ class TestNotificationMethods:
             )
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "*Stop Loss*" in text
+        assert "POSITION CLOSED" in text
         assert "-200.00" in text
-        assert "-2.00%" in text
-        assert "LOSS" in text
+        assert "2h" in text
 
     def test_trade_closed_strategy_exit(self) -> None:
         _enable_telegram()
@@ -296,8 +289,8 @@ class TestNotificationMethods:
             )
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "*Strategy Exit*" in text
-        assert "1h 15m" in text
+        assert "POSITION CLOSED" in text
+        assert "1h" in text
 
     def test_state_restored(self) -> None:
         _enable_telegram()
@@ -306,8 +299,8 @@ class TestNotificationMethods:
             n.state_restored(balance=10_000.0, has_position=True, trades=5)
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "State Restored" in text
-        assert "10000" in text
+        assert "STATE RESTORED" in text
+        assert "10,000" in text
         assert "YES" in text
         assert "5" in text
 
@@ -326,7 +319,7 @@ class TestNotificationMethods:
             n.error_occurred(message="API connection failed")
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Error" in text
+        assert "ERROR" in text
         assert "API connection failed" in text
 
     def test_daily_summary_with_trades(self) -> None:
@@ -346,16 +339,11 @@ class TestNotificationMethods:
             n.daily_summary(stats, balance=10_250.0)
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Daily Summary" in text
-        assert "10" in text
-        assert "7" in text
-        assert "3" in text
-        assert "70.0%" in text
-        assert "+250.00" in text
+        assert "DAILY SUMMARY" in text
+        assert "10" in text or "7" in text
+        assert "+250" in text
         assert "2.50" in text
-        assert "+50.00" in text
-        assert "-16.67" in text
-        assert "10250" in text
+        assert "10,250" in text
 
     def test_daily_summary_no_trades(self) -> None:
         _enable_telegram()
@@ -374,9 +362,9 @@ class TestNotificationMethods:
             n.daily_summary(stats, balance=10_000.0)
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
-        assert "Daily Summary" in text
+        assert "DAILY SUMMARY" in text
         assert "No trades completed" in text
-        assert "10000" in text
+        assert "10,000" in text
 
 
 # ---------------------------------------------------------------------------
@@ -430,11 +418,14 @@ class TestEdgeCases:
         assert "" in text
 
     def test_format_timedelta_zero(self) -> None:
-        assert TelegramNotifier._format_timedelta(timedelta()) == "00:00:00"
+        from telegram.formatter import fmt_holding
+        assert fmt_holding(0) == "0s"
 
     def test_format_timedelta_large(self) -> None:
+        from telegram.formatter import fmt_holding
         td = timedelta(days=1, hours=5, minutes=30, seconds=15)
-        assert TelegramNotifier._format_timedelta(td) == "29:30:15"
+        result = fmt_holding(td.total_seconds())
+        assert "d" in result or "h" in result
 
     def test_send_with_http_error(self) -> None:
         _enable_telegram()

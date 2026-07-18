@@ -95,17 +95,6 @@ class TelegramNotifier:
         logger.error("Telegram send failed after %d attempts", self._max_retry)
         return False
 
-    @staticmethod
-    def _format_timedelta(td: timedelta) -> str:
-        total_sec = int(td.total_seconds())
-        hours, remainder = divmod(total_sec, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-    @staticmethod
-    def _utc_now() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
     # ------------------------------------------------------------------
     #  Public notification methods
     # ------------------------------------------------------------------
@@ -121,11 +110,14 @@ class TelegramNotifier:
         exchange: str,
     ) -> None:
         """Notify that the trading bot has started."""
+        from telegram.ui import header, SEPARATOR, wib_now
         text = (
-            f"\U0001f916 *Bot Started*\n"
-            f"Exchange: `{exchange}`\n"
-            f"Symbol: `{symbol}`\n"
-            f"Timeframe: `{timeframe}`"
+            f"{header()}\n\n"
+            f"🟢 *BOT STARTED*\n"
+            f"{SEPARATOR}\n"
+            f"📊 {symbol} • {exchange} • {timeframe}\n"
+            f"{SEPARATOR}\n"
+            f"🕐 {wib_now()}"
         )
         self._send(text)
 
@@ -135,10 +127,13 @@ class TelegramNotifier:
         balance: float,
     ) -> None:
         """Notify that the trading bot has stopped."""
+        from telegram.ui import header, SEPARATOR
         text = (
-            f"\U0001f6d1 *Bot Stopped*\n"
-            f"Cycles: `{cycles}`\n"
-            f"Final Balance: `{balance:.2f}` USDT"
+            f"{header()}\n\n"
+            f"🔴 *BOT STOPPED*\n"
+            f"{SEPARATOR}\n"
+            f"📊 Cycles: {cycles}\n"
+            f"💰 Balance: ${balance:,.2f}"
         )
         self._send(text)
 
@@ -155,18 +150,25 @@ class TelegramNotifier:
         reasons: list[str],
     ) -> None:
         """Notify that a BUY position was opened."""
-        text = (
-            f"\U0001f7e2 *BUY OPENED*\n"
-            f"Exchange: `{exchange}`\n"
-            f"Symbol: `{symbol}`\n"
-            f"Timeframe: `{timeframe}`\n"
-            f"Entry: `{entry_price:.2f}`\n"
-            f"Qty: `{quantity:.6f}`\n"
-            f"Position Size: `{position_size:.2f}` USDT\n"
-            f"Stop Loss: `{stop_loss:.2f}`\n"
-            f"Take Profit: `{take_profit:.2f}`\n"
-            f"Reasons: `{ ' | '.join(reasons) }`\n"
-            f"UTC: `{self._utc_now()}`"
+        from telegram.ui import (
+            header, SEPARATOR, wib_now, progress_bar,
+            ai_insight, build_message,
+        )
+        from telegram.formatter import fmt_price as fp
+
+        sl_pct = ((stop_loss - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+        tp_pct = ((take_profit - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+
+        text = build_message(
+            header(),
+            f"🟢 *BUY OPENED*\n{symbol} • {exchange} • {timeframe}",
+            f"{SEPARATOR}\n💰 Entry\n{fp(entry_price)}\n\n"
+            f"📍 Current\n{fp(entry_price)}",
+            f"{SEPARATOR}\n🛑 Stop Loss\n{sl_pct:+.2f}%\n\n"
+            f"🎯 Take Profit\n{tp_pct:+.2f}%",
+            f"{SEPARATOR}\n🧠 *AI Insight*\n"
+            f"{ai_insight(reasons=reasons, is_buy=True)}",
+            f"{SEPARATOR}\n🕐 {wib_now()}",
         )
         self._send(text)
 
@@ -182,34 +184,46 @@ class TelegramNotifier:
         entry_price: float = 0.0,
     ) -> None:
         """Notify that a trade was closed."""
-        from telegram.formatter import fmt_price, fmt_holding
+        from telegram.ui import (
+            header, SEPARATOR, wib_now,
+            pnl_emoji, ai_insight, build_message,
+        )
+        from telegram.formatter import fmt_price as fp, fmt_holding
 
-        reason_emoji = {
-            "Take Profit": "\U0001f7e2",
-            "Stop Loss": "\U0001f534",
-            "Strategy Exit": "\u26aa",
+        emoji_map = {
+            "Take Profit": "🟢",
+            "Stop Loss": "🔴",
+            "Strategy Exit": "⚪",
         }
-        emoji = reason_emoji.get(exit_reason, "\u2753")
-        result_tag = "WIN" if pnl_usd >= 0 else "LOSS"
+        reason_emoji = emoji_map.get(exit_reason, "❓")
         holding_str = fmt_holding(holding_time.total_seconds())
 
-        # ROI from prices
-        roi_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 and exit_price > 0 else 0.0
+        roi_pct = (
+            ((exit_price - entry_price) / entry_price * 100)
+            if entry_price > 0 and exit_price > 0 else 0.0
+        )
         if roi_pct == 0.0:
             roi_pct = pnl_pct
 
-        lines = [f"{emoji} *{exit_reason}*"]
-        if symbol:
-            lines.append(f"Pair: `{symbol}`")
-        lines.append(
-            f"Entry: `{fmt_price(entry_price)}`  Exit: `{fmt_price(exit_price)}`"
-            if entry_price > 0 else f"Exit: `{fmt_price(exit_price)}`"
+        blocks = [
+            header(),
+            f"🔴 *POSITION CLOSED*\n{symbol}" if symbol else f"🔴 *POSITION CLOSED*",
+            f"{SEPARATOR}\n"
+            f"💰 Entry\n{fp(entry_price)}\n\n"
+            f"🚪 Exit\n{fp(exit_price)}",
+            f"{SEPARATOR}\n"
+            f"📈 Profit\n{pnl_emoji(pnl_usd)} ${pnl_usd:+,.2f}\n\n"
+            f"🕒 Held\n{holding_str}",
+        ]
+
+        insight = ai_insight(
+            reasons=[exit_reason],
+            is_buy=False,
         )
-        lines.append(f"PnL: `{pnl_usd:+.2f}` USDT (`{pnl_pct:+.2f}%`)")
-        lines.append(f"ROI: `{roi_pct:+.2f}%`  Held: `{holding_str}`")
-        lines.append(f"Balance: `{balance:.2f}` USDT")
-        lines.append(f"Result: `{result_tag}`")
-        text = "\n".join(lines)
+        blocks.append(f"{SEPARATOR}\n🧠 *AI Insight*\n{insight}")
+        blocks.append(f"{SEPARATOR}\n💹 Balance\n${balance:,.2f}")
+
+        text = build_message(*blocks)
         self._send(text)
 
     def state_restored(
@@ -219,11 +233,15 @@ class TelegramNotifier:
         trades: int,
     ) -> None:
         """Notify that persistent state was restored."""
-        text = (
-            f"\u267b\ufe0f *State Restored*\n"
-            f"Balance: `{balance:.2f}` USDT\n"
-            f"Open Position: `{'YES' if has_position else 'NO'}`\n"
-            f"Past Trades: `{trades}`"
+        from telegram.ui import header, SEPARATOR, wib_now, build_message
+        pos_str = "YES — managing open position" if has_position else "NO"
+        text = build_message(
+            header(),
+            f"♻️ *STATE RESTORED*\n{SEPARATOR}",
+            f"💰 Balance: ${balance:,.2f}\n"
+            f"📂 Open Position: {pos_str}\n"
+            f"📊 Past Trades: {trades}",
+            f"🕐 {wib_now()}",
         )
         self._send(text)
 
@@ -232,32 +250,44 @@ class TelegramNotifier:
         message: str,
     ) -> None:
         """Notify that an error occurred."""
-        text = (
-            f"\u26a0\ufe0f *Error*\n"
-            f"`{message}`"
+        from telegram.ui import header, SEPARATOR, wib_now, build_message
+        text = build_message(
+            header(),
+            f"⚠️ *ERROR*\n{SEPARATOR}\n`{message}`",
+            f"🕐 {wib_now()}",
         )
         self._send(text)
 
     def daily_summary(self, stats: dict, balance: float) -> None:
         """Send a daily trading summary."""
-        emoji = "\U0001f4c5"
+        from telegram.ui import (
+            header, SEPARATOR, wib_now, confidence_bar, build_message,
+        )
+
         if stats.get("total_trades", 0) == 0:
-            text = (
-                f"{emoji} *Daily Summary*\n"
-                f"No trades completed today.\n"
-                f"Balance: `{balance:.2f}` USDT\n"
-                f"UTC: `{self._utc_now()}`"
+            text = build_message(
+                header(),
+                f"📅 *DAILY SUMMARY*\n{SEPARATOR}",
+                f"No trades completed today.\n💰 Balance: ${balance:,.2f}",
+                f"🕐 {wib_now()}",
             )
         else:
-            text = (
-                f"{emoji} *Daily Summary*\n"
-                f"Trades: `{stats['total_trades']}`\n"
-                f"Wins / Losses: `{stats['win_count']}` / `{stats['loss_count']}`\n"
-                f"Win Rate: `{stats['win_rate']:.1f}%`\n"
-                f"Total PnL: `{stats['total_profit']:+.2f}` USDT\n"
-                f"Profit Factor: `{stats['profit_factor']:.2f}`\n"
-                f"Avg Win / Avg Loss: `{stats['average_win']:+.2f}` / `{stats['average_loss']:+.2f}` USDT\n"
-                f"Balance: `{balance:.2f}` USDT\n"
-                f"UTC: `{self._utc_now()}`"
+            win_count = stats.get("win_count", 0)
+            loss_count = stats.get("loss_count", 0)
+            total = win_count + loss_count
+            win_rate = stats.get("win_rate", 0.0)
+            total_pnl = stats.get("total_profit", 0.0)
+            pf = stats.get("profit_factor", 0.0)
+
+            text = build_message(
+                header(),
+                f"📅 *DAILY SUMMARY*\n{SEPARATOR}",
+                f"📊 Trades: {total}\n"
+                f"✅ Wins: {win_count}  ❌ Losses: {loss_count}\n"
+                f"📈 Win Rate: {confidence_bar(win_rate)}",
+                f"💰 PnL: ${total_pnl:+,.2f}\n"
+                f"📐 Profit Factor: {pf:.2f}\n"
+                f"💹 Balance: ${balance:,.2f}",
+                f"🕐 {wib_now()}",
             )
         self._send(text)

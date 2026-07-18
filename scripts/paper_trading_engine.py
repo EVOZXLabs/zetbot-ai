@@ -345,7 +345,11 @@ class PaperTradingEngine:
                 "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
             })
 
-            from telegram.formatter import fmt_price, fmt_compact_number
+            from telegram.formatter import fmt_price as fp
+            from telegram.ui import (
+                header, SEPARATOR, wib_now, confidence_bar,
+                progress_bar, ai_insight, build_message,
+            )
 
             symbol = plan["symbol"]
             entry = fill_price
@@ -355,64 +359,42 @@ class PaperTradingEngine:
             tp2 = plan.get("tp2", 0)
             tp3 = plan.get("tp3", 0)
             pos_size = plan.get("position_size_usdt", 0)
-            risk_amt = plan.get("risk_amount", 0)
-            reward = plan.get("reward_amount", 0)
-            rr = plan.get("risk_reward", 0)
             confidence = plan.get("confidence", plan.get("probability", 0))
             signal = plan.get("recommendation", "BUY")
             reasons = plan.get("reasons", ["Paper trade executed"])
-            reasons_str = "; ".join(reasons) if isinstance(reasons, list) else str(reasons)
-            signal_time = plan.get("signal_time", "")
 
             exchange = str(os.getenv("EXCHANGE", "binance"))
             timeframe = str(os.getenv("TIMEFRAME", "1h"))
 
-            risk_pct = (risk_amt / pos_size * 100) if pos_size > 0 else 0.0
-            reward_pct = (reward / pos_size * 100) if pos_size > 0 else 0.0
-
-            ema200 = 0.0
-            rsi = 0.0
-            adx = 0.0
-            atr = 0.0
+            trend = ""
             try:
                 with open("data/scanner_results.json") as f:
                     sc_data = json.load(f)
                 for p in sc_data.get("pairs", []):
                     if p.get("symbol") == symbol:
-                        ema200 = p.get("ema200", 0) or 0
-                        rsi = p.get("rsi14", 0) or 0
-                        adx = p.get("adx14", 0) or 0
-                        atr = p.get("atr_pct", 0) or 0
+                        trend = p.get("trend_alignment", "")
                         break
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
 
-            ema200_dist = ((curr - ema200) / ema200 * 100) if ema200 > 0 and curr > 0 else 0
-
-            notifier = TelegramNotifier()
-            msg = (
-                f"\U0001f4b0 *BUY OPENED*\n"
-                f"Pair: `{symbol}`\n"
-                f"Exchange: `{exchange}`  Timeframe: `{timeframe}`\n"
-                f"Signal: `{signal}`  Confidence: `{confidence:.1f}%`\n"
-                f"\n"
-                f"*Prices*\n"
-                f"Entry: `{fmt_price(entry)}`  Current: `{fmt_price(curr)}`\n"
-                f"SL: `{fmt_price(sl)}`  TP1: `{fmt_price(tp1)}`\n"
-                f"TP2: `{fmt_price(tp2)}`  TP3: `{fmt_price(tp3)}`\n"
-                f"\n"
-                f"*Position*\n"
-                f"Size: `{fmt_compact_number(pos_size)} USDT`\n"
-                f"Risk: `{risk_pct:.2f}%`  Reward: `{reward_pct:.2f}%`  R/R: `{rr:.2f}`\n"
-                f"\n"
-                f"*Indicators*\n"
-                f"EMA200: `{fmt_price(ema200)}`  Distance: `{ema200_dist:+.2f}%`\n"
-                f"RSI: `{rsi:.1f}`  ADX: `{adx:.1f}`  ATR: `{atr:.2f}%`\n"
-                f"\n"
-                f"Reason: `{reasons_str}`\n"
-                f"Opened: `{signal_time}`"
+            text = build_message(
+                header(),
+                f"🟢 *BUY OPENED*\n{symbol} • {exchange} • {timeframe}",
+                f"{SEPARATOR}\n"
+                f"💰 Entry\n{fp(entry)}\n\n"
+                f"📍 Current\n{fp(curr)}",
+                f"{SEPARATOR}\n"
+                f"🛑 Stop Loss\n{fp(sl)}\n\n"
+                f"🎯 Take Profit\n{fp(tp1)}",
+                f"{SEPARATOR}\n"
+                f"🧠 *AI Insight*\n"
+                f"{ai_insight(signal, reasons, trend, confidence, is_buy=True)}",
+                f"{SEPARATOR}\n"
+                f"⭐ Confidence\n{confidence_bar(confidence)}\n\n"
+                f"🕐 {wib_now()}",
             )
-            notifier.send(msg)
+            notifier = TelegramNotifier()
+            notifier.send(text)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send BUY notification: %s", exc
@@ -441,7 +423,11 @@ class PaperTradingEngine:
                 "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
             })
 
-            from telegram.formatter import fmt_price, fmt_holding
+            from telegram.formatter import fmt_price as fp, fmt_holding
+            from telegram.ui import (
+                header, SEPARATOR, wib_now, pnl_emoji,
+                ai_insight, build_message,
+            )
 
             notifier = TelegramNotifier()
             pnl_pct = (total_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
@@ -452,28 +438,30 @@ class PaperTradingEngine:
                 roi_pct = 0.0
 
             emoji_map = {
-                "Take Profit": "\U0001f7e2",
-                "Stop Loss": "\U0001f534",
-                "Strategy Exit": "\u26aa",
+                "Take Profit": "🟢",
+                "Stop Loss": "🔴",
+                "Strategy Exit": "⚪",
             }
-            emoji = emoji_map.get(exit_reason, "\u2753")
-            result_emoji = "\U0001f7e2" if total_pnl >= 0 else "\U0001f534"
-            result_tag = "WIN" if total_pnl >= 0 else "LOSS"
-
+            reason_emoji = emoji_map.get(exit_reason, "❓")
             holding_str = fmt_holding(holding_time.total_seconds())
 
-            msg = (
-                f"{emoji} *{exit_reason}*\n"
-                f"Pair: `{symbol}`\n"
-                f"Entry: `{fmt_price(entry_price)}`  Exit: `{fmt_price(exit_price)}`\n"
-                f"Held: `{holding_str}`\n"
-                f"\n"
-                f"PnL: `{total_pnl:+.2f}` USDT ({pnl_pct:+.2f}%)\n"
-                f"ROI: `{roi_pct:+.2f}%`\n"
-                f"Balance: `{balance:.2f}` USDT\n"
-                f"Result: {result_emoji} `{result_tag}`"
+            insight = ai_insight(reasons=[exit_reason], is_buy=False)
+
+            text = build_message(
+                header(),
+                f"🔴 *POSITION CLOSED*\n{symbol}",
+                f"{SEPARATOR}\n"
+                f"💰 Entry\n{fp(entry_price)}\n\n"
+                f"🚪 Exit\n{fp(exit_price)}",
+                f"{SEPARATOR}\n"
+                f"📈 Profit\n{pnl_emoji(total_pnl)} ${total_pnl:+,.2f} ({pnl_pct:+.2f}%)\n\n"
+                f"🕒 Held\n{holding_str}",
+                f"{SEPARATOR}\n"
+                f"🧠 *AI Insight*\n{insight}",
+                f"{SEPARATOR}\n"
+                f"💹 Balance\n${balance:,.2f}",
             )
-            notifier.send(msg)
+            notifier.send(text)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send close notification: %s", exc

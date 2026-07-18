@@ -1,8 +1,10 @@
-import datetime
 import os
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number, time_ago
+from telegram.ui import (
+    header, SEPARATOR, wib_now, wib_short, progress_bar,
+    exposure_bar, build_message,
+)
 
 PAUSE_FILE = "data/.paused"
 
@@ -46,72 +48,55 @@ class StatusCommand(BaseCommand):
         paused = os.path.exists(PAUSE_FILE)
 
         # Scheduler & pipeline status
-        scheduler_status = "N/A"
-        pipeline_status = "N/A"
-        last_scan_str = "N/A"
+        pipeline_status = "Stopped"
         next_scan_str = "N/A"
-        health_score = "N/A"
+        health_score = 0
 
         if ctx.services is not None:
             sched = ctx.services.scheduler
             if sched is not None:
                 s_status = sched.status
                 if s_status == "stopped":
-                    scheduler_status = "Stopped"
                     pipeline_status = "Stopped"
                 elif s_status == "running":
-                    scheduler_status = "Active"
                     pipeline_status = "Running..."
                 elif s_status.startswith("failed"):
-                    scheduler_status = "Active"
                     pipeline_status = s_status
                 else:
-                    scheduler_status = "Active"
                     pipeline_status = "Idle"
 
                 if sched.next_run:
+                    import datetime
                     next_ts = datetime.datetime.fromtimestamp(
                         sched.next_run, tz=datetime.timezone.utc
-                    ).strftime("%H:%M:%S UTC")
-                    next_scan_str = next_ts
-                if sched.last_start:
-                    last_scan_str = time_ago(
-                        datetime.datetime.fromtimestamp(
-                            sched.last_start, tz=datetime.timezone.utc
-                        ).isoformat()
                     )
+                    from telegram.ui import _WIB
+                    next_ts_local = next_ts.astimezone(_WIB)
+                    next_scan_str = next_ts_local.strftime("%H:%M WIB")
 
-            # Health score from health monitor
             if ctx.services.health is not None:
                 try:
                     snap = ctx.services.health.snapshot()
                     hs = snap.get("health_score")
                     if hs is not None:
-                        health_score = f"{hs:.0f}"
-                    scanner_time_raw = snap.get("scanner_time", "N/A")
-                    if scanner_time_raw != "N/A":
-                        last_scan_str = time_ago(scanner_time_raw)
+                        health_score = hs
                 except Exception:
                     pass
 
-        return (
-            f"\U0001f916 *Bot Status*\n"
-            f"Mode: `{'PAPER' if ctx.config.paper_mode else 'LIVE'}`  "
-            f"Exchange: `{ctx.config.exchange}`\n"
-            f"Runtime: `{runtime}`  "
-            f"Trading: `{'PAUSED \u23f8\ufe0f' if paused else 'ACTIVE'}`\n"
-            f"\n"
-            f"*Pipeline*\n"
-            f"Scheduler: `{scheduler_status}`  "
-            f"Pipeline: `{pipeline_status}`\n"
-            f"Last Scan: `{last_scan_str}`  "
-            f"Next Scan: `{next_scan_str}`\n"
-            f"\n"
-            f"*Account*\n"
-            f"Open Positions: `{open_pos}`\n"
-            f"Cash: `{fmt_compact_number(bal)}`  "
-            f"Equity: `{fmt_compact_number(eq)}`\n"
-            f"Net PnL: `{net_pnl:+,.2f}`  "
-            f"Win Rate: `{win_rate:.1f}%`\n"
-            f"Health: `{health_score}`"
+        trading_label = "PAUSED" if paused else "ACTIVE"
+        pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+
+        return build_message(
+            header(),
+            f"🟢 *ONLINE*\n"
+            f"💰 Equity\n${eq:,.2f}\n\n"
+            f"💵 Cash\n${bal:,.2f}\n\n"
+            f"📂 Positions\n{open_pos}",
+            f"{SEPARATOR}\n"
+            f"📈 Today\n{pnl_emoji} ${net_pnl:+,.2f}\n\n"
+            f"⏰ Next Scan\n{next_scan_str}",
+            f"{SEPARATOR}\n"
+            f"⚠️ Exposure\n{exposure_bar(0)}\n\n"
+            f"❤️ Health\n{progress_bar(health_score, 100, 10)} {health_score:.0f}",
+            f"🕐 {wib_now()}",
         )
