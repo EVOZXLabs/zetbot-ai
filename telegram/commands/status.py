@@ -37,6 +37,7 @@ class StatusCommand(BaseCommand):
             net_pnl = a.net_pnl
             open_pos = a.open_positions
             win_rate = a.win_rate
+            exposure_pct = a.exposure_pct
         else:
             pb = ctx.read_json("paper_balance.json")
             bal = pb.get("final_balance", 0.0)
@@ -44,6 +45,7 @@ class StatusCommand(BaseCommand):
             net_pnl = pb.get("net_pnl", 0.0)
             open_pos = 0
             win_rate = pb.get("win_rate", 0.0)
+            exposure_pct = 0.0
 
         paused = os.path.exists(PAUSE_FILE)
 
@@ -96,7 +98,7 @@ class StatusCommand(BaseCommand):
             f"📈 Today\n{pnl_emoji} ${net_pnl:+,.2f}\n\n"
             f"⏰ Next Scan\n{next_scan_str}",
             f"{SEPARATOR}\n"
-            f"⚠️ Exposure\n{exposure_bar(0)}\n\n"
+            f"⚠️ Exposure\n{exposure_bar(exposure_pct)}\n\n"
             f"❤️ Health\n{progress_bar(health_score, 100, 10)} {health_score:.0f}",
             f"🕐 {wib_now()}",
         )

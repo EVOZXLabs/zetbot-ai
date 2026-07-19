@@ -1,6 +1,6 @@
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.ui import (
-    header, SEPARATOR, wib_now, exposure_bar, progress_bar,
+    header, SEPARATOR, exposure_bar, progress_bar,
     pnl_emoji, build_message,
 )
 
@@ -24,21 +24,27 @@ class PortfolioCommand(BaseCommand):
             net_pnl = a.net_pnl
             open_count = a.open_positions
             win_rate = a.win_rate
+            exposure_pct = a.exposure_pct
         else:
             pb = ctx.read_json("paper_balance.json")
             cash = pb.get("final_balance", 0.0) if pb else 0.0
             equity = pb.get("final_equity", 0.0) if pb else 0.0
             net_pnl = pb.get("net_pnl", 0.0) if pb else 0.0
             win_rate = pb.get("win_rate", 0.0) if pb else 0.0
+
             pos_data = ctx.read_json("positions.json")
             pos_list = pos_data.get("positions", []) if pos_data else []
-            open_count = len([p for p in pos_list if p.get("status") == "OPEN"])
+            open_positions = [p for p in pos_list if p.get("status") == "OPEN"]
+            open_count = len(open_positions)
 
-        pos_data = ctx.read_json("positions.json")
-        pos_list = pos_data.get("positions", []) if pos_data else []
-        open_positions = [p for p in pos_list if p.get("status") == "OPEN"]
-        pos_value = sum(p.get("position_size_usdt", 0) for p in open_positions)
-        exposure_pct = (pos_value / equity * 100) if equity > 0 else 0.0
+            # Compute position value from actual positions
+            pos_value = sum(
+                p.get("position_size_usdt", 0)
+                or p.get("cost_basis", 0)
+                or (p.get("entry_price", 0) * p.get("quantity", 0))
+                for p in open_positions
+            )
+            exposure_pct = (pos_value / equity * 100) if equity > 0 else 0.0
 
         return build_message(
             header(),

@@ -1,10 +1,10 @@
-import datetime
 import os
 import subprocess
 import sys
 import time
 
 from telegram.base_command import BaseCommand, CommandMeta
+from telegram.ui import wib_datetime
 
 BOT_VERSION = "v0.5.0"
 
@@ -47,9 +47,7 @@ class VersionCommand(BaseCommand):
             start_time_ts = ctx.services.daemon_start_time
         else:
             start_time_ts = ctx.start_time
-        start_time_str = datetime.datetime.fromtimestamp(
-            start_time_ts, tz=datetime.timezone.utc
-        ).strftime("%Y-%m-%d %H:%M:%S UTC")
+        start_time_str = wib_datetime(start_time_ts)
 
         # Estimate build time from git commit timestamp
         build_time = "N/A"

@@ -18,7 +18,16 @@ from typing import Any, Optional
 
 @dataclass
 class AccountSnapshot:
-    """Immutable point-in-time view of the account / portfolio."""
+    """Immutable point-in-time view of the account / portfolio.
+
+    All values are computed from canonical JSON files and open positions.
+    Every Telegram command MUST read from this — never compute independently.
+
+    Invariants:
+        equity == balance + position_value
+        net_pnl == realized_pnl + unrealized_pnl
+        exposure_pct == (position_value / equity * 100) if equity > 0 else 0
+    """
     balance: float = 0.0
     equity: float = 0.0
     realized_pnl: float = 0.0
@@ -34,6 +43,8 @@ class AccountSnapshot:
     gross_loss: float = 0.0
     open_positions: int = 0
     initial_balance: float = 0.0
+    position_value: float = 0.0
+    exposure_pct: float = 0.0
 
 
 @dataclass
@@ -91,19 +102,67 @@ class MetricsManager:
     # ------------------------------------------------------------------
 
     def account(self) -> AccountSnapshot:
+        """Compute the authoritative account snapshot.
+
+        Reads ``paper_balance.json`` for realized/trade stats, then
+        dynamically computes unrealized PnL and position value from
+        actual open positions so the snapshot always reflects current
+        market prices.
+
+        Invariants (always true):
+            equity == balance + position_value
+            net_pnl == realized_pnl + unrealized_pnl
+            exposure_pct == (position_value / equity * 100) if equity > 0 else 0
+        """
         pb = self._read_balance_pb()
         bal = pb.get("final_balance", 0.0)
-        raw_unrealized = pb.get("unrealized_pnl", 0.0)
         realized = pb.get("realized_pnl", 0.0)
-        open_count = self.open_positions_count()
+        initial = pb.get("initial_balance", 10_000.0)
 
-        if open_count == 0:
-            unrealized = 0.0
-        else:
-            unrealized = raw_unrealized
+        # Dynamic computation from actual open positions
+        open_positions = self.open_positions()
+        open_count = len(open_positions)
 
-        equity = bal + unrealized
-        net = realized + unrealized if open_count > 0 else realized
+        position_value = 0.0
+        unrealized = 0.0
+
+        for p in open_positions:
+            # Position market value: current_price × remaining_qty
+            current_price = p.get("current_price", 0.0)
+            entry_price = p.get("entry_price", 0.0)
+            remaining_qty = p.get("remaining_qty", 0.0)
+            quantity = p.get("quantity", 0.0)
+            qty = remaining_qty if remaining_qty > 0 else quantity
+
+            # Use current_price × qty for market value
+            if current_price > 0 and qty > 0:
+                market_value = current_price * qty
+            else:
+                # Fallback: position_size_usdt or cost_basis
+                market_value = (
+                    p.get("position_size_usdt", 0.0)
+                    or p.get("cost_basis", 0.0)
+                    or (entry_price * quantity)
+                )
+            position_value += market_value
+
+            # Unrealized PnL: (current - entry) × qty
+            if current_price > 0 and entry_price > 0 and qty > 0:
+                unrealized += (current_price - entry_price) * qty
+            else:
+                # Fallback to pre-computed floating_pnl
+                unrealized += p.get("floating_pnl", 0.0)
+
+        equity = bal + position_value
+        net = realized + unrealized
+
+        # Return %: ((equity - initial) / initial) × 100
+        total_return_pct = (
+            ((equity - initial) / initial * 100.0) if initial > 0 else 0.0
+        )
+
+        # Exposure: position_value / equity × 100
+        exposure_pct = (position_value / equity * 100.0) if equity > 0 else 0.0
 
         return AccountSnapshot(
             balance=bal,
@@ -111,7 +170,7 @@ class MetricsManager:
             realized_pnl=realized,
             unrealized_pnl=unrealized,
             net_pnl=net,
-            total_return_pct=pb.get("total_return_pct", 0.0),
+            total_return_pct=total_return_pct,
             total_trades=pb.get("total_trades", 0),
             winning_trades=pb.get("winning_trades", 0),
             losing_trades=pb.get("losing_trades", 0),
@@ -120,7 +179,9 @@ class MetricsManager:
             gross_profit=pb.get("gross_profit", 0.0),
             gross_loss=pb.get("gross_loss", 0.0),
             open_positions=open_count,
-            initial_balance=pb.get("initial_balance", 0.0),
+            initial_balance=initial,
+            position_value=position_value,
+            exposure_pct=exposure_pct,
         )
 
     # ------------------------------------------------------------------

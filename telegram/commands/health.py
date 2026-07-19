@@ -59,4 +59,5 @@ class HealthCommand(BaseCommand):
             f"{status_dot(scanner_ok, 'Scanner')}  {'🟢 Healthy' if scanner_ok else '🔴 Unhealthy'}",
             f"{status_dot(pipeline_ok, 'Pipeline')}  {'🟢 Healthy' if pipeline_ok else '🔴 Unhealthy'}",
             f"{SEPARATOR}{last_scan_str}",
+            f"🕐 {wib_now()}",
         )

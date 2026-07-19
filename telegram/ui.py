@@ -24,6 +24,18 @@ def wib_now() -> str:
     return datetime.now(_WIB).strftime("%d %b %Y\n%H:%M WIB")
 
 
+def wib_datetime(ts: Optional[float] = None) -> str:
+    """Format a UTC timestamp (or epoch float) to WIB datetime string.
+
+    Returns: ``"19 Jul 2026 09:40 WIB"``
+    """
+    if ts is None:
+        dt = datetime.now(_WIB)
+    else:
+        dt = datetime.fromtimestamp(ts, tz=_WIB)
+    return dt.strftime("%d %b %Y %H:%M WIB")
+
+
 def wib_time(ts: Optional[float] = None) -> str:
     """Format a UTC timestamp (or epoch float) to WIB time-only."""
     if ts is None:
