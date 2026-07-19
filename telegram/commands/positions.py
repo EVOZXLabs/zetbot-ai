@@ -7,6 +7,7 @@ from telegram.ui import (
     header, SEPARATOR, wib_now, pnl_emoji, progress_bar,
     ai_insight, build_message,
 )
+from scripts.position_status import is_open
 
 
 class PositionsCommand(BaseCommand):
@@ -98,7 +99,7 @@ class PositionsCommand(BaseCommand):
         else:
             pos_data = ctx.read_json("positions.json")
             pos_list = pos_data.get("positions", [])
-            open_positions = [p for p in pos_list if p.get("status") == "OPEN"]
+            open_positions = [p for p in pos_list if is_open(p.get("status"))]
 
         if not open_positions:
             return f"{header()}\n\nNo open positions."

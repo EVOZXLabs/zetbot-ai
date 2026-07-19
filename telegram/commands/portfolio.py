@@ -3,6 +3,7 @@ from telegram.ui import (
     header, SEPARATOR, exposure_bar, progress_bar,
     pnl_emoji, build_message,
 )
+from scripts.position_status import is_open
 
 
 class PortfolioCommand(BaseCommand):
@@ -34,7 +35,7 @@ class PortfolioCommand(BaseCommand):
 
             pos_data = ctx.read_json("positions.json")
             pos_list = pos_data.get("positions", []) if pos_data else []
-            open_positions = [p for p in pos_list if p.get("status") == "OPEN"]
+            open_positions = [p for p in pos_list if is_open(p.get("status"))]
             open_count = len(open_positions)
 
             # Compute position value from actual positions

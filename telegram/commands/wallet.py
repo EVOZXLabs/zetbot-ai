@@ -3,6 +3,7 @@ from telegram.ui import (
     header, SEPARATOR, pnl_emoji, exposure_bar, progress_bar,
     build_message,
 )
+from scripts.position_status import is_open
 
 
 class WalletCommand(BaseCommand):
@@ -41,7 +42,7 @@ class WalletCommand(BaseCommand):
             # Compute position value and exposure from positions
             pos_data = ctx.read_json("positions.json")
             pos_list = pos_data.get("positions", []) if pos_data else []
-            positions = [p for p in pos_list if p.get("status") == "OPEN"]
+            positions = [p for p in pos_list if is_open(p.get("status"))]
             pos_value = sum(
                 p.get("position_size_usdt", 0)
                 or p.get("cost_basis", 0)

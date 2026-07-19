@@ -1,6 +1,7 @@
 import time
 
 from telegram.base_command import BaseCommand, CommandMeta
+from scripts.position_status import is_open
 
 
 class ScanCommand(BaseCommand):
@@ -52,7 +53,7 @@ class ScanCommand(BaseCommand):
             ]
 
         pos_list = pos_data.get("positions", [])
-        open_positions = [p for p in pos_list if p.get("status") == "OPEN"]
+        open_positions = [p for p in pos_list if is_open(p.get("status"))]
 
         # Top 5 candidates
         results_list_sorted = results_list
