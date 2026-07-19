@@ -19,6 +19,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+from scripts.position_status import OPEN_STATUSES
+
 # ---------------------------------------------------------------------------
 #  Config
 # ---------------------------------------------------------------------------
@@ -430,9 +432,7 @@ class PositionManager:
             prev = prev_positions.get(plan.symbol)
             if prev:
                 prev_entry_time = prev.get("entry_time", "")
-                if prev_entry_time and prev.get("status") in (
-                    "OPEN", "PARTIAL", "TRAILING", "BREAKEVEN",
-                ):
+                if prev_entry_time and prev.get("status") in OPEN_STATUSES:
                     plan.signal_time = prev_entry_time
 
             pos = PositionSimulator.simulate(
@@ -459,8 +459,7 @@ class PositionManager:
         closed = [p for p in positions if p.status == "CLOSED"]
         stopped = [p for p in positions if p.status == "STOPPED"]
         timeout = [p for p in positions if p.status == "TIMEOUT"]
-        active = [p for p in positions if p.status in
-                  ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN")]
+        active = [p for p in positions if p.status in OPEN_STATUSES]
 
         print()
         print(f"  {'=' * 78}")
@@ -580,7 +579,7 @@ class PositionExport:
             "total_positions": len(positions),
             "active_count": sum(
                 1 for p in positions
-                if p.status in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN")
+                if p.status in OPEN_STATUSES
             ),
             "closed_count": sum(
                 1 for p in positions
