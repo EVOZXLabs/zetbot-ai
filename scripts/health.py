@@ -25,6 +25,7 @@ import requests
 
 from scripts.app_config import AppConfig
 from scripts.logger import PipelineLogger
+from scripts.position_status import is_open
 
 BOT_VERSION = "v0.5.0"
 SCANNER_TIMEOUT = 7200        # seconds before scanner data is considered stale (default 2h)
@@ -141,7 +142,7 @@ class HealthMonitor:
             "net_pnl": paper_data.get("net_pnl", 0.0),
             "open_positions": sum(
                 1 for p in _read_json(f"{d}/positions.json").get("positions", [])
-                if p.get("status") == "OPEN"
+                if is_open(p.get("status"))
             ),
             "total_trades": paper_data.get("total_trades", 0),
             "win_rate": paper_data.get("win_rate", 0.0),

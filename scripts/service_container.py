@@ -16,6 +16,7 @@ from typing import Any, Optional
 from scripts.exchange_manager import ExchangeManager
 from scripts.exchange_providers import ExchangeAuthError
 from scripts.order_manager import OrderManager
+from scripts.position_status import is_open
 from scripts.safety_limits import SafeGuard
 from scripts.interfaces import (
     IConfigService,
@@ -515,7 +516,7 @@ class _PositionAdapter:
         self._config = config
 
     def get_open_positions(self) -> list[dict[str, Any]]:
-        return [p for p in self.get_all() if p.get("status") == "OPEN"]
+        return [p for p in self.get_all() if is_open(p.get("status"))]
 
     def get_all(self) -> list[dict[str, Any]]:
         import json, os  # noqa: PLC0415
