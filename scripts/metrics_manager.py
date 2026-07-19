@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from scripts.position_status import is_open
+
 
 @dataclass
 class AccountSnapshot:
@@ -189,10 +191,10 @@ class MetricsManager:
     # ------------------------------------------------------------------
 
     def open_positions_count(self) -> int:
-        return sum(1 for p in self._read_positions() if p.get("status") == "OPEN")
+        return sum(1 for p in self._read_positions() if is_open(p.get("status")))
 
     def open_positions(self) -> list[dict[str, Any]]:
-        return [p for p in self._read_positions() if p.get("status") == "OPEN"]
+        return [p for p in self._read_positions() if is_open(p.get("status"))]
 
     def all_positions(self) -> list[dict[str, Any]]:
         return self._read_positions()
