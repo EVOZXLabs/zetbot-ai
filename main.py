@@ -435,7 +435,49 @@ def _update_paper_on_closure(
     except OSError as exc:
         logger.warning(f"Failed to update paper_orders.json: {exc}")
 
+    # Sync paper_state.json so restarted engine doesn't re-close this position
+    _sync_paper_state_on_closure(logger, symbol, pnl)
+
     return pnl, pb["final_balance"]
+
+
+def _sync_paper_state_on_closure(
+    logger: Any,
+    symbol: str,
+    pnl: float,
+) -> None:
+    """Mark position CLOSED in paper_state.json to prevent duplicate restores.
+
+    When the monitor closes a position, paper_balance.json and
+    positions.json are updated but paper_state.json is not.  On restart
+    the paper trading engine restores stale OPEN VirtualPositions from
+    paper_state.json and re-closes them, producing duplicate Telegram
+    notifications.  This function patches paper_state.json in-place.
+    """
+    state_path = "data/paper_state.json"
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+
+    positions = state.get("positions") or {}
+    vp = positions.get(symbol)
+    if vp is None or vp.get("status") == "CLOSED":
+        return
+
+    vp["status"] = "CLOSED"
+    vp["remaining_qty"] = 0.0
+    vp["closure_notified"] = True
+    vp["realized_pnl"] = round(pnl, 2)
+    vp["total_pnl"] = round(pnl, 2)
+    vp["unrealized_pnl"] = 0.0
+
+    try:
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+    except OSError as exc:
+        logger.warning(f"Failed to sync paper_state.json for {symbol}: {exc}")
 
 
 def _notify_buy_opened(

@@ -411,3 +411,161 @@ class TestPositionSizeFallback:
         p = {"position_size_usdt": 0, "cost_basis": 0, "entry_price": 0, "quantity": 0}
         size = p.get("position_size_usdt") or p.get("cost_basis", 0.0) or (p.get("entry_price", 0.0) * p.get("quantity", 0.0))
         assert size == 0.0
+
+
+# ---------------------------------------------------------------------------
+#  Paper state sync on closure (prevents duplicate notifications on restart)
+# ---------------------------------------------------------------------------
+
+def _make_paper_state(symbol: str = "BTCUSDT", status: str = "OPEN") -> dict:
+    return {
+        "version": 1,
+        "balance": 9500.0,
+        "margin_used": 0.0,
+        "orders": [],
+        "positions": {
+            symbol: {
+                "symbol": symbol,
+                "order_id": "paper-1",
+                "quantity": 0.05,
+                "remaining_qty": 0.05,
+                "entry_price": 100000.0,
+                "current_price": 101000.0,
+                "unrealized_pnl": 50.0,
+                "realized_pnl": 0.0,
+                "total_pnl": 50.0,
+                "cost_basis": 5000.0,
+                "status": status,
+                "tp1_sold": False,
+                "tp2_sold": False,
+                "tp3_sold": False,
+                "opened_at": "2026-01-01T00:00:00+00:00",
+                "signal_time": "2026-01-01T00:00:00+00:00",
+                "closure_notified": False,
+                "tp1": 0.0,
+                "tp2": 0.0,
+                "tp3": 0.0,
+                "stop_loss": 0.0,
+                "position_size_usdt": 500.0,
+            }
+        },
+        "equity_history": [],
+    }
+
+
+class TestPaperStateSyncOnClosure:
+    """paper_state.json must be patched when main.py closes a position."""
+
+    def _setup(self, tmp_path: Any, symbol: str = "BTCUSDT", status: str = "OPEN"):
+        """Write a paper_state.json under tmp_path/data/ and chdir there."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        state_path = data_dir / "paper_state.json"
+        state = _make_paper_state(symbol, status)
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+        import os as _os
+        _os.chdir(tmp_path)
+        return state_path
+
+    def test_marks_position_closed(self, tmp_path: Any) -> None:
+        self._setup(tmp_path)
+        from main import _sync_paper_state_on_closure
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", -25.0)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        vp = state["positions"]["BTCUSDT"]
+        assert vp["status"] == "CLOSED"
+        assert vp["remaining_qty"] == 0.0
+        assert vp["closure_notified"] is True
+        assert vp["realized_pnl"] == -25.0
+        assert vp["total_pnl"] == -25.0
+        assert vp["unrealized_pnl"] == 0.0
+
+    def test_positive_pnl(self, tmp_path: Any) -> None:
+        self._setup(tmp_path)
+        from main import _sync_paper_state_on_closure
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 42.17)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        vp = state["positions"]["BTCUSDT"]
+        assert vp["status"] == "CLOSED"
+        assert vp["realized_pnl"] == 42.17
+
+    def test_already_closed_noop(self, tmp_path: Any) -> None:
+        self._setup(tmp_path, status="CLOSED")
+        from main import _sync_paper_state_on_closure
+        # Should not crash, should not overwrite
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 999.0)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        vp = state["positions"]["BTCUSDT"]
+        # Status was already CLOSED — function returns early, no change to realized_pnl
+        assert vp["realized_pnl"] == 0.0
+
+    def test_missing_symbol_noop(self, tmp_path: Any) -> None:
+        self._setup(tmp_path)
+        from main import _sync_paper_state_on_closure
+        # ETHUSDT doesn't exist — should not crash
+        _sync_paper_state_on_closure(MagicMock(), "ETHUSDT", 10.0)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        assert "ETHUSDT" not in state["positions"]
+
+    def test_missing_file_noop(self, tmp_path: Any) -> None:
+        (tmp_path / "data").mkdir()
+        import os as _os
+        _os.chdir(tmp_path)
+        from main import _sync_paper_state_on_closure
+        # No paper_state.json exists — should not raise
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 10.0)
+
+    def test_corrupt_json_noop(self, tmp_path: Any) -> None:
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "paper_state.json").write_text("NOT JSON{{{")
+        import os as _os
+        _os.chdir(tmp_path)
+        from main import _sync_paper_state_on_closure
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 10.0)
+
+    def test_preserves_other_positions(self, tmp_path: Any) -> None:
+        self._setup(tmp_path)
+        # Add a second position
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        state["positions"]["ETHUSDT"] = {
+            **_make_paper_state("ETHUSDT")["positions"]["ETHUSDT"],
+            "status": "OPEN",
+            "remaining_qty": 1.0,
+            "closure_notified": False,
+        }
+        with open("data/paper_state.json", "w") as f:
+            json.dump(state, f)
+
+        from main import _sync_paper_state_on_closure
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 5.0)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        # BTCUSDT closed
+        assert state["positions"]["BTCUSDT"]["status"] == "CLOSED"
+        # ETHUSDT untouched
+        eth = state["positions"]["ETHUSDT"]
+        assert eth["status"] == "OPEN"
+        assert eth["remaining_qty"] == 1.0
+        assert eth["closure_notified"] is False
+
+    def test_wallet_balance_untouched(self, tmp_path: Any) -> None:
+        self._setup(tmp_path)
+        from main import _sync_paper_state_on_closure
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 10.0)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        # Balance is managed elsewhere; this function should not touch it
+        assert state["balance"] == 9500.0
