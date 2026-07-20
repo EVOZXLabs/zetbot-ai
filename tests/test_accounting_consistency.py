@@ -2,9 +2,13 @@
 and Telegram command consistency.
 
 Covers:
+- paper_balance.json is the single, authoritative source for balance,
+  equity, realized/unrealized/net PnL, and return % — MetricsManager
+  must consume it directly, never recompute it from positions.json
+  (see scripts.metrics_manager.MetricsManager.account)
+- positions.json is used only to count/list currently open positions
 - Accounting invariants (equity = cash + position_value, net = realized + unrealized)
 - Exposure calculation correctness
-- Return % calculation
 - No positions / one position / multiple positions / partial exit / full exit
 - Positive and negative PnL
 - wib_now() / wib_datetime() timezone correctness
@@ -124,14 +128,24 @@ def _closed_pos(
 # ============================================================================
 
 class TestAccountingInvariants:
-    """AccountSnapshot must satisfy mathematical invariants."""
+    """AccountSnapshot must satisfy mathematical invariants.
+
+    paper_balance.json values (final_equity, unrealized_pnl, net_pnl,
+    total_return_pct) are the authoritative input — set explicitly here
+    to match each scenario, the same way scripts.paper_trading_engine
+    would have written them. positions.json only supplies the open
+    position *count*.
+    """
 
     def _mgr(self, tmp_path: Any) -> MetricsManager:
         return MetricsManager(data_dir=str(tmp_path))
 
     def test_no_positions(self, tmp_path: Any) -> None:
         """With no open positions: equity = balance, exposure = 0."""
-        _write_pb(tmp_path, final_balance=10_000.0, realized_pnl=0.0)
+        _write_pb(
+            tmp_path, final_balance=10_000.0, final_equity=10_000.0,
+            realized_pnl=0.0, unrealized_pnl=0.0, net_pnl=0.0,
+        )
         _write_positions(tmp_path, [])
 
         a = self._mgr(tmp_path).account()
@@ -147,17 +161,19 @@ class TestAccountingInvariants:
 
     def test_one_open_position_profit(self, tmp_path: Any) -> None:
         """One open position with profit: equity = balance + market_value."""
-        _write_pb(tmp_path, final_balance=9_500.0, realized_pnl=0.0)
+        # Market value = 105_000 × 0.1 = 10_500; equity = 9_500 + 10_500 = 20_000
+        # Unrealized = (105_000 - 100_000) × 0.1 = 500
+        _write_pb(
+            tmp_path, final_balance=9_500.0, final_equity=20_000.0,
+            realized_pnl=0.0, unrealized_pnl=500.0, net_pnl=500.0,
+        )
         pos = _open_pos(entry_price=100_000, current_price=105_000, quantity=0.1, remaining_qty=0.1)
         _write_positions(tmp_path, [pos])
 
         a = self._mgr(tmp_path).account()
 
-        # Market value = 105_000 × 0.1 = 10_500
         assert a.position_value == pytest.approx(10_500.0)
-        # Equity = 9_500 + 10_500 = 20_000
         assert a.equity == pytest.approx(20_000.0)
-        # Unrealized = (105_000 - 100_000) × 0.1 = 500
         assert a.unrealized_pnl == pytest.approx(500.0)
         # Net = realized + unrealized
         assert a.net_pnl == pytest.approx(a.realized_pnl + a.unrealized_pnl)
@@ -168,17 +184,19 @@ class TestAccountingInvariants:
 
     def test_one_open_position_loss(self, tmp_path: Any) -> None:
         """One open position with loss."""
-        _write_pb(tmp_path, final_balance=9_500.0, realized_pnl=0.0)
+        # Market value = 95_000 × 0.1 = 9_500; equity = 9_500 + 9_500 = 19_000
+        # Unrealized = (95_000 - 100_000) × 0.1 = -500
+        _write_pb(
+            tmp_path, final_balance=9_500.0, final_equity=19_000.0,
+            realized_pnl=0.0, unrealized_pnl=-500.0, net_pnl=-500.0,
+        )
         pos = _open_pos(entry_price=100_000, current_price=95_000, quantity=0.1, remaining_qty=0.1)
         _write_positions(tmp_path, [pos])
 
         a = self._mgr(tmp_path).account()
 
-        # Market value = 95_000 × 0.1 = 9_500
         assert a.position_value == pytest.approx(9_500.0)
-        # Equity = 9_500 + 9_500 = 19_000
         assert a.equity == pytest.approx(19_000.0)
-        # Unrealized = (95_000 - 100_000) × 0.1 = -500
         assert a.unrealized_pnl == pytest.approx(-500.0)
         assert a.net_pnl == pytest.approx(-500.0)
         # Invariant
@@ -186,21 +204,24 @@ class TestAccountingInvariants:
 
     def test_multiple_positions(self, tmp_path: Any) -> None:
         """Multiple open positions — values must sum correctly."""
-        _write_pb(tmp_path, final_balance=8_000.0, realized_pnl=100.0)
+        # pos1 market value = 102_000 × 0.05 = 5_100
+        # pos2 market value = 3_200 × 2.0 = 6_400 -> position_value = 11_500
+        # equity = 8_000 + 11_500 = 19_500
+        # unrealized = (102_000-100_000)×0.05 + (3_200-3_000)×2.0 = 100 + 400 = 500
+        # net = realized(100) + unrealized(500) = 600
+        _write_pb(
+            tmp_path, final_balance=8_000.0, final_equity=19_500.0,
+            realized_pnl=100.0, unrealized_pnl=500.0, net_pnl=600.0,
+        )
         pos1 = _open_pos("BTCUSDT", 100_000, 102_000, 0.05, 0.05)
         pos2 = _open_pos("ETHUSDT", 3_000, 3_200, 2.0, 2.0)
         _write_positions(tmp_path, [pos1, pos2])
 
         a = self._mgr(tmp_path).account()
 
-        # pos1 market value = 102_000 × 0.05 = 5_100
-        # pos2 market value = 3_200 × 2.0 = 6_400
         assert a.position_value == pytest.approx(11_500.0)
-        # Equity = 8_000 + 11_500 = 19_500
         assert a.equity == pytest.approx(19_500.0)
-        # Unrealized = (102_000-100_000)×0.05 + (3_200-3_000)×2.0 = 100 + 400 = 500
         assert a.unrealized_pnl == pytest.approx(500.0)
-        # Net = realized(100) + unrealized(500) = 600
         assert a.net_pnl == pytest.approx(600.0)
         assert a.open_positions == 2
         # Invariant
@@ -208,7 +229,12 @@ class TestAccountingInvariants:
 
     def test_partial_exit(self, tmp_path: Any) -> None:
         """Position with partial exit (remaining_qty < quantity)."""
-        _write_pb(tmp_path, final_balance=10_200.0, realized_pnl=200.0)
+        # Market value = 105_000 × 0.05 = 5_250; equity = 10_200 + 5_250 = 15_450
+        # Unrealized = (105_000 - 100_000) × 0.05 = 250; net = 200 + 250 = 450
+        _write_pb(
+            tmp_path, final_balance=10_200.0, final_equity=15_450.0,
+            realized_pnl=200.0, unrealized_pnl=250.0, net_pnl=450.0,
+        )
         pos = _open_pos(
             entry_price=100_000, current_price=105_000,
             quantity=0.1, remaining_qty=0.05,
@@ -217,16 +243,16 @@ class TestAccountingInvariants:
 
         a = self._mgr(tmp_path).account()
 
-        # Market value = 105_000 × 0.05 = 5_250
         assert a.position_value == pytest.approx(5_250.0)
-        # Unrealized = (105_000 - 100_000) × 0.05 = 250
         assert a.unrealized_pnl == pytest.approx(250.0)
-        # Net = 200 + 250 = 450
         assert a.net_pnl == pytest.approx(450.0)
 
     def test_full_exit(self, tmp_path: Any) -> None:
         """Only closed positions — no open position value."""
-        _write_pb(tmp_path, final_balance=10_500.0, realized_pnl=500.0)
+        _write_pb(
+            tmp_path, final_balance=10_500.0, final_equity=10_500.0,
+            realized_pnl=500.0, unrealized_pnl=0.0, net_pnl=500.0,
+        )
         pos = _closed_pos(entry_price=100_000, current_price=105_000, quantity=0.1)
         _write_positions(tmp_path, [pos])
 
@@ -240,20 +266,29 @@ class TestAccountingInvariants:
 
     def test_return_pct(self, tmp_path: Any) -> None:
         """Return % = ((equity - initial) / initial) × 100."""
-        _write_pb(tmp_path, final_balance=9_500.0, initial_balance=10_000.0)
+        # equity = 9_500 + (110_000 × 0.1) = 20_500
+        # return = (20_500 - 10_000) / 10_000 × 100 = 105%
+        _write_pb(
+            tmp_path, final_balance=9_500.0, initial_balance=10_000.0,
+            final_equity=20_500.0, unrealized_pnl=1_000.0, net_pnl=1_000.0,
+            total_return_pct=105.0,
+        )
         pos = _open_pos(entry_price=100_000, current_price=110_000, quantity=0.1)
         _write_positions(tmp_path, [pos])
 
         a = self._mgr(tmp_path).account()
 
-        # equity = 9_500 + (110_000 × 0.1) = 9_500 + 11_000 = 20_500
-        # return = (20_500 - 10_000) / 10_000 × 100 = 105%
         assert a.equity == pytest.approx(20_500.0)
         assert a.total_return_pct == pytest.approx(105.0)
 
     def test_net_pnl_invariant(self, tmp_path: Any) -> None:
         """net_pnl == realized_pnl + unrealized_pnl always."""
-        _write_pb(tmp_path, final_balance=9_000.0, realized_pnl=300.0)
+        # Market value = 52_000 × 1.0 = 52_000; equity = 9_000 + 52_000 = 61_000
+        # Unrealized = (52_000-50_000)×1.0 = 2_000; net = 300 + 2_000 = 2_300
+        _write_pb(
+            tmp_path, final_balance=9_000.0, final_equity=61_000.0,
+            realized_pnl=300.0, unrealized_pnl=2_000.0, net_pnl=2_300.0,
+        )
         pos = _open_pos(entry_price=50_000, current_price=52_000, quantity=1.0)
         _write_positions(tmp_path, [pos])
 
@@ -262,8 +297,12 @@ class TestAccountingInvariants:
         assert a.net_pnl == pytest.approx(a.realized_pnl + a.unrealized_pnl)
 
     def test_equity_invariant(self, tmp_path: Any) -> None:
-        """equity == balance + position_value always."""
-        _write_pb(tmp_path, final_balance=7_777.77, realized_pnl=123.45)
+        """equity == balance + position_value always (true by construction:
+        position_value is derived as equity - balance)."""
+        _write_pb(
+            tmp_path, final_balance=7_777.77, final_equity=31_277.77,
+            realized_pnl=123.45, unrealized_pnl=1_000.0, net_pnl=1_123.45,
+        )
         pos = _open_pos(entry_price=45_000, current_price=47_000, quantity=0.5)
         _write_positions(tmp_path, [pos])
 
@@ -273,13 +312,43 @@ class TestAccountingInvariants:
 
     def test_exposure_bounds(self, tmp_path: Any) -> None:
         """Exposure % must be >= 0 and <= 100 for spot paper trading."""
-        _write_pb(tmp_path, final_balance=5_000.0)
+        # Market value = 200_000 × 0.1 = 20_000; equity = 5_000 + 20_000 = 25_000
+        _write_pb(
+            tmp_path, final_balance=5_000.0, final_equity=25_000.0,
+            unrealized_pnl=10_000.0, net_pnl=10_000.0,
+        )
         pos = _open_pos(entry_price=100_000, current_price=200_000, quantity=0.1)
         _write_positions(tmp_path, [pos])
 
         a = self._mgr(tmp_path).account()
 
         assert 0.0 <= a.exposure_pct <= 100.0
+
+    def test_account_never_recomputes_from_positions_json(self, tmp_path: Any) -> None:
+        """If positions.json's market data disagrees with paper_balance.json,
+        MetricsManager must trust paper_balance.json — not positions.json.
+
+        This is the regression test for the duplicate-accounting bug:
+        MetricsManager.account() used to recompute unrealized_pnl/position_value
+        from positions.json's current_price, independently of the authoritative
+        figures scripts.paper_trading_engine already wrote to paper_balance.json.
+        """
+        _write_pb(
+            tmp_path, final_balance=9_000.0, final_equity=15_000.0,
+            realized_pnl=0.0, unrealized_pnl=6_000.0, net_pnl=6_000.0,
+        )
+        # positions.json current_price implies a wildly different market value
+        # (105_000 × 0.1 = 10_500) than paper_balance.json's authoritative
+        # figures (position_value = 15_000 - 9_000 = 6_000). account() must
+        # ignore positions.json's price data entirely for these figures.
+        pos = _open_pos(entry_price=100_000, current_price=105_000, quantity=0.1, remaining_qty=0.1)
+        _write_positions(tmp_path, [pos])
+
+        a = self._mgr(tmp_path).account()
+
+        assert a.equity == pytest.approx(15_000.0)
+        assert a.position_value == pytest.approx(6_000.0)
+        assert a.unrealized_pnl == pytest.approx(6_000.0)
 
 
 # ============================================================================
@@ -338,7 +407,12 @@ class TestAccountSnapshotConsistency:
 
     def test_wallet_uses_snapshot(self, tmp_path: Any) -> None:
         """Wallet command accounting matches AccountSnapshot."""
-        _write_pb(tmp_path, final_balance=9_000.0, realized_pnl=200.0)
+        # market value = 55_000 × 0.5 = 27_500; equity = 9_000 + 27_500 = 36_500
+        # unrealized = (55_000-50_000)×0.5 = 2_500; net = 200 + 2_500 = 2_700
+        _write_pb(
+            tmp_path, final_balance=9_000.0, final_equity=36_500.0,
+            realized_pnl=200.0, unrealized_pnl=2_500.0, net_pnl=2_700.0,
+        )
         pos = _open_pos(entry_price=50_000, current_price=55_000, quantity=0.5, remaining_qty=0.5)
         _write_positions(tmp_path, [pos])
 
@@ -353,7 +427,12 @@ class TestAccountSnapshotConsistency:
 
     def test_portfolio_uses_snapshot(self, tmp_path: Any) -> None:
         """Portfolio command accounting matches AccountSnapshot."""
-        _write_pb(tmp_path, final_balance=8_000.0, realized_pnl=-100.0)
+        # market value = 2_800 × 10 = 28_000; equity = 8_000 + 28_000 = 36_000
+        # unrealized = (2_800-3_000)×10 = -2_000; net = -100 + -2_000 = -2_100
+        _write_pb(
+            tmp_path, final_balance=8_000.0, final_equity=36_000.0,
+            realized_pnl=-100.0, unrealized_pnl=-2_000.0, net_pnl=-2_100.0,
+        )
         pos = _open_pos(entry_price=3_000, current_price=2_800, quantity=10.0, remaining_qty=10.0)
         _write_positions(tmp_path, [pos])
 
@@ -367,7 +446,11 @@ class TestAccountSnapshotConsistency:
 
     def test_status_uses_snapshot(self, tmp_path: Any) -> None:
         """Status command exposure matches AccountSnapshot."""
-        _write_pb(tmp_path, final_balance=10_000.0)
+        # Market value = 100_000 × 0.05 = 5_000; equity = 10_000 + 5_000 = 15_000
+        _write_pb(
+            tmp_path, final_balance=10_000.0, final_equity=15_000.0,
+            unrealized_pnl=0.0, net_pnl=0.0,
+        )
         pos = _open_pos(entry_price=100_000, current_price=100_000, quantity=0.05, remaining_qty=0.05)
         _write_positions(tmp_path, [pos])
 
@@ -383,7 +466,10 @@ class TestAccountSnapshotConsistency:
 
     def test_balance_uses_snapshot(self, tmp_path: Any) -> None:
         """Balance command returns same values as AccountSnapshot."""
-        _write_pb(tmp_path, final_balance=12_000.0, realized_pnl=1_000.0)
+        _write_pb(
+            tmp_path, final_balance=12_000.0, final_equity=12_000.0,
+            realized_pnl=1_000.0, unrealized_pnl=0.0, net_pnl=1_000.0,
+        )
         _write_positions(tmp_path, [])
 
         a = self._mgr(tmp_path).account()
@@ -396,7 +482,12 @@ class TestAccountSnapshotConsistency:
 
     def test_mixed_positions_consistency(self, tmp_path: Any) -> None:
         """Mix of open and closed positions — only open contribute to position_value."""
-        _write_pb(tmp_path, final_balance=9_500.0, realized_pnl=300.0)
+        # Only the open position contributes: 105_000 × 0.05 = 5_250
+        # equity = 9_500 + 5_250 = 14_750; unrealized = 250; net = 300 + 250 = 550
+        _write_pb(
+            tmp_path, final_balance=9_500.0, final_equity=14_750.0,
+            realized_pnl=300.0, unrealized_pnl=250.0, net_pnl=550.0,
+        )
         open_p = _open_pos("BTCUSDT", 100_000, 105_000, 0.05, 0.05)
         closed_p = _closed_pos("ETHUSDT", 3_000, 3_200, 5.0)
         _write_positions(tmp_path, [open_p, closed_p])
