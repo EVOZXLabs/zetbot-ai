@@ -207,22 +207,49 @@ print_banner() {
         repo_url="${repo_url:0:49}..."
     fi
 
+    local box_inner=62
+
+    # Print one line inside the box. $1 = plain (uncolored) text used to
+    # compute padding, $2 = the actual (possibly colored) text to print.
+    # Keeping padding driven by the plain-text length means this never
+    # goes out of alignment when dates, hashes, or URLs change length.
+    #
+    # NOTE: bash's ${#string} counts BYTES, not characters, under a
+    # non-UTF-8 locale (e.g. LC_CTYPE=POSIX) — which silently breaks the
+    # box alignment for any line containing multi-byte characters (█, ·).
+    # python3 is a hard dependency of this project, so use it for a
+    # locale-independent character count instead of ${#plain}.
+    _box_line() {
+        local plain="$1" colored="$2"
+        local plain_len
+        plain_len=$(printf '%s' "$plain" | python3 -c "import sys; print(len(sys.stdin.read()))")
+        local pad=$(( box_inner - 2 - plain_len ))
+        (( pad < 0 )) && pad=0
+        printf "${MAGENTA}║${NC}  %b%*s${MAGENTA}║${NC}\n" "$colored" "$pad" ""
+    }
+
+    local date_str
+    date_str="$(date '+%Y-%m-%d %H:%M %Z')"
+    local subtitle="Version ${SETUP_VERSION}  ·  Commit ${git_short}  ·  ${date_str}"
+
     echo ""
     echo -e "${MAGENTA}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${MAGENTA}║${NC}                                                              ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}${WHITE}██████╗ ███████╗████████╗██████╗  ██████╗${NC}                   ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}${WHITE}╚════██╗██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗${NC}                  ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}${WHITE} █████╔╝█████╗     ██║   ██████╔╝██║   ██║${NC}                  ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}${WHITE}██╔═══╝ ██╔══╝     ██║   ██╔══██╗██║   ██║${NC}                  ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}${WHITE}███████╗███████╗   ██║   ██║  ██║╚██████╔╝${NC}                  ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}${WHITE}╚══════╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ${NC}                  ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}                                                              ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${BOLD}Production Setup & Health Check${NC}                            ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${DIM}Version ${SETUP_VERSION}  ·  Commit ${git_short}  ·  $(date '+%Y-%m-%d %H:%M %Z')${NC}  ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}║${NC}  ${DIM}${repo_url}${NC}"
-    echo -e "${MAGENTA}║${NC}                                                              ${MAGENTA}║${NC}"
+    _box_line "" ""
+    _box_line "█████ █████ █████ ████   ███  █████" "${BOLD}${WHITE}█████ █████ █████ ████   ███  █████${NC}"
+    _box_line "    █ █       █   █   █ █   █   █  " "${BOLD}${WHITE}    █ █       █   █   █ █   █   █  ${NC}"
+    _box_line "   █  ████    █   ████  █   █   █    AI" "${BOLD}${WHITE}   █  ████    █   ████  █   █   █  ${NC}  ${DIM}AI${NC}"
+    _box_line "  █   █       █   █   █ █   █   █  " "${BOLD}${WHITE}  █   █       █   █   █ █   █   █  ${NC}"
+    _box_line " █    █       █   █   █ █   █   █  " "${BOLD}${WHITE} █    █       █   █   █ █   █   █  ${NC}"
+    _box_line "█████ █████   █   ████   ███    █  " "${BOLD}${WHITE}█████ █████   █   ████   ███    █  ${NC}"
+    _box_line "" ""
+    _box_line "Production Setup & Health Check" "${BOLD}Production Setup & Health Check${NC}"
+    _box_line "$subtitle" "${DIM}${subtitle}${NC}"
+    _box_line "$repo_url" "${DIM}${repo_url}${NC}"
+    _box_line "" ""
     echo -e "${MAGENTA}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
+
+    unset -f _box_line
 }
 
 # =============================================================================
@@ -445,6 +472,7 @@ check_configuration() {
         if [[ -f "$env_example" ]]; then
             if [[ "$AUTO_MODE" == "true" ]]; then
                 cp "$env_example" "$env_file"
+                chmod 600 "$env_file" 2>/dev/null || true
                 pass "Created ${env_file} from ${env_example}"
             else
                 echo ""
@@ -455,8 +483,10 @@ check_configuration() {
                 answer="${answer:-Y}"
                 if [[ "$answer" =~ ^[Yy] ]]; then
                     cp "$env_example" "$env_file"
+                    chmod 600 "$env_file" 2>/dev/null || true
                     pass "Created ${env_file} from ${env_example}"
-                    echo -e "  ${YELLOW}${SYM_WARN}  Edit ${env_file} with your credentials before running.${NC}"
+                    echo -e "  ${YELLOW}${SYM_WARN}  Edit ${env_file} with your credentials before running:${NC}"
+                    echo -e "  ${BOLD}nano ${env_file}${NC}"
                 else
                     fail "Cannot proceed without .env"
                     return 1
@@ -470,10 +500,36 @@ check_configuration() {
         pass ".env file present"
     fi
 
-    # ── Required variables ──
-    local required_vars=("EXCHANGE" "API_KEY" "API_SECRET")
-    local missing=0
+    # ── Missing keys vs template (stale .env from before an option was added) ──
+    if [[ -f "$env_example" ]]; then
+        local missing_keys=()
+        while IFS= read -r key; do
+            grep -q "^${key}=" "$env_file" 2>/dev/null || missing_keys+=("$key")
+        done < <(grep -oE '^[A-Z_0-9]+=' "$env_example" | sed 's/=$//')
 
+        if (( ${#missing_keys[@]} > 0 )); then
+            warn "${#missing_keys[@]} key(s) in ${env_example} are missing from ${env_file}"
+            info "Missing: ${missing_keys[*]}"
+            info "Add them manually, or diff against ${env_example}"
+        fi
+    fi
+
+    # ── Required variables ──
+    # API_KEY/API_SECRET are only required for live trading (PAPER_MODE=false).
+    # TELEGRAM_TOKEN/TELEGRAM_CHAT_ID are only required when Telegram is on.
+    local paper_mode telegram_enabled
+    paper_mode=$(env_read "PAPER_MODE" "$env_file")
+    telegram_enabled=$(env_read "TELEGRAM_ENABLED" "$env_file")
+
+    local required_vars=("EXCHANGE")
+    if [[ "$paper_mode" == "false" ]]; then
+        required_vars+=("API_KEY" "API_SECRET")
+    fi
+    if [[ "$telegram_enabled" == "true" ]]; then
+        required_vars+=("TELEGRAM_TOKEN" "TELEGRAM_CHAT_ID")
+    fi
+
+    local missing=0
     for var in "${required_vars[@]}"; do
         local val
         val=$(env_read "$var" "$env_file")
@@ -489,6 +545,10 @@ check_configuration() {
         warn "${missing} required variable(s) empty — edit .env"
     fi
 
+    if [[ -z "$paper_mode" ]]; then
+        info "PAPER_MODE not set — defaults to true (paper trading, safe)"
+    fi
+
     # ── Validate numeric ranges ──
     _check_positive() {
         local label="$1" val="$2"
@@ -497,14 +557,15 @@ check_configuration() {
                 warn "${label}=${val} — should be > 0"
         fi
     }
-    _check_positive "POSITION_SIZE" "$(env_read POSITION_SIZE .env)"
-    _check_positive "STOP_LOSS"     "$(env_read STOP_LOSS .env)"
-    _check_positive "TAKE_PROFIT"   "$(env_read TAKE_PROFIT .env)"
+    _check_positive "ACCOUNT_BALANCE"        "$(env_read ACCOUNT_BALANCE "$env_file")"
+    _check_positive "MAX_RISK_PER_TRADE_PCT" "$(env_read MAX_RISK_PER_TRADE_PCT "$env_file")"
+    _check_positive "MIN_RR"                 "$(env_read MIN_RR "$env_file")"
+    _check_positive "MAX_RR"                 "$(env_read MAX_RR "$env_file")"
 
-    local li
-    li=$(env_read "LOOP_INTERVAL_SECONDS" ".env")
-    if [[ -n "$li" ]] && [[ "$li" =~ ^[0-9]+$ ]] && (( li < 10 )); then
-        warn "LOOP_INTERVAL_SECONDS=${li} — very aggressive (< 10s)"
+    local pi
+    pi=$(env_read "PIPELINE_INTERVAL" "$env_file")
+    if [[ -n "$pi" ]] && [[ "$pi" =~ ^[0-9]+$ ]] && (( pi < 10 )); then
+        warn "PIPELINE_INTERVAL=${pi} — very aggressive (< 10s)"
     fi
 }
 
@@ -519,7 +580,7 @@ check_exchange() {
     exchange=$(env_read "EXCHANGE" ".env")
     api_key=$(env_read "API_KEY" ".env")
     api_secret=$(env_read "API_SECRET" ".env")
-    mode=$(env_read "TESTING" ".env")
+    mode=$(env_read "PAPER_MODE" ".env")
 
     # ── Exchange name ──
     if [[ -n "$exchange" ]]; then
@@ -550,7 +611,9 @@ check_exchange() {
     fi
 
     # ── Paper / Live mode ──
-    if [[ "$mode" == "true" ]]; then
+    # AppConfig defaults PAPER_MODE to true when unset — mirror that here
+    # instead of treating an empty value as LIVE.
+    if [[ "$mode" != "false" ]]; then
         pass "Mode: PAPER (testing)"
         echo -e "  ${DIM}${SYM_INFO}  All trades are simulated — no real funds at risk${NC}"
     else
