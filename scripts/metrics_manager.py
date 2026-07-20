@@ -140,6 +140,18 @@ class MetricsManager:
 
         open_count = self.open_positions_count()
 
+        # Runtime invariant enforcement: when no positions are open,
+        # unrealized_pnl MUST be zero and equity MUST equal balance.
+        # paper_balance.json can contain stale unrealized_pnl from a
+        # recently-closed position that hasn't been reconciled yet.
+        if open_count == 0:
+            unrealized = 0.0
+            net = realized
+            equity = bal
+            total_return_pct = (
+                ((equity - initial) / initial * 100.0) if initial > 0 else 0.0
+            )
+
         # position_value is derived from the authoritative equity/balance
         # (equity == balance + position_value by construction in the
         # paper engine's own VirtualWallet.snapshot()) rather than summed

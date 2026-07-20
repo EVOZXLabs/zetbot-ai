@@ -7,7 +7,7 @@ Sends a test message to verify the bot can communicate via Telegram.
 import sys
 
 
-def test_telegram() -> str:
+def run_telegram_test() -> str:
     """Test Telegram connectivity. Returns a formatted report string."""
     try:
         from scripts.app_config import load_config

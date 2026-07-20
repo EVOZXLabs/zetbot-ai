@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from scripts.position_status import OPEN_STATUSES
+from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
 
 # ---------------------------------------------------------------------------
 #  Config
@@ -514,8 +514,7 @@ class PositionManager:
             print()
 
         # Closed positions
-        done = [p for p in positions if p.status in
-                ("CLOSED", "STOPPED", "TIMEOUT")]
+        done = [p for p in positions if p.status in CLOSED_STATUSES]
         if done:
             done.sort(key=lambda p: p.total_pnl, reverse=True)
             print(f"  CLOSED POSITIONS:")
@@ -583,7 +582,7 @@ class PositionExport:
             ),
             "closed_count": sum(
                 1 for p in positions
-                if p.status in ("CLOSED", "STOPPED", "TIMEOUT")
+                if p.status in CLOSED_STATUSES
             ),
             "positions": [asdict(p) for p in positions],
         }

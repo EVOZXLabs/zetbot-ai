@@ -269,7 +269,8 @@ class TestBackupRestore:
     def test_restore_backup(self) -> None:
         from scripts.backup_restore import create_backup, restore_backup
         path = create_backup()
-        original_env = open(".env").read()
+        with open(".env") as f:
+            original_env = f.read()
         os.remove(".env")
         assert restore_backup(path, confirm=False)
         assert os.path.exists(".env")
@@ -345,8 +346,8 @@ class TestExchangeTest:
         sys.modules["ccxt"] = mock_ccxt_mod
 
         with patch("scripts.app_config.load_config", return_value=mock_cfg):
-            from scripts.exchange_test import test_exchange
-            result = test_exchange()
+            from scripts.exchange_test import run_exchange_test
+            result = run_exchange_test()
             assert isinstance(result, str)
 
         if old_ccxt is not None:
@@ -363,8 +364,8 @@ class TestTelegramTest:
         _restore_env()
 
     def test_test_telegram_returns_string(self) -> None:
-        from scripts.telegram_test import test_telegram
-        result = test_telegram()
+        from scripts.telegram_test import run_telegram_test
+        result = run_telegram_test()
         assert isinstance(result, str)
 
 
@@ -507,11 +508,11 @@ class TestModuleImports:
 
     def test_exchange_test_import(self) -> None:
         import scripts.exchange_test
-        assert hasattr(scripts.exchange_test, "test_exchange")
+        assert hasattr(scripts.exchange_test, "run_exchange_test")
 
     def test_telegram_test_import(self) -> None:
         import scripts.telegram_test
-        assert hasattr(scripts.telegram_test, "test_telegram")
+        assert hasattr(scripts.telegram_test, "run_telegram_test")
 
     def test_system_info_import(self) -> None:
         import scripts.system_info

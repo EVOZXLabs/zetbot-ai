@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 
-def test_exchange() -> str:
+def run_exchange_test() -> str:
     """Test exchange API connection. Returns a formatted report string."""
     try:
         from scripts.app_config import load_config

@@ -59,6 +59,7 @@ from scripts.health import HealthMonitor
 from scripts.logger import PipelineLogger
 from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
+from scripts.position_status import is_open, OPEN_STATUSES, CLOSED_STATUSES
 
 
 # ---------------------------------------------------------------------------
@@ -132,10 +133,10 @@ def _build_summary(
     # Positions
     pos_list = position_data.get("positions", [])
     open_positions = sum(
-        1 for p in pos_list if p.get("status") == "OPEN"
+        1 for p in pos_list if is_open(p.get("status"))
     ) if isinstance(pos_list, list) else 0
     closed_positions = sum(
-        1 for p in pos_list if p.get("status") in ("CLOSED", "STOPPED", "TIMEOUT")
+        1 for p in pos_list if p.get("status") in CLOSED_STATUSES
     ) if isinstance(pos_list, list) else 0
     lines.append(f"Open positions      : {open_positions}")
     lines.append(f"Closed positions    : {closed_positions}")
@@ -541,7 +542,7 @@ def _notify_existing_positions(
             sym = pos.get("symbol", "")
             if sym in notified:
                 continue
-            if pos.get("status") not in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+            if not is_open(pos.get("status")):
                 continue
 
             _notify_buy_opened(
@@ -594,7 +595,7 @@ def _monitor_positions(
     positions = data.get("positions", [])
     active = [
         p for p in positions
-        if p.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN")
+        if is_open(p.get("status"))
     ]
     if not active:
         return
@@ -637,7 +638,7 @@ def _monitor_positions(
 
     for pos in positions:
         sym = pos.get("symbol", "")
-        if pos.get("status") not in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+        if not is_open(pos.get("status")):
             continue
 
         ticker = tickers.get(sym)
@@ -704,7 +705,7 @@ def _monitor_positions(
         # Detect status change → notify closure once
         if (
              old_status != new_pos.status
-    and new_pos.status in ("CLOSED", "STOPPED", "TIMEOUT")
+    and new_pos.status in CLOSED_STATUSES
     and not pos.get("closure_notified", False)
     ):
             _notify_closure(
@@ -1246,14 +1247,14 @@ def _cli_import_config() -> None:
 
 
 def _cli_test_exchange() -> None:
-    from scripts.exchange_test import test_exchange
-    result = test_exchange()
+    from scripts.exchange_test import run_exchange_test
+    result = run_exchange_test()
     print(result)
 
 
 def _cli_test_telegram() -> None:
-    from scripts.telegram_test import test_telegram
-    result = test_telegram()
+    from scripts.telegram_test import run_telegram_test
+    result = run_telegram_test()
     print(f"\n=== Telegram Connection Test ===\n")
     print(f"  {result}")
 

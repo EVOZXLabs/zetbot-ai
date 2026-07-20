@@ -135,16 +135,16 @@ def _update_config() -> None:
 
 
 def _test_exchange() -> None:
-    from scripts.exchange_test import test_exchange
+    from scripts.exchange_test import run_exchange_test
     print(f"{CLEAR}")
-    result = test_exchange()
+    result = run_exchange_test()
     print(result)
 
 
 def _test_telegram() -> None:
-    from scripts.telegram_test import test_telegram
+    from scripts.telegram_test import run_telegram_test
     print(f"{CLEAR}")
-    result = test_telegram()
+    result = run_telegram_test()
     print(f"\n=== Telegram Connection Test ===\n")
     print(f"  {result}")
 

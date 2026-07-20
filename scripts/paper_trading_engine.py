@@ -21,6 +21,8 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+
 # ---------------------------------------------------------------------------
 #  Config
 # ---------------------------------------------------------------------------
@@ -501,11 +503,11 @@ class PaperTradingEngine:
             "total_positions": len(self.positions),
             "active_count": sum(
                 1 for vp in self.positions.values()
-                if vp.status in ("OPEN", "TRAILING", "BREAKEVEN", "PARTIAL")
+                if vp.status in OPEN_STATUSES
             ),
             "closed_count": sum(
                 1 for vp in self.positions.values()
-                if vp.status in ("CLOSED", "STOPPED", "TIMEOUT")
+                if vp.status in CLOSED_STATUSES
             ),
             "positions": [
                 asdict(vp)
@@ -817,7 +819,7 @@ class PaperTradingEngine:
                 vp.closure_notified = True
             return
 
-        if pos_status in ("CLOSED", "STOPPED", "TIMEOUT") and remaining_qty > 0.0:
+        if pos_status in CLOSED_STATUSES and remaining_qty > 0.0:
             exit_price = current_price
             if pos_status == "STOPPED":
                 exit_price = pos_state.get("current_stop", stop_loss)

@@ -274,12 +274,17 @@ class TestHealthMonitor:
         assert "process_cpu_sec" in metrics
 
     def test_health_monitor_logs_metrics(self) -> None:
+        from unittest.mock import patch
         from scripts.health import HealthMonitor
         logger = _FakeLogger()
-        monitor = HealthMonitor(logger=logger, config=self._make_config(), interval=0.1)
-        monitor.start()
-        time.sleep(0.35)
-        monitor.stop()
+        monitor = HealthMonitor(logger=logger, config=self._make_config(), interval=0.05)
+        with (
+            patch("scripts.health._check_internet", return_value=(True, 1.0)),
+            patch("scripts.health._check_exchange", return_value=(True, "binance")),
+        ):
+            monitor.start()
+            time.sleep(0.3)
+            monitor.stop()
         logged = logger.get_lines()
         health_lines = [l for l in logged if "HEALTH" in l]
         assert len(health_lines) >= 1, f"Expected HEALTH log lines, got {logged}"
