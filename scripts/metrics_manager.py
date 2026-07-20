@@ -106,12 +106,22 @@ class MetricsManager:
     def account(self) -> AccountSnapshot:
         """Compute the authoritative account snapshot.
 
-        Reads ``paper_balance.json`` for realized/trade stats, then
-        dynamically computes unrealized PnL and position value from
-        actual open positions so the snapshot always reflects current
-        market prices.
+        ``paper_balance.json`` is written by ``scripts.paper_trading_engine``
+        (``PaperExport.balance_json``) from the exact same in-memory
+        ``VirtualPosition`` objects, at the exact same instant, as the
+        ``positions.json`` it also writes (see ``_save_state`` /
+        ``PaperTradingEngine.run``). It is therefore the authoritative
+        accounting output — balance, equity, realized/unrealized/net PnL,
+        and total_return_pct are read directly from it, never
+        recomputed here. Recomputing them independently from
+        positions.json would be a second, divergence-prone accounting
+        implementation of the same numbers.
 
-        Invariants (always true):
+        positions.json is used ONLY to identify which records are
+        currently open (open_positions / open_positions_count and
+        position listings) — never to derive a dollar figure.
+
+        Invariants (always true, by construction):
             equity == balance + position_value
             net_pnl == realized_pnl + unrealized_pnl
             exposure_pct == (position_value / equity * 100) if equity > 0 else 0
@@ -120,50 +130,21 @@ class MetricsManager:
         bal = pb.get("final_balance", 0.0)
         realized = pb.get("realized_pnl", 0.0)
         initial = pb.get("initial_balance", 10_000.0)
-
-        # Dynamic computation from actual open positions
-        open_positions = self.open_positions()
-        open_count = len(open_positions)
-
-        position_value = 0.0
-        unrealized = 0.0
-
-        for p in open_positions:
-            # Position market value: current_price × remaining_qty
-            current_price = p.get("current_price", 0.0)
-            entry_price = p.get("entry_price", 0.0)
-            remaining_qty = p.get("remaining_qty", 0.0)
-            quantity = p.get("quantity", 0.0)
-            qty = remaining_qty if remaining_qty > 0 else quantity
-
-            # Use current_price × qty for market value
-            if current_price > 0 and qty > 0:
-                market_value = current_price * qty
-            else:
-                # Fallback: position_size_usdt or cost_basis
-                market_value = (
-                    p.get("position_size_usdt", 0.0)
-                    or p.get("cost_basis", 0.0)
-                    or (entry_price * quantity)
-                )
-            position_value += market_value
-
-            # Unrealized PnL: (current - entry) × qty
-            if current_price > 0 and entry_price > 0 and qty > 0:
-                unrealized += (current_price - entry_price) * qty
-            else:
-                # Fallback to pre-computed floating_pnl
-                unrealized += p.get("floating_pnl", 0.0)
-
-        equity = bal + position_value
-        net = realized + unrealized
-
-        # Return %: ((equity - initial) / initial) × 100
-        total_return_pct = (
-            ((equity - initial) / initial * 100.0) if initial > 0 else 0.0
+        equity = pb.get("final_equity", bal)
+        unrealized = pb.get("unrealized_pnl", 0.0)
+        net = pb.get("net_pnl", realized + unrealized)
+        total_return_pct = pb.get(
+            "total_return_pct",
+            ((equity - initial) / initial * 100.0) if initial > 0 else 0.0,
         )
 
-        # Exposure: position_value / equity × 100
+        open_count = self.open_positions_count()
+
+        # position_value is derived from the authoritative equity/balance
+        # (equity == balance + position_value by construction in the
+        # paper engine's own VirtualWallet.snapshot()) rather than summed
+        # from positions.json, so it can never disagree with equity/exposure.
+        position_value = equity - bal
         exposure_pct = (position_value / equity * 100.0) if equity > 0 else 0.0
 
         return AccountSnapshot(
