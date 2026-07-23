@@ -420,13 +420,6 @@ class TelegramCommandCenter:
     def _cmd_shutdown(self, _text: str) -> str:
         """Shut down the bot gracefully (legacy — direct impl for backward compat)."""
         now = time.time()
-        if not self._test_mode and now - self._start_time < STARTUP_GRACE_PERIOD:
-            _log("Shutdown ignored — still in startup grace period")
-            return (
-                "\u26a0\ufe0f *Shutdown ignored*\n"
-                f"Bot just started. Try again in "
-                f"{int(STARTUP_GRACE_PERIOD - (now - self._start_time))}s."
-            )
 
         if not self._shutdown_pending or (now - self._shutdown_request_time > 60.0):
             self._shutdown_pending = True

@@ -4,7 +4,6 @@ import time
 from telegram.base_command import BaseCommand, CommandMeta
 
 SHUTDOWN_FILE = "data/.shutdown_requested"
-STARTUP_GRACE_PERIOD = 30
 DATA_DIR = "data"
 
 
@@ -23,14 +22,6 @@ class ShutdownCommand(BaseCommand):
     def execute(self, ctx, args: str) -> str:
         now = time.time()
 
-        # Grace period to prevent replay
-        if not ctx.test_mode and now - ctx.start_time < STARTUP_GRACE_PERIOD:
-            remaining = int(STARTUP_GRACE_PERIOD - (now - ctx.start_time))
-            return (
-                "\u26a0\ufe0f *Shutdown ignored*\n"
-                f"Bot just started. Try again in {remaining}s."
-            )
-
         key = str(ctx.chat_id)
         last_request = self._pending.get(key, 0.0)
 
@@ -42,7 +33,7 @@ class ShutdownCommand(BaseCommand):
                 "to confirm and shut down the bot."
             )
 
-        # Confirm
+        # Confirm — initiate graceful shutdown immediately
         if ctx.shutdown_event:
             ctx.shutdown_event.set()
         else:

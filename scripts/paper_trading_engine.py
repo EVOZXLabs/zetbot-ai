@@ -251,7 +251,7 @@ class MetricsCalculator:
         gross_profit = sum(o.net_pnl for o in winners)
         gross_loss = abs(sum(o.net_pnl for o in losers))
         net_pnl = gross_profit - gross_loss
-        profit_factor = _safe_div(gross_profit, gross_loss, float("inf"))
+        profit_factor = _safe_div(gross_profit, gross_loss, 0.0)
         profit_factor = round(profit_factor, 2)
 
         # Drawdown from equity history
@@ -300,12 +300,13 @@ class MetricsCalculator:
 class PaperTradingEngine:
     """Orchestrate paper trading simulation."""
 
-    def __init__(self) -> None:
+    def __init__(self, notifier: Any = None) -> None:
         self.wallet = VirtualWallet(INITIAL_BALANCE)
         self.orders: list[Order] = []
         self.positions: dict[str, VirtualPosition] = {}
         self.equity_history: list[EquitySnapshot] = []
         self.metrics: dict[str, Any] = {}
+        self._notifier = notifier
         self._load_state()
 
     # ------------------------------------------------------------------
@@ -325,6 +326,7 @@ class PaperTradingEngine:
             return
 
         self.wallet.balance = state.get("balance", INITIAL_BALANCE)
+        self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
         self.wallet.margin_used = state.get("margin_used", 0.0)
         self.orders = [Order(**o) for o in state.get("orders", [])]
         self.positions = {
@@ -340,68 +342,28 @@ class PaperTradingEngine:
     # ------------------------------------------------------------------
 
     def _notify_buy(self, plan: dict, fill_price: float, order_id: str) -> None:
-        """Send BUY OPENED Telegram notification with full details."""
+        """Send BUY OPENED Telegram notification via centralized Notifier."""
+        if self._notifier is None:
+            return
         try:
-            from bot.telegram import TelegramNotifier
-            import bot.config as bot_cfg
-            bot_cfg.CONFIG.update({
-                "telegram_enabled": bool(os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"),
-                "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
-                "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
-                "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", "10")),
-                "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
-            })
-
-            from telegram.formatter import fmt_price as fp
-            from telegram.ui import (
-                header, SEPARATOR, wib_now, confidence_bar,
-                progress_bar, ai_insight, build_message,
-            )
-
             symbol = plan["symbol"]
-            entry = fill_price
-            curr = plan.get("current_price", fill_price)
-            sl = plan.get("stop_loss", 0)
-            tp1 = plan.get("tp1", 0)
-            tp2 = plan.get("tp2", 0)
-            tp3 = plan.get("tp3", 0)
-            pos_size = plan.get("position_size_usdt", 0)
-            confidence = plan.get("confidence", plan.get("probability", 0))
-            signal = plan.get("recommendation", "BUY")
-            reasons = plan.get("reasons", ["Paper trade executed"])
-
             exchange = str(os.getenv("EXCHANGE", "binance"))
             timeframe = str(os.getenv("TIMEFRAME", "1h"))
+            sl = plan.get("stop_loss", 0)
+            tp1 = plan.get("tp1", 0)
+            reasons = plan.get("reasons", ["Paper trade executed"])
 
-            trend = ""
-            try:
-                with open("data/scanner_results.json") as f:
-                    sc_data = json.load(f)
-                for p in sc_data.get("pairs", []):
-                    if p.get("symbol") == symbol:
-                        trend = p.get("trend_alignment", "")
-                        break
-            except (FileNotFoundError, json.JSONDecodeError):
-                pass
-
-            text = build_message(
-                header(),
-                f"🟢 *BUY OPENED*\n{symbol} • {exchange} • {timeframe}",
-                f"{SEPARATOR}\n"
-                f"💰 Entry\n{fp(entry)}\n\n"
-                f"📍 Current\n{fp(curr)}",
-                f"{SEPARATOR}\n"
-                f"🛑 Stop Loss\n{fp(sl)}\n\n"
-                f"🎯 Take Profit\n{fp(tp1)}",
-                f"{SEPARATOR}\n"
-                f"🧠 *AI Insight*\n"
-                f"{ai_insight(signal, reasons, trend, confidence, is_buy=True)}",
-                f"{SEPARATOR}\n"
-                f"⭐ Confidence\n{confidence_bar(confidence)}\n\n"
-                f"🕐 {wib_now()}",
+            self._notifier.notify_buy_opened(
+                symbol=symbol,
+                exchange=exchange,
+                timeframe=timeframe,
+                entry_price=fill_price,
+                quantity=plan.get("quantity", 0),
+                position_size=plan.get("position_size_usdt", 0),
+                stop_loss=sl,
+                take_profit=tp1,
+                reasons=reasons,
             )
-            notifier = TelegramNotifier()
-            notifier.send(text)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send BUY notification: %s", exc
@@ -418,57 +380,20 @@ class PaperTradingEngine:
         entry_price: float,
         cost_basis: float = 0.0,
     ) -> None:
-        """Send trade closed Telegram notification."""
+        """Send trade closed Telegram notification via centralized Notifier."""
+        if self._notifier is None:
+            return
         try:
-            from bot.telegram import TelegramNotifier
-            import bot.config as bot_cfg
-            bot_cfg.CONFIG.update({
-                "telegram_enabled": bool(os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"),
-                "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
-                "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
-                "telegram_timeout": int(os.getenv("TELEGRAM_TIMEOUT", "10")),
-                "telegram_retry": int(os.getenv("TELEGRAM_RETRY", "3")),
-            })
-
-            from telegram.formatter import fmt_price as fp, fmt_holding
-            from telegram.ui import (
-                header, SEPARATOR, wib_now, pnl_emoji,
-                ai_insight, build_message,
+            self._notifier.notify_position_closed(
+                symbol=symbol,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                pnl=total_pnl,
+                pnl_pct=(total_pnl / cost_basis * 100) if cost_basis > 0 else 0.0,
+                balance=balance,
+                exit_reason=exit_reason,
+                holding_time=holding_time,
             )
-
-            notifier = TelegramNotifier()
-            pnl_pct = (total_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
-
-            if entry_price > 0 and exit_price > 0:
-                roi_pct = ((exit_price - entry_price) / entry_price * 100)
-            else:
-                roi_pct = 0.0
-
-            emoji_map = {
-                "Take Profit": "🟢",
-                "Stop Loss": "🔴",
-                "Strategy Exit": "⚪",
-            }
-            reason_emoji = emoji_map.get(exit_reason, "❓")
-            holding_str = fmt_holding(holding_time.total_seconds())
-
-            insight = ai_insight(reasons=[exit_reason], is_buy=False, exit_reason=exit_reason)
-
-            text = build_message(
-                header(),
-                f"🔴 *POSITION CLOSED*\n{symbol}",
-                f"{SEPARATOR}\n"
-                f"💰 Entry\n{fp(entry_price)}\n\n"
-                f"🚪 Exit\n{fp(exit_price)}",
-                f"{SEPARATOR}\n"
-                f"📈 Profit\n{pnl_emoji(total_pnl)} ${total_pnl:+,.2f} ({pnl_pct:+.2f}%)\n\n"
-                f"🕒 Held\n{holding_str}",
-                f"{SEPARATOR}\n"
-                f"🧠 *AI Insight*\n{insight}",
-                f"{SEPARATOR}\n"
-                f"💹 Balance\n${balance:,.2f}",
-            )
-            notifier.send(text)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send close notification: %s", exc
@@ -485,6 +410,7 @@ class PaperTradingEngine:
         state = {
             "version": 1,
             "balance": self.wallet.balance,
+            "initial_balance": self.wallet.initial,
             "margin_used": self.wallet.margin_used,
             "orders": [asdict(o) for o in self.orders],
             "positions": {
@@ -1053,15 +979,55 @@ class PaperExport:
 
     @staticmethod
     def orders_json(orders: list[Order], path: str) -> None:
+        """Write orders to JSON, MERGING with existing file.
+
+        The monitor and order_manager append SELL orders to this file
+        independently.  Overwriting would discard those orders, creating
+        phantom open positions.  We merge by order id: engine orders
+        replace existing entries; orders only in the file are preserved.
+        """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        open_cnt = sum(1 for o in orders if o.status in ("NEW", "FILLED", "PARTIALLY_FILLED"))
-        closed_cnt = sum(1 for o in orders if o.status == "CLOSED")
+
+        # Load existing orders (may include SELLs from monitor / order_manager)
+        existing_by_id: dict[str, dict] = {}
+        try:
+            with open(path) as f:
+                old = json.load(f)
+            for o in old.get("orders", []):
+                oid = o.get("id", "")
+                if oid:
+                    existing_by_id[oid] = o
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        # Engine orders take precedence (they carry updated status fields)
+        engine_ids: set[str] = set()
+        merged: list[dict] = []
+        for o in orders:
+            d = asdict(o)
+            oid = d.get("id", "")
+            engine_ids.add(oid)
+            merged.append(d)
+
+        # Append file-only orders (monitor SELLs, manual trades, etc.)
+        for oid, odict in existing_by_id.items():
+            if oid not in engine_ids:
+                merged.append(odict)
+
+        open_cnt = sum(
+            1 for o in merged
+            if o.get("status") in ("NEW", "FILLED", "PARTIALLY_FILLED")
+        )
+        closed_cnt = sum(
+            1 for o in merged if o.get("status") == "CLOSED"
+        )
+
         data = {
             "generated": datetime.now(timezone.utc).isoformat(),
-            "total_orders": len(orders),
+            "total_orders": len(merged),
             "open_orders": open_cnt,
             "closed_orders": closed_cnt,
-            "orders": [asdict(o) for o in orders],
+            "orders": merged,
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -1071,10 +1037,73 @@ class PaperExport:
     def balance_json(
         metrics: dict, equity_history: list[EquitySnapshot], path: str,
     ) -> None:
+        """Write balance metrics, MERGING with existing file.
+
+        The monitor and order_manager update ``paper_balance.json``
+        independently (e.g. adding realized PnL on closure).  Overwriting
+        would discard those updates.  We merge: engine metrics replace
+        fields the engine owns; fields only in the file are preserved.
+        """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        data = dict(metrics)
+
+        # Load existing file to preserve monitor / order_manager updates
+        existing: dict = {}
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        # Start from existing data so monitor-added fields survive
+        data = dict(existing)
+
+        # Engine-computed metrics override (these are authoritatively
+        # recalculated each run from the full order + equity history)
+        engine_keys = {
+            "initial_balance", "final_balance", "final_equity",
+            "total_return_pct", "total_trades", "winning_trades",
+            "losing_trades", "win_rate", "gross_profit", "gross_loss",
+            "realized_pnl", "unrealized_pnl", "net_pnl",
+            "profit_factor", "max_drawdown", "max_drawdown_pct",
+        }
+        for k in engine_keys:
+            if k in metrics:
+                data[k] = metrics[k]
+
+        # However, if the monitor increased realized_pnl beyond what
+        # the engine knows, use the higher value (monitor PnL is
+        # cumulative and includes closures the engine hasn't processed).
+        file_realized = existing.get("realized_pnl", 0.0)
+        engine_realized = metrics.get("realized_pnl", 0.0)
+        if file_realized > engine_realized:
+            data["realized_pnl"] = file_realized
+            # Re-derive net_pnl with the larger realized component
+            data["net_pnl"] = round(
+                file_realized + metrics.get("unrealized_pnl", 0.0), 2
+            )
+
+        # Same for trade counts — monitor may have added closures
+        file_trades = existing.get("total_trades", 0)
+        engine_trades = metrics.get("total_trades", 0)
+        if file_trades > engine_trades:
+            data["total_trades"] = file_trades
+            data["winning_trades"] = max(
+                existing.get("winning_trades", 0),
+                metrics.get("winning_trades", 0),
+            )
+            data["losing_trades"] = max(
+                existing.get("losing_trades", 0),
+                metrics.get("losing_trades", 0),
+            )
+            total = data["total_trades"]
+            data["win_rate"] = (
+                round(data["winning_trades"] / total * 100, 2)
+                if total else 0.0
+            )
+
         data["generated"] = datetime.now(timezone.utc).isoformat()
         data["equity_history"] = [asdict(s) for s in equity_history]
+
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
         print(f"  Balance JSON   : {path}")
@@ -1105,8 +1134,8 @@ class PaperExport:
 # -------------------------------------------------------------------
 
 
-def main() -> None:
-    engine = PaperTradingEngine()
+def main(notifier: Any = None) -> None:
+    engine = PaperTradingEngine(notifier=notifier)
     metrics = engine.run()
 
     if not metrics:

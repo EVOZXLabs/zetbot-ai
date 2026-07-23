@@ -5,6 +5,7 @@ from telegram.ui import (
     header, SEPARATOR, wib_now, wib_short, progress_bar,
     exposure_bar, build_message,
 )
+from scripts.position_status import is_open
 
 PAUSE_FILE = "data/.paused"
 
@@ -38,6 +39,16 @@ class StatusCommand(BaseCommand):
             open_pos = a.open_positions
             win_rate = a.win_rate
             exposure_pct = a.exposure_pct
+
+            # Build position symbols string
+            open_list = m.open_positions()
+            if open_list:
+                symbols = ", ".join(
+                    p.get("symbol", "?") for p in open_list
+                )
+                pos_label = f"{open_pos}: {symbols}"
+            else:
+                pos_label = "None"
         else:
             pb = ctx.read_json("paper_balance.json")
             bal = pb.get("final_balance", 0.0)
@@ -46,6 +57,7 @@ class StatusCommand(BaseCommand):
             open_pos = 0
             win_rate = pb.get("win_rate", 0.0)
             exposure_pct = 0.0
+            pos_label = "None"
 
         paused = os.path.exists(PAUSE_FILE)
 
@@ -93,7 +105,7 @@ class StatusCommand(BaseCommand):
             f"🟢 *ONLINE*\n"
             f"💰 Equity\n${eq:,.2f}\n\n"
             f"💵 Cash\n${bal:,.2f}\n\n"
-            f"📂 Positions\n{open_pos}",
+            f"📂 Positions\n{pos_label}",
             f"{SEPARATOR}\n"
             f"📈 Today\n{pnl_emoji} ${net_pnl:+,.2f}\n\n"
             f"⏰ Next Scan\n{next_scan_str}",

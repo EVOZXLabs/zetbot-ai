@@ -61,6 +61,14 @@ from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
 from scripts.position_status import is_open, OPEN_STATUSES, CLOSED_STATUSES
 
+# ---------------------------------------------------------------------------
+#  Configure the ZetBot logger — bot/notifier.py and all bot/ modules use
+#  logging.getLogger("ZetBot") which needs a handler.  bot/logger.py
+#  configures basicConfig with a console + file handler.  Importing it here
+#  ensures the logger works throughout the process.
+# ---------------------------------------------------------------------------
+import bot.logger  # noqa: E402, F401
+
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -200,25 +208,11 @@ def _start_worker(
     return t
 
 
-def _send_telegram(config: AppConfig, lines: list[str]) -> None:
-    """Send summary via Telegram if configured."""
-    if not config.telegram_enabled:
-        return
+def _send_telegram(notifier: Any, lines: list[str]) -> None:
+    """Send summary via Telegram using the centralized Notifier."""
     try:
-        from bot.telegram import TelegramNotifier
-        import bot.config as bot_cfg
-
-        bot_cfg.CONFIG.update({
-            "telegram_enabled": True,
-            "telegram_token": config.telegram_token,
-            "telegram_chat_id": config.telegram_chat_id,
-            "telegram_timeout": config.telegram_timeout,
-            "telegram_retry": config.telegram_retry,
-        })
-
-        notifier = TelegramNotifier()
         msg = "\n".join(line for line in lines[:25])
-        notifier._send(f"\U0001f4ca *Pipeline Report*\n{msg}")
+        notifier.send(f"\U0001f4ca *Pipeline Report*\n{msg}")
     except Exception as exc:
         logger.error(f"Telegram notification failed: {exc}")
 
@@ -283,7 +277,7 @@ _exit_reason_map = {
 
 def _notify_closure(
     logger: Any,
-    config: AppConfig,
+    notifier: Any,
     symbol: str,
     new_pos: Any,
     exit_price: float,
@@ -297,40 +291,23 @@ def _notify_closure(
     )
 
     # Update paper balance & orders to reflect the closure
-    # Returns (pnl, new_balance) — use THESE for the notification
-    # to guarantee Telegram matches the actual balance change.
     pnl, new_balance = _update_paper_on_closure(
         logger, symbol, new_pos, exit_price, exit_reason,
     )
 
-    # Send Telegram notification
-    if not config.telegram_enabled:
-        logger.debug(f"Telegram disabled, skipping close notification for {symbol}")
-        return
-
+    # Send Telegram notification via centralized notifier
     try:
-        from bot.telegram import TelegramNotifier  # noqa: PLC0415
-        import bot.config as bot_cfg  # noqa: PLC0415
-
-        bot_cfg.CONFIG.update({
-            "telegram_enabled": config.telegram_enabled,
-            "telegram_token": config.telegram_token,
-            "telegram_chat_id": config.telegram_chat_id,
-            "telegram_timeout": config.telegram_timeout,
-            "telegram_retry": 3,
-        })
-        notifier = TelegramNotifier()
         from datetime import timedelta  # noqa: PLC0415
         holding_secs = new_pos.holding_hours * 3600
-        notifier.trade_closed(
+        notifier.notify_position_closed(
+            symbol=symbol,
+            entry_price=new_pos.entry_price,
             exit_price=exit_price,
-            pnl_usd=pnl,
+            pnl=pnl,
             pnl_pct=new_pos.floating_pnl_pct,
             balance=new_balance,
             exit_reason=exit_reason,
             holding_time=timedelta(seconds=holding_secs),
-            symbol=symbol,
-            entry_price=new_pos.entry_price,
         )
     except Exception as exc:
         logger.warning(f"Failed to send close notification for {symbol}: {exc}")
@@ -384,7 +361,6 @@ def _update_paper_on_closure(
         }
 
     pb["final_balance"] = round(pb.get("final_balance", 10000.0) + total_proceeds, 2)
-    pb["final_equity"] = pb["final_balance"]
     pb["total_trades"] = pb.get("total_trades", 0) + 1
     if pnl > 0:
         pb["winning_trades"] = pb.get("winning_trades", 0) + 1
@@ -393,13 +369,62 @@ def _update_paper_on_closure(
     total = pb.get("total_trades", 0)
     pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
     pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
-    pb["net_pnl"] = round(pb.get("net_pnl", 0.0) + pnl, 2)
+
+    # Recalculate unrealized PnL from remaining open positions so
+    # equity is never stale after a closure.
+    remaining_unrealized = 0.0
+    try:
+        with open("data/positions.json") as f:
+            pos_data = json.load(f)
+        for p in pos_data.get("positions", []):
+            if p.get("symbol") != symbol and is_open(p.get("status")):
+                remaining_unrealized += p.get("unrealized_pnl", 0.0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    initial = pb.get("initial_balance", 10_000.0)
+    pb["unrealized_pnl"] = round(remaining_unrealized, 2)
+    pb["final_equity"] = round(pb["final_balance"] + remaining_unrealized, 2)
+    pb["net_pnl"] = round(pb["realized_pnl"] + remaining_unrealized, 2)
+    pb["total_return_pct"] = (
+        round(((pb["final_equity"] - initial) / initial * 100.0), 2)
+        if initial > 0 else 0.0
+    )
 
     try:
         with open("data/paper_balance.json", "w") as f:
             json.dump(pb, f, indent=2)
     except OSError as exc:
         logger.warning(f"Failed to update paper_balance.json: {exc}")
+
+    # Also update positions.json so /positions sees closure immediately
+    try:
+        with open("data/positions.json") as f:
+            pos_data = json.load(f)
+        pos_updated = False
+        for p in pos_data.get("positions", []):
+            if p.get("symbol") == symbol and is_open(p.get("status")):
+                p["status"] = "CLOSED"
+                p["remaining_qty"] = 0.0
+                p["unrealized_pnl"] = 0.0
+                p["realized_pnl"] = round(pnl, 2)
+                p["total_pnl"] = round(pnl, 2)
+                p["closed_at"] = now_ts
+                pos_updated = True
+                break
+        if pos_updated:
+            pos_data["active_count"] = sum(
+                1 for p in pos_data.get("positions", [])
+                if is_open(p.get("status"))
+            )
+            pos_data["closed_count"] = sum(
+                1 for p in pos_data.get("positions", [])
+                if not is_open(p.get("status"))
+            )
+            with open("data/positions.json", "w") as f:
+                json.dump(pos_data, f, indent=2, default=str)
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"Failed to update positions.json: {exc}")
 
     # Append closed order to paper_orders.json
     order = {
@@ -483,7 +508,7 @@ def _sync_paper_state_on_closure(
 
 def _notify_buy_opened(
     logger: Any,
-    config: AppConfig,
+    notifier: Any,
     symbol: str,
     entry_price: float,
     quantity: float,
@@ -492,25 +517,12 @@ def _notify_buy_opened(
     tp1: float,
 ) -> None:
     """Send Telegram notification when a buy is opened."""
-    if not config.telegram_enabled:
-        return
-
     try:
-        from bot.telegram import TelegramNotifier  # noqa: PLC0415
-        import bot.config as bot_cfg  # noqa: PLC0415
-
-        bot_cfg.CONFIG.update({
-            "telegram_enabled": config.telegram_enabled,
-            "telegram_token": config.telegram_token,
-            "telegram_chat_id": config.telegram_chat_id,
-            "telegram_timeout": config.telegram_timeout,
-            "telegram_retry": 3,
-        })
-        notifier = TelegramNotifier()
-        notifier.buy_opened(
+        cfg = getattr(logger, 'config', None) or getattr(logger, '_config', None)
+        notifier.notify_buy_opened(
             symbol=symbol,
-            timeframe=config.timeframe,
-            exchange=config.exchange,
+            timeframe=getattr(cfg, 'timeframe', '') if cfg else "",
+            exchange=getattr(cfg, 'exchange', '') if cfg else "",
             entry_price=entry_price,
             quantity=quantity,
             position_size=position_size,
@@ -524,7 +536,7 @@ def _notify_buy_opened(
 
 def _notify_existing_positions(
     logger: Any,
-    config: AppConfig,
+    notifier: Any,
 ) -> None:
     """Send buy notifications for open positions not yet notified."""
     NOTIFIED_FILE = "data/.notified_buys"
@@ -546,7 +558,7 @@ def _notify_existing_positions(
                 continue
 
             _notify_buy_opened(
-                logger, config,
+                logger, notifier,
                 symbol=sym,
                 entry_price=pos.get("entry_price", 0),
                 quantity=pos.get("quantity", 0),
@@ -567,7 +579,7 @@ def _notify_existing_positions(
 
 def _monitor_positions(
     logger: Any,
-    config: AppConfig,
+    notifier: Any,
     center: Any,
 ) -> None:
     """Fetch current prices for open positions, update PnL, detect closures."""
@@ -710,7 +722,7 @@ def _monitor_positions(
     ):
             _notify_closure(
                 logger,
-                config,
+                notifier,
                 sym,
                 new_pos,
                 current_price,
@@ -833,6 +845,13 @@ def main() -> None:
     container = ServiceContainer(config, logger)
     container.bootstrap()
     logger.info("Service Container initialised")
+
+    # ------------------------------------------------------------------
+    #  Centralized Notifier — single instance for all Telegram messages
+    # ------------------------------------------------------------------
+
+    from bot.notifier import Notifier  # noqa: PLC0415
+    _notifier = Notifier.from_config(config)
 
     # ------------------------------------------------------------------
     #  LIVE mode status — surface this LOUDLY so nobody assumes they're
@@ -963,7 +982,7 @@ def main() -> None:
             from scripts.paper_trading_engine import main as paper_main
             import concurrent.futures
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            fut = pool.submit(paper_main)
+            fut = pool.submit(paper_main, _notifier)
             try:
                 fut.result(timeout=10)
             except concurrent.futures.TimeoutError:
@@ -975,6 +994,26 @@ def main() -> None:
             logger.info("Paper engine state restored — positions recovered, TP/SL checked")
         except Exception as exc:
             logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
+
+        # Reconcile accounting files: detect stale equity, mismatched
+        # initial_balance, invalid profit_factor, and repair in-place.
+        try:
+            from scripts.accounting_reconcile import reconcile
+            findings = reconcile(logger_obj=logger)
+            if findings.get("repairs_applied", 0) > 0:
+                logger.info(
+                    f"Accounting reconciliation applied "
+                    f"{findings['repairs_applied']} repair(s)"
+                )
+        except Exception as exc:
+            logger.warning(f"Accounting reconciliation failed (non-fatal): {exc}")
+
+        # Send BUY notifications for any open positions from prior sessions
+        # that weren't notified yet (deduplicated via data/.notified_buys).
+        try:
+            _notify_existing_positions(logger, _notifier)
+        except Exception as exc:
+            logger.debug(f"Notify existing positions failed (non-fatal): {exc}")
     else:
         logger.info("Live mode — skipping paper engine startup")
 
@@ -1063,7 +1102,7 @@ def main() -> None:
             _monitor_interval += 1
             if _monitor_interval >= 60:
                 _monitor_interval = 0
-                _monitor_positions(logger, config, center)
+                _monitor_positions(logger, _notifier, center)
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():
@@ -1106,6 +1145,12 @@ def main() -> None:
 
     # Signal all workers to stop immediately
     shutdown.set()
+
+    # Send bot_stopped notification BEFORE stopping workers
+    try:
+        _notifier.notify_bot_stopped(cycles=0, balance=config.account_balance)
+    except Exception:
+        pass
 
     # Stop Telegram command center first (stop polling loop immediately)
     if center:

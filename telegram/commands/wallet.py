@@ -35,7 +35,10 @@ class WalletCommand(BaseCommand):
             bal = pb.get("final_balance", 0.0)
             eq = pb.get("final_equity", 0.0)
             net_pnl = pb.get("net_pnl", 0.0)
-            total_return_pct = pb.get("total_return_pct", 0.0)
+            initial = pb.get("initial_balance", 10_000.0)
+            total_return_pct = (
+                ((eq - initial) / initial * 100.0) if initial > 0 else 0.0
+            )
             win_rate = pb.get("win_rate", 0.0)
             total_trades = pb.get("total_trades", 0)
 

@@ -133,10 +133,6 @@ class MetricsManager:
         equity = pb.get("final_equity", bal)
         unrealized = pb.get("unrealized_pnl", 0.0)
         net = pb.get("net_pnl", realized + unrealized)
-        total_return_pct = pb.get(
-            "total_return_pct",
-            ((equity - initial) / initial * 100.0) if initial > 0 else 0.0,
-        )
 
         open_count = self.open_positions_count()
 
@@ -148,9 +144,6 @@ class MetricsManager:
             unrealized = 0.0
             net = realized
             equity = bal
-            total_return_pct = (
-                ((equity - initial) / initial * 100.0) if initial > 0 else 0.0
-            )
 
         # position_value is derived from the authoritative equity/balance
         # (equity == balance + position_value by construction in the
@@ -158,6 +151,14 @@ class MetricsManager:
         # from positions.json, so it can never disagree with equity/exposure.
         position_value = equity - bal
         exposure_pct = (position_value / equity * 100.0) if equity > 0 else 0.0
+
+        # Return percentage is ALWAYS computed from equity, never from
+        # final_balance or from a stale file value.  This guarantees:
+        #   total_return_pct == ((equity - initial) / initial) * 100
+        # even when open positions exist (equity includes unrealized PnL).
+        total_return_pct = (
+            ((equity - initial) / initial * 100.0) if initial > 0 else 0.0
+        )
 
         return AccountSnapshot(
             balance=bal,
