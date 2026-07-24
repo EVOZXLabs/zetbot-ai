@@ -188,7 +188,7 @@ class MetricsManager:
         pb = self._read_balance_pb()
         cash = pb.get("final_balance", 0.0)
         realized = pb.get("realized_pnl", 0.0)
-        initial = pb.get("initial_balance", 10_000.0)
+        initial = pb.get("initial_balance", 0.0)
         open_positions = self.open_positions()
 
         return self.compute_snapshot(

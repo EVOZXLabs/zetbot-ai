@@ -30,7 +30,7 @@ class BalanceCommand(BaseCommand):
             realized_pnl = pb.get("realized_pnl", 0.0)
             unrealized_pnl = pb.get("unrealized_pnl", 0.0)
             net_pnl = pb.get("net_pnl", 0.0)
-            initial = pb.get("initial_balance", 10_000.0)
+            initial = pb.get("initial_balance", 0.0)
             total_return_pct = (
                 ((eq - initial) / initial * 100.0) if initial > 0 else 0.0
             )

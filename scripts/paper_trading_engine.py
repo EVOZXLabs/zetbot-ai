@@ -1120,7 +1120,7 @@ class PaperExport:
         snapshot = MetricsManager.compute_snapshot(
             cash=data.get("final_balance", 0.0),
             realized_pnl=data.get("realized_pnl", 0.0),
-            initial_balance=data.get("initial_balance", 10_000.0),
+            initial_balance=data.get("initial_balance", 0.0),
             open_positions=open_positions,
             total_trades=data.get("total_trades", 0),
             winning_trades=data.get("winning_trades", 0),

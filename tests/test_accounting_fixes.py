@@ -189,6 +189,46 @@ class TestReturnPercentageAlwaysFromEquity:
         a = _mgr(tmp_path).account()
         assert a.total_return_pct == 0.0
 
+    def test_no_10000_fallback_when_initial_missing(self, tmp_path: Any) -> None:
+        """When initial_balance is missing from paper_balance.json, return
+        must NOT assume $10,000 — must use 0 (data not available) instead."""
+        _write_positions(tmp_path, [
+            _open_pos(entry=100_000, current=101_000, unrealized=100),
+        ])
+        pb = {
+            "final_balance": 5_900.0,
+            "final_equity": 6_073.82,
+            "realized_pnl": 81.41,
+            "unrealized_pnl": -7.59,
+            "net_pnl": 73.82,
+            "total_trades": 1,
+            "total_return_pct": 999.0,
+        }
+        with open(tmp_path / "paper_balance.json", "w") as f:
+            json.dump(pb, f)
+
+        a = _mgr(tmp_path).account()
+        assert a.initial_balance == 0.0, (
+            "Must NOT default to 10000 when initial_balance is missing"
+        )
+        assert a.total_return_pct == 0.0, (
+            "Return must be 0 when initial_balance is unknown"
+        )
+
+    def test_initial_balance_6000_net_pnl_73_82(self, tmp_path: Any) -> None:
+        """Given initial_balance=6000 and net_pnl=73.82, return must be ~+1.23%.
+        Validates that the $10k hardcoded fallback is not used."""
+        equity = 6_073.82  # initial + net_pnl: 6000 + 73.82
+        _write_pb(
+            tmp_path, initial=6_000, balance=equity, equity=equity,
+            realized=73.82, unrealized=0, net=73.82,
+        )
+        _write_positions(tmp_path, [])
+
+        a = _mgr(tmp_path).account()
+        assert a.initial_balance == 6000.0
+        assert a.total_return_pct == pytest.approx(1.2303, abs=0.01)
+
     def test_fallback_path_also_recomputes(self, tmp_path: Any) -> None:
         """Fallback balance command path also recomputes return %."""
         _write_pb(
@@ -202,7 +242,7 @@ class TestReturnPercentageAlwaysFromEquity:
         pb = json.loads((tmp_path / "paper_balance.json").read_text())
         bal = pb.get("final_balance", 0.0)
         eq = pb.get("final_equity", 0.0)
-        initial = pb.get("initial_balance", 10_000.0)
+        initial = pb.get("initial_balance", 0.0)
         total_return_pct = (
             ((eq - initial) / initial * 100.0) if initial > 0 else 0.0
         )
@@ -246,7 +286,7 @@ class TestEquityAfterClosure:
         remaining_unrealized = -200.0
         # POS_B: entry=100_000, qty=0.1, cost_basis=10_000, unrealized=-200
         remaining_position_market_value = 10_000.0 + (-200.0)  # cost_basis + unrealized
-        initial = pb.get("initial_balance", 10_000.0)
+        initial = pb.get("initial_balance", 0.0)
         pb["unrealized_pnl"] = round(remaining_unrealized, 2)
         pb["final_equity"] = round(pb["final_balance"] + remaining_position_market_value, 2)
         pb["net_pnl"] = round(pb["realized_pnl"] + remaining_unrealized, 2)

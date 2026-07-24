@@ -87,6 +87,7 @@ class Position:
     floating_pnl: float
     floating_pnl_pct: float
     realized_pnl: float
+    unrealized_pnl: float
     total_pnl: float
     highest_price: float
     lowest_price: float
@@ -351,6 +352,7 @@ class PositionSimulator:
             floating_pnl=round(total_pnl, 2),
             floating_pnl_pct=round(fl_pnl_pct, 2),
             realized_pnl=round(realized, 2),
+            unrealized_pnl=round(unrealized, 2),
             total_pnl=round(total_pnl, 2),
             highest_price=round(highest, 8),
             lowest_price=round(lowest, 8),
@@ -553,7 +555,7 @@ class PositionExport:
             "position_size_usdt", "quantity",
             "remaining_pct", "remaining_qty",
             "floating_pnl", "floating_pnl_pct",
-            "realized_pnl", "total_pnl",
+            "realized_pnl", "unrealized_pnl", "total_pnl",
             "highest_price", "lowest_price",
             "stop_loss", "current_stop",
             "tp1", "tp2", "tp3",
