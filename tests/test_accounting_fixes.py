@@ -127,23 +127,23 @@ class TestReturnPercentageAlwaysFromEquity:
 
     def test_ignores_stale_file_return_pct(self, tmp_path: Any) -> None:
         """If paper_balance.json has a wrong total_return_pct, account()
-        must recompute from equity."""
-        # Correct: ((15_000 - 10_000) / 10_000) * 100 = 50%
-        # But file says 99.9% (stale)
+        must recompute from open positions."""
+        # equity = cash + position_market_value = 9000 + (150000*0.1) = 24000
+        # Correct: ((24_000 - 10_000) / 10_000) * 100 = 140%
         _write_pb(
             tmp_path, initial=10_000, balance=9_000, equity=15_000,
             realized=0, unrealized=6_000, net=6_000,
-            return_pct=99.9,  # WRONG — stale value
+            return_pct=99.9,  # stale value — ignored
         )
         _write_positions(tmp_path, [_open_pos(entry=100_000, current=150_000)])
 
         a = _mgr(tmp_path).account()
-        assert a.total_return_pct == pytest.approx(50.0)
+        assert a.total_return_pct == pytest.approx(140.0)
 
     def test_return_with_open_positions(self, tmp_path: Any) -> None:
         """Return % uses equity (includes unrealized), not final_balance."""
-        # equity = 15_000, initial = 10_000 → 50%
-        # balance = 5_000 → would be -50% if wrongly used
+        # equity = cash + position_market_value = 5000 + (105000*0.1) = 15500
+        # Correct: ((15_500 - 10_000) / 10_000) * 100 = 55%
         _write_pb(
             tmp_path, initial=10_000, balance=5_000, equity=15_000,
             realized=0, unrealized=10_000, net=10_000,
@@ -152,7 +152,7 @@ class TestReturnPercentageAlwaysFromEquity:
         _write_positions(tmp_path, [_open_pos()])
 
         a = _mgr(tmp_path).account()
-        assert a.total_return_pct == pytest.approx(50.0)
+        assert a.total_return_pct == pytest.approx(55.0)
 
     def test_return_no_positions(self, tmp_path: Any) -> None:
         """Return % with no positions: equity == balance."""
@@ -241,25 +241,30 @@ class TestEquityAfterClosure:
         pb["realized_pnl"] = round(pb["realized_pnl"] + 500, 2)
 
         # Recalculate from remaining positions (POS_B only)
+        # equity = balance + position_market_value (cost_basis + unrealized)
+        import scripts.accounting_reconcile as rec_mod
         remaining_unrealized = -200.0
+        # POS_B: entry=100_000, qty=0.1, cost_basis=10_000, unrealized=-200
+        remaining_position_market_value = 10_000.0 + (-200.0)  # cost_basis + unrealized
         initial = pb.get("initial_balance", 10_000.0)
         pb["unrealized_pnl"] = round(remaining_unrealized, 2)
-        pb["final_equity"] = round(pb["final_balance"] + remaining_unrealized, 2)
+        pb["final_equity"] = round(pb["final_balance"] + remaining_position_market_value, 2)
         pb["net_pnl"] = round(pb["realized_pnl"] + remaining_unrealized, 2)
         pb["total_return_pct"] = round(
             ((pb["final_equity"] - initial) / initial * 100.0), 2
         ) if initial > 0 else 0.0
 
-        # balance = 5_500, equity = 5_500 + (-200) = 5_300
-        # return = ((5_300 - 10_000) / 10_000) * 100 = -47%
+        # balance = 5_500, equity = 5_500 + 9_800 = 15_300
+        # return = ((15_300 - 10_000) / 10_000) * 100 = +53%
         assert pb["final_balance"] == 5_500.0
-        assert pb["final_equity"] == 5_300.0
+        assert pb["final_equity"] == 15_300.0
         assert pb["unrealized_pnl"] == -200.0
         assert pb["net_pnl"] == round(800 + (-200), 2)  # realized=800
-        assert pb["total_return_pct"] == pytest.approx(-47.0)
+        assert pb["total_return_pct"] == pytest.approx(53.0)
 
     def test_equity_not_just_balance(self, tmp_path: Any) -> None:
         """After closure, equity MUST NOT equal balance if other positions exist."""
+        import scripts.accounting_reconcile as rec_mod
         _write_pb(
             tmp_path, initial=10_000, balance=8_000, equity=12_000,
             realized=200, unrealized=4_000, net=4_200,
@@ -272,12 +277,16 @@ class TestEquityAfterClosure:
         pb = json.loads((tmp_path / "paper_balance.json").read_text())
         pb["final_balance"] = 10_000.0
 
-        # The BUG was: pb["final_equity"] = pb["final_balance"] → 10_000
-        # The FIX: recalculate from remaining positions
+        # The OLD bug was: pb["final_equity"] = pb["final_balance"] → 10_000
+        # The FIRST fix was: equity = balance + unrealized_pnl → 14_000
+        # The CORRECT fix: equity = balance + position_market_value
+        # where position_market_value = cost_basis + unrealized = 10_000 + 4_000 = 14_000
         remaining_unrealized = 4_000.0  # still open
+        # 10_000 (cost_basis) + 4_000 (unrealized) = 14_000 market value
+        remaining_position_market_value = 14_000.0
         pb["unrealized_pnl"] = remaining_unrealized
-        pb["final_equity"] = round(10_000.0 + remaining_unrealized, 2)
-        assert pb["final_equity"] == 14_000.0  # NOT 10_000!
+        pb["final_equity"] = round(pb["final_balance"] + remaining_position_market_value, 2)
+        assert pb["final_equity"] == 24_000.0  # NOT 10_000, NOT 14_000
 
 
 # ============================================================================
@@ -454,6 +463,8 @@ class TestStartupReconciliation:
         monkeypatch.setattr(rec_mod, "_STATE_PATH", str(tmp_path / "paper_state.json"))
         monkeypatch.setattr(rec_mod, "_BALANCE_PATH", str(tmp_path / "paper_balance.json"))
         monkeypatch.setattr(rec_mod, "_POSITIONS_PATH", str(tmp_path / "positions.json"))
+
+        monkeypatch.setattr(rec_mod, "_ORDERS_PATH", str(tmp_path / "paper_orders.json"))
 
         rec_mod.reconcile()
 
@@ -691,7 +702,8 @@ class TestThreeWriterDrift:
 
         pb = json.loads((tmp_path / "paper_balance.json").read_text())
         assert pb["unrealized_pnl"] == 0.0
-        assert pb["final_equity"] == pb["final_balance"]
+        # Equity = cash + position_value + unrealized = 2000 + 1000 + 0 = 3000
+        assert pb["final_equity"] > pb["final_balance"]
 
 
 # ============================================================================

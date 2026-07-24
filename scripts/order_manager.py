@@ -874,11 +874,9 @@ def _sync_paper_files(
 
     if side == "BUY":
         pb["final_balance"] = round(pb.get("final_balance", 10000.0) - cost, 2)
-        pb["final_equity"] = pb["final_balance"]
     elif side == "SELL":
         proceeds = amount * price - fee
         pb["final_balance"] = round(pb.get("final_balance", 10000.0) + proceeds, 2)
-        pb["final_equity"] = pb["final_balance"]
         pb["total_trades"] = pb.get("total_trades", 0) + 1
         if pnl > 0:
             pb["winning_trades"] = pb.get("winning_trades", 0) + 1
@@ -887,7 +885,39 @@ def _sync_paper_files(
         total = pb.get("total_trades", 0)
         pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
         pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
-        pb["net_pnl"] = round(pb.get("net_pnl", 0.0) + pnl, 2)
+
+    # Use canonical function for ALL derived accounting metrics
+    from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+
+    pos_path = f"{data_dir}/positions.json"
+    open_positions: list[dict[str, Any]] = []
+    try:
+        with open(pos_path) as f:
+            pos_data = json.load(f)
+        open_positions = [
+            p for p in (pos_data.get("positions", []) if pos_data else [])
+            if p.get("status") == "OPEN"
+        ]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    snapshot = MetricsManager.compute_snapshot(
+        cash=pb.get("final_balance", 0.0),
+        realized_pnl=pb.get("realized_pnl", 0.0),
+        initial_balance=pb.get("initial_balance", 10_000.0),
+        open_positions=open_positions,
+        total_trades=pb.get("total_trades", 0),
+        winning_trades=pb.get("winning_trades", 0),
+        losing_trades=pb.get("losing_trades", 0),
+        win_rate=pb.get("win_rate", 0.0),
+        profit_factor=pb.get("profit_factor", 0.0),
+        gross_profit=pb.get("gross_profit", 0.0),
+        gross_loss=pb.get("gross_loss", 0.0),
+    )
+    pb["final_equity"] = round(snapshot.equity, 2)
+    pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
+    pb["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
+    pb["net_pnl"] = round(snapshot.net_pnl, 2)
 
     try:
         with open(bal_path, "w") as f:

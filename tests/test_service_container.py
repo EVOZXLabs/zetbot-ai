@@ -454,7 +454,7 @@ class TestMetricsAccountSync:
         assert c.metrics.balance() == 10000.0
 
     def test_equity_includes_unrealized_when_open_positions(self) -> None:
-        """With open positions, equity = balance + unrealized PnL."""
+        """With open positions, equity = balance + position_market_value."""
         import json
         os.makedirs("data", exist_ok=True)
         with open("data/paper_balance.json", "w") as f:
@@ -469,12 +469,15 @@ class TestMetricsAccountSync:
             json.dump({"positions": [{
                 "symbol": "BTC/USDT", "status": "OPEN",
                 "entry_price": 60000.0, "current_price": 61000.0,
+                "quantity": 0.1, "remaining_qty": 0.1,
+                "unrealized_pnl": 500.0, "realized_pnl": 0.0,
             }]}, f)
 
         c = _make_container()
         assert c.metrics.open_positions_count() == 1
         assert c.metrics.unrealized_pnl() == 500.0
-        assert c.metrics.equity() == 10500.0  # 10000 + 500
+        # equity = cash + (current_price * remaining_qty) = 10000 + (61000*0.1) = 16100
+        assert c.metrics.equity() == 16100.0
 
     def test_summary_syncs_unrealized_to_zero_when_no_open(self) -> None:
         """summary() should reflect the same sync logic."""

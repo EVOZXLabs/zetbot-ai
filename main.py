@@ -285,6 +285,12 @@ def _notify_closure(
 ) -> None:
     """Send Telegram notification when a position closes."""
     exit_reason = exit_reason_map.get(new_pos.status, "Strategy Exit")
+    # "CLOSED" can be from TP (tp3_hit) or trend_exit — use tp3_hit + PnL
+    if exit_reason == "Take Profit":
+        if not new_pos.tp3_hit:
+            exit_reason = "Strategy Exit"
+        elif (new_pos.total_pnl or 0) < 0:
+            exit_reason = "Strategy Exit"
     logger.info(
         f"Position {symbol}: {new_pos.status} "
         f"(PnL: ${new_pos.total_pnl:+.2f}, {exit_reason})"
@@ -370,26 +376,39 @@ def _update_paper_on_closure(
     pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
     pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
 
-    # Recalculate unrealized PnL from remaining open positions so
-    # equity is never stale after a closure.
-    remaining_unrealized = 0.0
+    # Use canonical MetricsManager.compute_snapshot() for ALL derived
+    # accounting metrics (equity, unrealized_pnl, net_pnl, return_pct).
+    from scripts.metrics_manager import MetricsManager
+
+    other_open: list[dict[str, Any]] = []
     try:
         with open("data/positions.json") as f:
             pos_data = json.load(f)
-        for p in pos_data.get("positions", []):
-            if p.get("symbol") != symbol and is_open(p.get("status")):
-                remaining_unrealized += p.get("unrealized_pnl", 0.0)
+        other_open = [
+            p for p in pos_data.get("positions", [])
+            if p.get("symbol") != symbol and is_open(p.get("status"))
+        ]
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
     initial = pb.get("initial_balance", 10_000.0)
-    pb["unrealized_pnl"] = round(remaining_unrealized, 2)
-    pb["final_equity"] = round(pb["final_balance"] + remaining_unrealized, 2)
-    pb["net_pnl"] = round(pb["realized_pnl"] + remaining_unrealized, 2)
-    pb["total_return_pct"] = (
-        round(((pb["final_equity"] - initial) / initial * 100.0), 2)
-        if initial > 0 else 0.0
+    snapshot = MetricsManager.compute_snapshot(
+        cash=pb["final_balance"],
+        realized_pnl=pb.get("realized_pnl", 0.0),
+        initial_balance=initial,
+        open_positions=other_open,
+        total_trades=pb.get("total_trades", 0),
+        winning_trades=pb.get("winning_trades", 0),
+        losing_trades=pb.get("losing_trades", 0),
+        win_rate=pb.get("win_rate", 0.0),
+        profit_factor=pb.get("profit_factor", 0.0),
+        gross_profit=pb.get("gross_profit", 0.0),
+        gross_loss=pb.get("gross_loss", 0.0),
     )
+    pb["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
+    pb["final_equity"] = round(snapshot.equity, 2)
+    pb["net_pnl"] = round(snapshot.net_pnl, 2)
+    pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
 
     try:
         with open("data/paper_balance.json", "w") as f:
@@ -462,7 +481,7 @@ def _update_paper_on_closure(
         logger.warning(f"Failed to update paper_orders.json: {exc}")
 
     # Sync paper_state.json so restarted engine doesn't re-close this position
-    _sync_paper_state_on_closure(logger, symbol, pnl)
+    _sync_paper_state_on_closure(logger, symbol, pnl, total_proceeds)
 
     return pnl, pb["final_balance"]
 
@@ -471,14 +490,18 @@ def _sync_paper_state_on_closure(
     logger: Any,
     symbol: str,
     pnl: float,
+    total_proceeds: float = 0.0,
 ) -> None:
-    """Mark position CLOSED in paper_state.json to prevent duplicate restores.
+    """Mark position CLOSED in paper_state.json and update wallet balance.
 
     When the monitor closes a position, paper_balance.json and
     positions.json are updated but paper_state.json is not.  On restart
     the paper trading engine restores stale OPEN VirtualPositions from
     paper_state.json and re-closes them, producing duplicate Telegram
     notifications.  This function patches paper_state.json in-place.
+
+    The wallet balance is also updated so the next pipeline cycle
+    sees the correct cash balance and doesn't drain remaining cash to $0.
     """
     state_path = "data/paper_state.json"
     try:
@@ -491,6 +514,11 @@ def _sync_paper_state_on_closure(
     vp = positions.get(symbol)
     if vp is None or vp.get("status") == "CLOSED":
         return
+
+    # Update wallet balance with proceeds from the closed position
+    # so the paper engine's next cycle sees the correct cash balance.
+    old_balance = state.get("balance", 0.0)
+    state["balance"] = round(old_balance + total_proceeds, 2)
 
     vp["status"] = "CLOSED"
     vp["remaining_qty"] = 0.0
@@ -852,6 +880,7 @@ def main() -> None:
 
     from bot.notifier import Notifier  # noqa: PLC0415
     _notifier = Notifier.from_config(config)
+    container.inject_notifier(_notifier)
 
     # ------------------------------------------------------------------
     #  LIVE mode status — surface this LOUDLY so nobody assumes they're

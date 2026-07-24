@@ -131,7 +131,7 @@ class VirtualWallet:
 
     @property
     def equity(self) -> float:
-        """USDT equity = free balance (spot accounts have no margin)."""
+        """USDT equity (cash only — position value added externally via snapshot)."""
         return self.balance
 
     def reserve(self, amount: float) -> bool:
@@ -1043,6 +1043,10 @@ class PaperExport:
         independently (e.g. adding realized PnL on closure).  Overwriting
         would discard those updates.  We merge: engine metrics replace
         fields the engine owns; fields only in the file are preserved.
+
+        After merge, ALL derived accounting metrics are recomputed via
+        ``MetricsManager.compute_snapshot()`` — the single canonical
+        accounting function — ensuring consistency across all callers.
         """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
@@ -1077,10 +1081,6 @@ class PaperExport:
         engine_realized = metrics.get("realized_pnl", 0.0)
         if file_realized > engine_realized:
             data["realized_pnl"] = file_realized
-            # Re-derive net_pnl with the larger realized component
-            data["net_pnl"] = round(
-                file_realized + metrics.get("unrealized_pnl", 0.0), 2
-            )
 
         # Same for trade counts — monitor may have added closures
         file_trades = existing.get("total_trades", 0)
@@ -1100,6 +1100,40 @@ class PaperExport:
                 round(data["winning_trades"] / total * 100, 2)
                 if total else 0.0
             )
+
+        # After merge, recompute ALL derived metrics via the canonical
+        # function so the file is always internally consistent.
+        from scripts.metrics_manager import MetricsManager
+
+        pos_path = os.path.join(os.path.dirname(path) or ".", "positions.json")
+        open_positions: list[dict[str, Any]] = []
+        try:
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+            open_positions = [
+                p for p in (pos_data.get("positions", []) if pos_data else [])
+                if p.get("status") == "OPEN"
+            ]
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        snapshot = MetricsManager.compute_snapshot(
+            cash=data.get("final_balance", 0.0),
+            realized_pnl=data.get("realized_pnl", 0.0),
+            initial_balance=data.get("initial_balance", 10_000.0),
+            open_positions=open_positions,
+            total_trades=data.get("total_trades", 0),
+            winning_trades=data.get("winning_trades", 0),
+            losing_trades=data.get("losing_trades", 0),
+            win_rate=data.get("win_rate", 0.0),
+            profit_factor=data.get("profit_factor", 0.0),
+            gross_profit=data.get("gross_profit", 0.0),
+            gross_loss=data.get("gross_loss", 0.0),
+        )
+        data["final_equity"] = round(snapshot.equity, 2)
+        data["total_return_pct"] = round(snapshot.total_return_pct, 2)
+        data["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
+        data["net_pnl"] = round(snapshot.net_pnl, 2)
 
         data["generated"] = datetime.now(timezone.utc).isoformat()
         data["equity_history"] = [asdict(s) for s in equity_history]

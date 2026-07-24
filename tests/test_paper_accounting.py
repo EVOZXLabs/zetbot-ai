@@ -560,12 +560,22 @@ class TestPaperStateSyncOnClosure:
         assert eth["remaining_qty"] == 1.0
         assert eth["closure_notified"] is False
 
-    def test_wallet_balance_untouched(self, tmp_path: Any) -> None:
+    def test_wallet_balance_updated_with_proceeds(self, tmp_path: Any) -> None:
+        self._setup(tmp_path)
+        from main import _sync_paper_state_on_closure
+        # total_proceeds of 5420.0 should be added to the 9500.0 balance
+        _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 10.0, 5420.0)
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        assert state["balance"] == 9500.0 + 5420.0
+
+    def test_wallet_balance_zero_proceeds_default(self, tmp_path: Any) -> None:
         self._setup(tmp_path)
         from main import _sync_paper_state_on_closure
         _sync_paper_state_on_closure(MagicMock(), "BTCUSDT", 10.0)
 
         with open("data/paper_state.json") as f:
             state = json.load(f)
-        # Balance is managed elsewhere; this function should not touch it
+        # total_proceeds defaults to 0, so balance stays unchanged
         assert state["balance"] == 9500.0

@@ -109,6 +109,7 @@ class ServiceContainer:
         self._position = _PositionAdapter(self._config_service)
         self._health = None  # created by main.py, injected later
         self._scheduler = None  # created by main.py, injected later
+        self._notifier = None  # injected by main.py after creation
 
         self._bootstrapped = True
 
@@ -119,6 +120,10 @@ class ServiceContainer:
     def inject_scheduler(self, scheduler: Any) -> None:
         """Inject PipelineScheduler after creation."""
         self._scheduler = scheduler
+
+    def inject_notifier(self, notifier: Any) -> None:
+        """Inject centralized Notifier after creation."""
+        self._notifier = notifier
 
     # ------------------------------------------------------------------
     #  Service properties
@@ -205,7 +210,10 @@ class ServiceContainer:
         return self._pipeline
 
     def run_pipeline(self) -> list[Any]:
-        return self.pipeline.run()
+        pipeline = self.pipeline
+        if self._notifier is not None:
+            pipeline.set_notifier(self._notifier)
+        return pipeline.run()
 
     def __repr__(self) -> str:
         return (

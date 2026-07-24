@@ -13,6 +13,9 @@ logs/*.log
 # Runtime data (auto-saved state)
 data/
 
+# Runtime backups (snapshots of auto-saved state)
+backup/
+
 # VSCode
 .vscode/
 

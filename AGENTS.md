@@ -137,13 +137,56 @@ Never leverage.
 
 # Safety
 
-Never place multiple positions simultaneously.
+Never place multiple positions for the same symbol simultaneously.
 
 Always validate balances.
 
 Always validate exchange responses.
 
 Never ignore exceptions.
+
+---
+
+# Risk / Position Sizing Formula
+
+Position sizing in ``scripts/risk_manager.py``:
+
+1. ``MAX_RISK_PER_TRADE_PCT`` = 2.0 % of ``balance`` → risk_amount
+2. ``position_size`` = risk_amount / stop_distance (entry - stop)
+3. ``position_value`` = position_size × entry_price
+4. ``max_position_value`` = available_capital × ``MAX_POSITION_SIZE_PCT`` (0.6 = 60 %)
+5. Final position_value = min(step 3, step 4)
+
+``available_capital`` = balance - sum(already-approved positions). Each position is capped at 60 % of the remaining capital at the time it is approved. Cumulative exposure can therefore exceed 60 % when multiple positions are approved (e.g. 60 % + 60 % of remaining 40 % = 84 % total). This is the intentional configured behavior, not a bug.
+
+---
+
+# Notification Pipeline (BUY_OPENED)
+
+Every new BUY fill MUST send a BUY_OPENED notification:
+
+1. ``scripts/paper_trading_engine.py`` ``_execute_plan()`` calls ``_notify_buy()`` immediately after the position is created (line 650).
+2. ``_notify_buy()`` calls ``notifier.notify_buy_opened()``.
+3. The notifier is threaded through: ``main.py`` → ``container.inject_notifier()`` → ``ServiceContainer`` → ``Pipeline`` → ``paper_trading_engine.main(notifier=…)``.
+4. Notification failures never break trading (caught by ``_notify_buy`` try/except).
+5. Restart recovery sends notifications via ``_notify_existing_positions()``, deduplicated via ``data/.notified_buys``.
+
+---
+
+# Equity / Accounting Rules
+
+Equity calculation invariants:
+
+- equity = cash (``final_balance``) + sum of market values of all OPEN positions
+- market_value of a position = ``current_price × remaining_qty`` (or = ``cost_basis + unrealized_pnl``)
+- position_value = equity - cash (derived, not read from positions.json)
+- exposure_pct = (position_value / equity) × 100
+- total_return_pct = ((equity - initial_balance) / initial_balance) × 100
+- net_pnl = realized_pnl + unrealized_pnl
+
+``scripts/accounting_reconcile.py`` ``correct_equity = cash + position_value + unrealized_pnl``
+``main.py`` ``_update_paper_on_closure`` ``final_equity = final_balance + remaining_position_market_value``
+``scripts/metrics_manager.py`` ``MetricsManager.account()`` reads equity from ``paper_balance.json`` — the single source of truth.
 
 ---
 

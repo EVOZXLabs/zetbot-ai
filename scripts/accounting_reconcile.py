@@ -164,8 +164,16 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
                 }
                 pos_list.append(repaired_pos)
             else:
-                # Mark as OPEN (was incorrectly set to CLOSED)
+                # Repair: restore position data from the order (price,
+                # quantity, and status) so the canonical accounting
+                # function (which reads positions.json) computes
+                # correct equity.
                 pos["status"] = "OPEN"
+                pos["current_price"] = buy_order.get("fill_price", pos.get("entry_price", 0.0))
+                pos["remaining_qty"] = buy_order.get("filled_quantity", pos.get("quantity", 0.0))
+                pos["unrealized_pnl"] = 0.0
+                pos["realized_pnl"] = 0.0
+                pos["total_pnl"] = 0.0
 
     if open_by_orders:
         log.info(
@@ -190,25 +198,30 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
         log.info("[RECONCILE] Repaired positions.json for three-writer drift")
 
     # ------------------------------------------------------------------
-    #  2. Rebuild equity from current position state
+    #  2. Rebuild equity via canonical MetricsManager.compute_snapshot()
     # ------------------------------------------------------------------
     if pb:
+        from scripts.metrics_manager import MetricsManager
+
         cash = pb.get("final_balance", 0.0)
+        realized = pb.get("realized_pnl", 0.0)
         positions = pos_list  # use the (possibly repaired) list
         open_positions = [p for p in positions if is_open(p.get("status"))]
 
-        # Compute unrealized PnL from remaining open positions
-        remaining_unrealized = sum(
-            p.get("unrealized_pnl", 0.0) for p in open_positions
-        )
-        position_value = sum(
-            p.get("position_size_usdt", 0)
-            or p.get("cost_basis", 0)
-            or (p.get("entry_price", 0) * p.get("quantity", 0))
-            for p in open_positions
+        snapshot = MetricsManager.compute_snapshot(
+            cash=cash,
+            realized_pnl=realized,
+            initial_balance=initial,
+            open_positions=open_positions,
+            total_trades=pb.get("total_trades", 0),
+            winning_trades=pb.get("winning_trades", 0),
+            losing_trades=pb.get("losing_trades", 0),
+            win_rate=pb.get("win_rate", 0.0),
+            profit_factor=pb.get("profit_factor", 0.0),
+            gross_profit=pb.get("gross_profit", 0.0),
+            gross_loss=pb.get("gross_loss", 0.0),
         )
 
-        correct_equity = round(cash + remaining_unrealized, 2)
         file_equity = pb.get("final_equity", cash)
 
         # Detect stale equity: file says equity == cash but positions exist
@@ -217,17 +230,14 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
             log.warning(
                 f"[RECONCILE] Stale equity detected: file={file_equity} "
                 f"but {len(open_positions)} open position(s) with "
-                f"unrealized=${remaining_unrealized:+.2f} — repairing"
+                f"unrealized=${snapshot.unrealized_pnl:+.2f} — repairing"
             )
 
-        # Always reconcile to correct values
-        pb["unrealized_pnl"] = round(remaining_unrealized, 2)
-        pb["final_equity"] = correct_equity
-        pb["net_pnl"] = round(pb.get("realized_pnl", 0.0) + remaining_unrealized, 2)
-        pb["total_return_pct"] = (
-            round(((correct_equity - initial) / initial * 100.0), 2)
-            if initial > 0 else 0.0
-        )
+        # Write computed values from canonical snapshot
+        pb["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
+        pb["final_equity"] = round(snapshot.equity, 2)
+        pb["net_pnl"] = round(snapshot.net_pnl, 2)
+        pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
 
         # ------------------------------------------------------------------
         #  3. Fix Infinity / NaN profit_factor
@@ -253,9 +263,9 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
 
         log.info(
             f"[RECONCILE] Accounting reconciled: "
-            f"balance=${cash:,.2f} equity=${correct_equity:,.2f} "
-            f"unrealized=${remaining_unrealized:+.2f} "
-            f"return={pb['total_return_pct']:+.2f}% "
+            f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
+            f"unrealized=${snapshot.unrealized_pnl:+.2f} "
+            f"return={snapshot.total_return_pct:+.2f}% "
             f"({len(open_positions)} open, "
             f"{findings['repairs_applied']} repairs)"
         )

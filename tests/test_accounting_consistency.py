@@ -324,31 +324,22 @@ class TestAccountingInvariants:
 
         assert 0.0 <= a.exposure_pct <= 100.0
 
-    def test_account_never_recomputes_from_positions_json(self, tmp_path: Any) -> None:
-        """If positions.json's market data disagrees with paper_balance.json,
-        MetricsManager must trust paper_balance.json — not positions.json.
-
-        This is the regression test for the duplicate-accounting bug:
-        MetricsManager.account() used to recompute unrealized_pnl/position_value
-        from positions.json's current_price, independently of the authoritative
-        figures scripts.paper_trading_engine already wrote to paper_balance.json.
-        """
+    def test_account_recomputes_from_positions_json(self, tmp_path: Any) -> None:
+        """MetricsManager.compute_snapshot() derives equity/market-value from
+        open positions — the single canonical accounting function."""
         _write_pb(
             tmp_path, final_balance=9_000.0, final_equity=15_000.0,
             realized_pnl=0.0, unrealized_pnl=6_000.0, net_pnl=6_000.0,
         )
-        # positions.json current_price implies a wildly different market value
-        # (105_000 × 0.1 = 10_500) than paper_balance.json's authoritative
-        # figures (position_value = 15_000 - 9_000 = 6_000). account() must
-        # ignore positions.json's price data entirely for these figures.
         pos = _open_pos(entry_price=100_000, current_price=105_000, quantity=0.1, remaining_qty=0.1)
         _write_positions(tmp_path, [pos])
 
         a = self._mgr(tmp_path).account()
 
-        assert a.equity == pytest.approx(15_000.0)
-        assert a.position_value == pytest.approx(6_000.0)
-        assert a.unrealized_pnl == pytest.approx(6_000.0)
+        # equity = cash + position_market_value = 9000 + (105000 * 0.1) = 19500
+        assert a.equity == pytest.approx(19_500.0)
+        assert a.position_value == pytest.approx(10_500.0)
+        assert a.unrealized_pnl == pytest.approx(500.0)
 
 
 # ============================================================================
