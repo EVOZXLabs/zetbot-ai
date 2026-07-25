@@ -151,24 +151,24 @@ class TelegramNotifier:
     ) -> None:
         """Notify that a BUY position was opened."""
         from telegram.ui import (
-            header, SEPARATOR, wib_now, progress_bar,
-            ai_insight, build_message,
+            compact_header, wib_now, ai_insight,
+            detail_block, build_message,
         )
         from telegram.formatter import fmt_price as fp
 
         sl_pct = ((stop_loss - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
         tp_pct = ((take_profit - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+        where = " · ".join(p for p in (exchange, timeframe) if p)
 
         text = build_message(
-            header(),
-            f"🟢 *BUY OPENED*\n{symbol} • {exchange} • {timeframe}",
-            f"{SEPARATOR}\n💰 Entry\n{fp(entry_price)}\n\n"
-            f"📍 Current\n{fp(entry_price)}",
-            f"{SEPARATOR}\n🛑 Stop Loss\n{sl_pct:+.2f}%\n\n"
-            f"🎯 Take Profit\n{tp_pct:+.2f}%",
-            f"{SEPARATOR}\n🧠 *AI Insight*\n"
-            f"{ai_insight(reasons=reasons, is_buy=True)}",
-            f"{SEPARATOR}\n🕐 {wib_now()}",
+            compact_header(),
+            f"🟢 *BUY OPENED — {symbol}*" + (f"\n{where}" if where else ""),
+            f"Entry {fp(entry_price)}\n{ai_insight(reasons=reasons, is_buy=True)}",
+            detail_block([
+                f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
+                f"Take Profit  {fp(take_profit)}  ({tp_pct:+.2f}%)",
+            ]),
+            wib_now().replace("\n", ", "),
         )
         self._send(text)
 
@@ -185,17 +185,11 @@ class TelegramNotifier:
     ) -> None:
         """Notify that a trade was closed."""
         from telegram.ui import (
-            header, SEPARATOR, wib_now,
-            pnl_emoji, ai_insight, build_message,
+            compact_header, wib_now, pnl_emoji,
+            ai_insight, detail_block, build_message,
         )
         from telegram.formatter import fmt_price as fp, fmt_holding
 
-        emoji_map = {
-            "Take Profit": "🟢",
-            "Stop Loss": "🔴",
-            "Strategy Exit": "⚪",
-        }
-        reason_emoji = emoji_map.get(exit_reason, "❓")
         holding_str = fmt_holding(holding_time.total_seconds())
 
         roi_pct = (
@@ -205,26 +199,25 @@ class TelegramNotifier:
         if roi_pct == 0.0:
             roi_pct = pnl_pct
 
-        blocks = [
-            header(),
-            f"🔴 *POSITION CLOSED*\n{symbol}" if symbol else f"🔴 *POSITION CLOSED*",
-            f"{SEPARATOR}\n"
-            f"💰 Entry\n{fp(entry_price)}\n\n"
-            f"🚪 Exit\n{fp(exit_price)}",
-            f"{SEPARATOR}\n"
-            f"📈 Profit\n{pnl_emoji(pnl_usd)} ${pnl_usd:+,.2f} ({roi_pct:+.2f}%)\n\n"
-            f"🕒 Held\n{holding_str}",
-        ]
-
         insight = ai_insight(
             reasons=[exit_reason],
             is_buy=False,
             exit_reason=exit_reason,
         )
-        blocks.append(f"{SEPARATOR}\n🧠 *AI Insight*\n{insight}")
-        blocks.append(f"{SEPARATOR}\n💹 Balance\n${balance:,.2f}")
+        title = symbol or "Position"
 
-        text = build_message(*blocks)
+        text = build_message(
+            compact_header(),
+            f"{pnl_emoji(pnl_usd)} *POSITION CLOSED — {title}*\n"
+            f"Profit ${pnl_usd:+,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
+            f"🧠 AI Insight: {insight}\nBalance now ${balance:,.2f}",
+            detail_block([
+                f"Entry  {fp(entry_price)}",
+                f"Exit   {fp(exit_price)}",
+                f"Reason {exit_reason}",
+            ]),
+            wib_now().replace("\n", ", "),
+        )
         self._send(text)
 
     def state_restored(

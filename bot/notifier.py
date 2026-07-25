@@ -166,8 +166,8 @@ class Notifier:
         logger.info("[TG] Sending notification: BUY_OPENED %s", symbol)
         try:
             from telegram.ui import (
-                header, SEPARATOR, wib_now, progress_bar,
-                ai_insight, build_message,
+                compact_header, wib_now, ai_insight,
+                detail_block, build_message,
             )
             from telegram.formatter import fmt_price as fp
 
@@ -175,17 +175,18 @@ class Notifier:
             tp_pct = ((take_profit - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
 
             reasons = reasons or ["Pipeline execution"]
+            where = " · ".join(p for p in (exchange, timeframe) if p)
 
             text = build_message(
-                header(),
-                f"🟢 *BUY OPENED*\n{symbol} • {exchange} • {timeframe}",
-                f"{SEPARATOR}\n💰 Entry\n{fp(entry_price)}\n\n"
-                f"📍 Current\n{fp(entry_price)}",
-                f"{SEPARATOR}\n🛑 Stop Loss\n{sl_pct:+.2f}%\n\n"
-                f"🎯 Take Profit\n{tp_pct:+.2f}%",
-                f"{SEPARATOR}\n🧠 *AI Insight*\n"
-                f"{ai_insight(reasons=reasons, is_buy=True)}",
-                f"{SEPARATOR}\n🕐 {wib_now()}",
+                compact_header(),
+                f"🟢 *BUY OPENED — {symbol}*"
+                + (f"\n{where}" if where else ""),
+                f"Entry {fp(entry_price)}\n{ai_insight(reasons=reasons, is_buy=True)}",
+                detail_block([
+                    f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
+                    f"Take Profit  {fp(take_profit)}  ({tp_pct:+.2f}%)",
+                ]),
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -211,20 +212,15 @@ class Notifier:
         logger.info("[TG] Sending notification: POSITION_CLOSED %s (PnL: $%.2f)", symbol, pnl)
         try:
             from telegram.ui import (
-                header, SEPARATOR, wib_now,
-                pnl_emoji, ai_insight, build_message,
+                compact_header, wib_now, pnl_emoji,
+                ai_insight, detail_block, build_message,
             )
             from telegram.formatter import fmt_price as fp, fmt_holding
 
             if holding_time is None:
                 holding_time = timedelta()
 
-            emoji_map = {
-                "Take Profit": "🟢",
-                "Stop Loss": "🔴",
-                "Strategy Exit": "⚪",
-            }
-            reason_emoji = emoji_map.get(exit_reason, "❓")
+            result_emoji = pnl_emoji(pnl)
             holding_str = fmt_holding(holding_time.total_seconds())
 
             roi_pct = (
@@ -240,19 +236,20 @@ class Notifier:
                 exit_reason=exit_reason,
             )
 
-            blocks = [
-                header(),
-                f"🔴 *POSITION CLOSED*\n{symbol}" if symbol else f"🔴 *POSITION CLOSED*",
-                f"{SEPARATOR}\n"
-                f"💰 Entry\n{fp(entry_price)}\n\n"
-                f"🚪 Exit\n{fp(exit_price)}",
-                f"{SEPARATOR}\n"
-                f"📈 Profit\n{pnl_emoji(pnl)} ${pnl:+,.2f} ({roi_pct:+.2f}%)\n\n"
-                f"🕒 Held\n{holding_str}",
-                f"{SEPARATOR}\n🧠 *AI Insight*\n{insight}",
-                f"{SEPARATOR}\n💹 Balance\n${balance:,.2f}",
-            ]
-            text = build_message(*blocks)
+            title = f"{symbol}" if symbol else "Position"
+
+            text = build_message(
+                compact_header(),
+                f"{result_emoji} *POSITION CLOSED — {title}*\n"
+                f"Profit ${pnl:+,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
+                f"🧠 AI Insight: {insight}\nBalance now ${balance:,.2f}",
+                detail_block([
+                    f"Entry  {fp(entry_price)}",
+                    f"Exit   {fp(exit_price)}",
+                    f"Reason {exit_reason}",
+                ]),
+                wib_now().replace("\n", ", "),
+            )
             return self._send(text)
         except Exception as exc:
             logger.warning("[TG] Failed to send close notification: %s", exc)
