@@ -181,6 +181,123 @@ class TestRiskManagerCapitalTracking:
 
 
 # ===================================================================
+#  PORTFOLIO-WIDE exposure cap (the bug from the audit)
+#
+#  Symptom: Cash=$0, In Position=$5,805, Exposure=100% even though
+#  MAX_POSITION_SIZE_PCT=60%. Root cause: MAX_POSITION_SIZE_PCT was
+#  applied per-position against a shrinking "remaining cash" pool
+#  instead of against total equity, and positions already open from
+#  earlier pipeline cycles were never subtracted from the budget.
+# ===================================================================
+
+
+class TestPortfolioExposureCap:
+    """Total value of ALL open positions must never exceed
+    MAX_POSITION_SIZE_PCT * equity — not just each position individually,
+    and not just within a single run.
+    """
+
+    def test_second_position_rejected_or_reduced_within_one_run(self):
+        """equity=$10,000, cap=60% -> total open positions <= $6,000.
+
+        First position: $4,000 (within cap, plenty of room).
+        Second position: sizing must be reduced so cumulative <= $6,000
+        (or reduced to ~$0 / rejected by MIN_POSITION_SIZE_USD).
+        """
+        equity = 10_000.0
+        cap_pct = 0.6
+        manager = RiskManager(
+            balance=equity, equity=equity,
+            max_position_size_pct=cap_pct, max_positions=5,
+        )
+
+        # --- Position 1: force position_value == $4,000 directly via
+        # the sizer, then record it the same way run() does.
+        max_pos_value_1 = manager._max_new_position_value()
+        assert max_pos_value_1 == pytest.approx(6_000.0)  # nothing open yet
+
+        pos1_value = 4_000.0
+        assert pos1_value <= max_pos_value_1
+        manager._used_capital += pos1_value
+
+        # --- Position 2: remaining budget must now be capped to
+        # $6,000 - $4,000 = $2,000 (NOT 60% of remaining cash, which
+        # would incorrectly allow ($10,000-$4,000)*0.6 = $3,600).
+        max_pos_value_2 = manager._max_new_position_value()
+        assert max_pos_value_2 == pytest.approx(2_000.0), (
+            f"expected remaining budget of $2,000, got ${max_pos_value_2:,.2f}"
+        )
+
+        # Attempt to size a second position that would naturally want
+        # to be large (tight stop => big notional pre-cap).
+        entry, stop = 50_000.0, 49_750.0  # 0.5% stop -> large uncapped size
+        size, risk, pos2_value = PositionSizer.calculate(
+            manager.balance, manager.risk_per_trade, entry, stop,
+            max_position_value=max_pos_value_2,
+        )
+
+        total_exposure = pos1_value + pos2_value
+        assert total_exposure <= 6_000.0 + 1e-6, (
+            f"total exposure ${total_exposure:,.2f} exceeds "
+            f"60% cap of $6,000"
+        )
+        # Either meaningfully reduced, or effectively rejected (~$0 /
+        # below the exchange minimum so the validator would reject it).
+        assert pos2_value <= 2_000.0 + 1e-6
+
+    def test_existing_exposure_from_previous_cycle_is_respected(self):
+        """A position already open from a PREVIOUS pipeline run must
+        count against the cap for THIS run's new positions.
+
+        This is the exact bug: previously, `_used_capital` reset to 0
+        every run, so pre-existing open exposure was invisible.
+        """
+        equity = 10_000.0
+        manager = RiskManager(
+            balance=6_000.0,          # free cash left after position 1
+            equity=equity,
+            existing_exposure=4_000.0,  # position 1, opened last cycle
+            max_position_size_pct=0.6,
+            max_positions=5,
+        )
+
+        max_new = manager._max_new_position_value()
+        # Budget left under the 60% ($6,000) cap = 6000 - 4000 = 2000
+        assert max_new == pytest.approx(2_000.0)
+
+    def test_full_exposure_bug_scenario(self):
+        """Regression test for the reported bug:
+        Cash=$0, In Position=$5,805, Exposure=100%, cap=60%.
+
+        Once exposure has already reached (or exceeded) the cap, the
+        risk manager must allow NO further new position value.
+        """
+        manager = RiskManager(
+            balance=0.0,
+            equity=5_805.0,
+            existing_exposure=5_805.0,
+            max_position_size_pct=0.6,
+        )
+        assert manager._max_new_position_value() == pytest.approx(0.0)
+
+    def test_cap_uses_equity_not_just_free_cash(self):
+        """The 60% cap must be computed against equity (cash + open
+        positions), not free cash alone -- otherwise the allowed
+        exposure silently shrinks/grows in ways decoupled from the
+        configured percentage of the real account value.
+        """
+        manager = RiskManager(
+            balance=2_000.0,           # cash remaining
+            equity=10_000.0,           # true equity (cash + $8,000 open)
+            existing_exposure=8_000.0,
+            max_position_size_pct=0.6,
+        )
+        # Cap = 60% * 10,000 = 6,000; already committed = 8,000 (over cap)
+        # -> no budget left, regardless of the $2,000 cash sitting free.
+        assert manager._max_new_position_value() == pytest.approx(0.0)
+
+
+# ===================================================================
 #  Insufficient balance
 # ===================================================================
 
@@ -321,8 +438,7 @@ def _simulate_trade(manager: RiskManager,
         (scanner.price - stop_price) / scanner.price * 100.0
     )
 
-    available_capital = max(0.0, manager.balance - manager._used_capital)
-    max_pos_value = available_capital * manager.max_position_size_pct
+    max_pos_value = manager._max_new_position_value()
 
     pos_size, risk_amt, pos_value = PositionSizer.calculate(
         manager.balance, manager.risk_per_trade,
