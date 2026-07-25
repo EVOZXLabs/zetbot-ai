@@ -1,9 +1,10 @@
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.ui import (
-    header, SEPARATOR, pnl_emoji, exposure_bar, progress_bar,
-    build_message,
+    compact_header, pnl_emoji, exposure_bar, progress_bar,
+    detail_block, build_message,
 )
 from scripts.position_status import is_open
+from scripts.balance_resolver import resolve_initial_balance
 
 
 class WalletCommand(BaseCommand):
@@ -35,7 +36,7 @@ class WalletCommand(BaseCommand):
             bal = pb.get("final_balance", 0.0)
             eq = pb.get("final_equity", 0.0)
             net_pnl = pb.get("net_pnl", 0.0)
-            initial = pb.get("initial_balance", 0.0)
+            initial = resolve_initial_balance(pb, ctx.read_json("paper_state.json"))
             total_return_pct = (
                 ((eq - initial) / initial * 100.0) if initial > 0 else 0.0
             )
@@ -54,15 +55,17 @@ class WalletCommand(BaseCommand):
             )
             exposure_pct = (pos_value / eq * 100) if eq > 0 else 0.0
 
+        # Same headline numbers as /balance (equity, net PnL, return) so the
+        # two commands never appear to disagree — /wallet adds exposure and
+        # win-rate on top, it doesn't recompute PnL a different way.
         return build_message(
-            header(),
-            f"👛 *WALLET*\n{SEPARATOR}",
-            f"Cash\n${bal:,.2f}\n\nIn Position\n${pos_value:,.2f}",
-            f"{SEPARATOR}\n"
-            f"Equity\n${eq:,.2f}\n\n"
-            f"Exposure\n{exposure_bar(exposure_pct)}",
-            f"{SEPARATOR}\n"
-            f"📈 Net PnL\n{pnl_emoji(net_pnl)} ${net_pnl:+,.2f} ({total_return_pct:+.2f}%)\n\n"
-            f"🏆 Win Rate\n{progress_bar(win_rate, 100, 10)} {win_rate:.1f}%\n"
-            f"📊 Trades: {total_trades}",
+            compact_header(),
+            f"👛 *Wallet* — ${eq:,.2f}\n"
+            f"{pnl_emoji(net_pnl)} {net_pnl:+,.2f} ({total_return_pct:+.2f}%) all-time",
+            f"Exposure {exposure_bar(exposure_pct)}\n"
+            f"Win rate {progress_bar(win_rate, 100, 10)} {win_rate:.1f}% ({total_trades} trades)",
+            detail_block([
+                f"Cash        ${bal:,.2f}",
+                f"In Position ${pos_value:,.2f}",
+            ]),
         )
