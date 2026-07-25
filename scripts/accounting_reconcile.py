@@ -86,8 +86,8 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
     # ------------------------------------------------------------------
     #  1. Detect mismatched initial_balance
     # ------------------------------------------------------------------
-    state_initial = state.get("initial_balance", 0.0)
-    pb_initial = pb.get("initial_balance", 0.0)
+    state_initial = state.get("initial_balance", 10_000.0)
+    pb_initial = pb.get("initial_balance", 10_000.0)
 
     if state and pb and state_initial != pb_initial:
         findings["initial_balance_mismatch"] = True
