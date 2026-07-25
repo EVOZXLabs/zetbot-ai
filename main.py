@@ -283,16 +283,7 @@ def _notify_closure(
     exit_price: float,
     exit_reason_map: dict[str, str],
 ) -> None:
-    """Send Telegram notification when the monitor detects a position closure.
-
-    PnL values sent here may differ from the paper engine's authoritative
-    PnL (shown in terminal ``_print_summary``) because this path recalculates
-    from scratch via ``ExecutionModel`` at the current ticker price, while
-    the paper engine accumulates PnL across all partial fills with their
-    actual fee/slippage.  The engine's value is authoritative; the
-    monitor's notification is a real-time estimate that is superseded on
-    the next pipeline run.
-    """
+    """Send Telegram notification when a position closes."""
     exit_reason = exit_reason_map.get(new_pos.status, "Strategy Exit")
     # "CLOSED" can be from TP (tp3_hit) or trend_exit — use tp3_hit + PnL
     if exit_reason == "Take Profit":
@@ -363,8 +354,8 @@ def _update_paper_on_closure(
             pb = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pb = {
-            "initial_balance": 0.0,
-            "final_balance": 0.0,
+            "initial_balance": 10000.0,
+            "final_balance": 10000.0,
             "final_equity": 10000.0,
             "total_trades": 0,
             "winning_trades": 0,
@@ -375,7 +366,7 @@ def _update_paper_on_closure(
             "net_pnl": 0.0,
         }
 
-    pb["final_balance"] = round(pb.get("final_balance", 0.0) + total_proceeds, 2)
+    pb["final_balance"] = round(pb.get("final_balance", 10000.0) + total_proceeds, 2)
     pb["total_trades"] = pb.get("total_trades", 0) + 1
     if pnl > 0:
         pb["winning_trades"] = pb.get("winning_trades", 0) + 1
@@ -400,7 +391,7 @@ def _update_paper_on_closure(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    initial = pb.get("initial_balance", 0.0)
+    initial = pb.get("initial_balance", 10_000.0)
     snapshot = MetricsManager.compute_snapshot(
         cash=pb["final_balance"],
         realized_pnl=pb.get("realized_pnl", 0.0),
@@ -745,7 +736,6 @@ def _monitor_positions(
         pos["remaining_pct"] = new_pos.remaining_pct
         pos["remaining_qty"] = new_pos.remaining_qty
         pos["realized_pnl"] = new_pos.realized_pnl
-        pos["unrealized_pnl"] = new_pos.unrealized_pnl
         pos["total_pnl"] = new_pos.total_pnl
         pos["highest_price"] = new_pos.highest_price
         pos["lowest_price"] = new_pos.lowest_price
@@ -891,6 +881,19 @@ def main() -> None:
     from bot.notifier import Notifier  # noqa: PLC0415
     _notifier = Notifier.from_config(config)
     container.inject_notifier(_notifier)
+
+    # Send bot_started notification — mirrors the bot_stopped notification
+    # sent on shutdown further below. Previously only bot_stopped existed,
+    # so a run would show "BOT STOPPED" on exit with no matching
+    # "BOT STARTED" on startup.
+    try:
+        _notifier.notify_bot_started(
+            symbol=f"{config.quote_currency} pairs",
+            timeframe=config.timeframe,
+            exchange=config.exchange,
+        )
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     #  LIVE mode status — surface this LOUDLY so nobody assumes they're
