@@ -728,9 +728,46 @@ Risk Percentage
 
 Compounding
 
-Default
+Default Mode
 
-10% of available balance.
+Risk Percentage
+
+Risk Percentage is the default PRODUCTION mode.
+
+Default Production Values
+
+Risk Per Trade: 1%
+
+Stop Loss: 1.5%
+
+Take Profit: 3%
+
+Position: Dynamic Calculation
+
+Maximum Open Position: 1
+
+Daily Loss Limit: 3%
+
+Dynamic Position Sizing
+
+Position size is NEVER a fixed dollar amount. It must always be
+calculated dynamically from the current account balance:
+
+Risk Amount = Account Balance × Risk Percentage
+
+Position Size = Risk Amount / Stop Loss Distance
+
+Because the formula is always evaluated against the CURRENT balance,
+the bot automatically adjusts position size for any capital size,
+for example:
+
+$10
+
+$100
+
+$1,000
+
+$10,000
 
 Money Management never generates signals.
 
@@ -1334,9 +1371,32 @@ Risk Percentage
 
 Compounding
 
-Default
+Default Mode
 
-10%
+Risk Percentage (default PRODUCTION mode)
+
+Default Production Values
+
+Risk Per Trade: 1%
+
+Stop Loss: 1.5%
+
+Take Profit: 3%
+
+Position: Dynamic Calculation
+
+Maximum Open Position: 1
+
+Daily Loss Limit: 3%
+
+Position size in Risk Percentage mode is always computed as:
+
+Risk Amount = Account Balance × Risk Percentage
+
+Position Size = Risk Amount / Stop Loss Distance
+
+This means position size automatically adapts to the account balance,
+whether the balance is $10, $100, $1,000, or $10,000.
 
 No hardcoded values.
 
@@ -1394,11 +1454,11 @@ Default
 
 Position Size
 
-10%
+Dynamic Calculation (Risk Amount / Stop Loss Distance)
 
 Maximum Daily Loss
 
-Configurable
+3%
 
 Maximum Daily Trades
 
