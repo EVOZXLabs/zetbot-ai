@@ -559,8 +559,9 @@ class RiskManager:
         print(f"  Balance          : ${self.balance:>8,.2f}")
         print(f"  Risk/trade       : {self.risk_per_trade:>5.1f}%  "
               f"(${self.balance * self.risk_per_trade / 100:>7,.2f})")
+        pct_denom = self.balance if self.balance else self.equity
         print(f"  Max daily loss   : "
-              f"{self.max_daily_loss_amt / self.balance * 100:>5.1f}%  "
+              f"{self.max_daily_loss_amt / pct_denom * 100 if pct_denom else 0.0:>5.1f}%  "
               f"(${self.max_daily_loss_amt:>7,.2f})")
         print(f"  Max positions    : {self.max_positions}")
         print(f"  Equity           : ${self.equity:>8,.2f}")
@@ -598,6 +599,7 @@ class RiskManager:
             )
             stop_distance_pct = (
                 (scanner.price - stop_price) / scanner.price * 100.0
+                if scanner.price > 0 else 0.0
             )
 
             # Remaining room under the portfolio-wide exposure cap, i.e.

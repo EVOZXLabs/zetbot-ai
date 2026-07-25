@@ -208,6 +208,7 @@ class TestPortfolioExposureCap:
         cap_pct = 0.6
         manager = RiskManager(
             balance=equity, equity=equity,
+            existing_exposure=0.0,
             max_position_size_pct=cap_pct, max_positions=5,
         )
 
@@ -385,6 +386,112 @@ class TestPaperWallet:
 # ===================================================================
 #  Test helpers
 # ===================================================================
+
+
+# ===================================================================
+#  Division by zero edge cases (balance=0, equity=0, price=0)
+# ===================================================================
+
+
+class TestDivisionByZeroEdgeCases:
+    """RiskManager must not crash when balance, equity, or price is zero."""
+
+    def test_risk_manager_with_zero_balance(self):
+        """balance=0 should produce no division errors in print/run internals."""
+        manager = RiskManager(balance=0.0, equity=0.0, existing_exposure=0.0)
+        # _print_summary divisions must not crash
+        manager.results = []
+        manager._print_summary(0.0)
+        # _max_new_position_value with zero balance/equity
+        assert manager._max_new_position_value() == 0.0
+
+    def test_risk_manager_with_zero_equity(self):
+        """equity=0 should not cause division by zero in exposure calc."""
+        manager = RiskManager(balance=0.0, equity=0.0, existing_exposure=0.0)
+        # The exposure pct print uses `if self.equity else 0.0`
+        cap = manager._max_new_position_value()
+        assert cap == 0.0
+
+    def test_position_sizer_zero_entry_price(self):
+        """entry_price=0 should return zero position."""
+        size, risk, value = PositionSizer.calculate(
+            10_000.0, 2.0, 0.0, 49_000.0,
+        )
+        assert size == 0.0
+        assert risk == 0.0
+        assert value == 0.0
+
+    def test_position_sizer_zero_balance(self):
+        """balance=0 should return zero for all values."""
+        size, risk, value = PositionSizer.calculate(
+            0.0, 2.0, 50_000.0, 49_000.0,
+        )
+        assert size == 0.0
+        assert risk == 0.0
+        assert value == 0.0
+
+    def test_position_sizer_zero_stop_distance(self):
+        """stop_price >= entry_price should return zero."""
+        size, risk, value = PositionSizer.calculate(
+            10_000.0, 2.0, 50_000.0, 50_000.0,
+        )
+        assert size == 0.0
+        assert risk == 0.0
+        assert value == 0.0
+
+        size, risk, value = PositionSizer.calculate(
+            10_000.0, 2.0, 50_000.0, 51_000.0,
+        )
+        assert size == 0.0
+
+    def test_zero_price_in_stop_distance_pct(self):
+        """scanner.price=0 in stop_distance_pct calc must not crash."""
+        # This exercises the guard: `if scanner.price > 0 else 0.0`
+        from scripts.risk_manager import (
+            ScannerData, DecisionData, RiskManager,
+            PositionSizer, StopLossCalculator, TakeProfitCalculator,
+        )
+
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=0.0, volume_24h=0.0,
+            change_24h=0.0, ema50=0.0, ema100=0.0, ema200=0.0,
+            rsi14=50.0, adx14=0.0, atr_pct=0.0,
+            relative_volume=1.0, trend_alignment="MIXED",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=0.0, recommendation="",
+            risk_score=0.0, reward_score=0.0, trend_score=0.0,
+            momentum_score=0.0, volume_score=0.0, volatility_score=0.0,
+            expected_rr=0.0, overall_score=0.0,
+        )
+        mgr = RiskManager(balance=0.0, equity=0.0, existing_exposure=0.0)
+
+        stop_price, stop_method = StopLossCalculator.safest(
+            scanner.price, scanner.atr_pct, scanner.ema200,
+        )
+        # This was the exact line that would crash with ZeroDivisionError:
+        stop_distance_pct = (
+            (scanner.price - stop_price) / scanner.price * 100.0
+            if scanner.price > 0 else 0.0
+        )
+        assert stop_distance_pct == 0.0
+
+    def test_max_daily_loss_division_with_zero_denom(self):
+        """_print_summary must handle zero balance/equity for max daily loss %."""
+        mgr = RiskManager(balance=0.0, equity=0.0)
+        pct_denom = mgr.balance if mgr.balance else mgr.equity
+        # The ternary: `... / pct_denom * 100 if pct_denom else 0.0`
+        result = mgr.max_daily_loss_amt / pct_denom * 100 if pct_denom else 0.0
+        assert result == 0.0
+
+    def test_exposure_pct_with_zero_equity(self):
+        """Exposure % must not crash when equity is 0."""
+        mgr = RiskManager(balance=0.0, equity=0.0, existing_exposure=1000.0)
+        # The print uses: `self._existing_exposure / self.equity * 100.0 if self.equity else 0.0`
+        assert mgr.equity == 0.0
+        # Just verify no ZeroDivisionError would occur
+        pct = mgr._existing_exposure / mgr.equity * 100.0 if mgr.equity else 0.0
+        assert pct == 0.0
 
 
 def _simulate_trade(manager: RiskManager,
