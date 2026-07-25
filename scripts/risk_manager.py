@@ -35,7 +35,17 @@ MAX_DAILY_LOSS_PCT = 5.0            # % max drawdown per day
 MAX_OPEN_POSITIONS = 2
 MIN_RR = 1.5                        # minimum acceptable risk-reward
 MAX_RR = 5.0                        # cap to avoid unrealistic targets
-MIN_POSITION_SIZE_USD = 10.0        # smallest trade value
+MIN_POSITION_SIZE_USD = 10.0        # smallest trade value — reflects real
+                                     # exchange minimum notional, not an
+                                     # arbitrary cutoff. Accounts too small
+                                     # to clear this at the configured
+                                     # risk/exposure % are correctly
+                                     # rejected rather than sized down
+                                     # into an unfillable order. Kept in
+                                     # sync with trade_executor.py's
+                                     # EXCHANGE_MIN_NOTIONAL so a trade
+                                     # approved here is never rejected
+                                     # downstream at execution.
 MIN_PROBABILITY = 50.0              # from decision engine
 MAX_ATR_PCT = 8.0                   # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
@@ -46,8 +56,35 @@ MAX_POSITION_SIZE_PCT = 0.6         # max % of account EQUITY across ALL open
 STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
 STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 
+# Concurrent-position cap, scaled by equity. Small accounts can't
+# diversify without pushing individual positions below the exchange
+# minimum notional, so they're kept to fewer, larger positions; larger
+# accounts unlock more concurrent positions. (equity_ceiling, max_positions)
+# — first tier whose ceiling exceeds current equity wins.
+POSITION_COUNT_TIERS: list[tuple[float, int]] = [
+    (100.0, 1),
+    (1_000.0, 2),
+    (float("inf"), 3),
+]
+
 # Take-profit multipliers (relative to stop distance)
 TP_MULTIPLIERS = [1.0, 2.0, 3.0]
+
+def dynamic_max_positions(
+    equity: float,
+    tiers: list[tuple[float, int]] | None = None,
+) -> int:
+    """Return the max concurrent-position count for a given equity.
+
+    Replaces a single fixed ``MAX_OPEN_POSITIONS`` constant with tiers
+    that scale up as equity grows, so a $10 account and a $10,000
+    account don't run the same diversification profile.
+    """
+    for ceiling, count in (tiers or POSITION_COUNT_TIERS):
+        if equity < ceiling:
+            return count
+    return (tiers or POSITION_COUNT_TIERS)[-1][1]
+
 
 # ---------------------------------------------------------------------------
 #  Data types
@@ -487,7 +524,7 @@ class RiskManager:
         balance: float = ACCOUNT_BALANCE,
         risk_per_trade: float = MAX_RISK_PER_TRADE_PCT,
         max_daily_loss: float = MAX_DAILY_LOSS_PCT,
-        max_positions: int = MAX_OPEN_POSITIONS,
+        max_positions: int | None = None,
         max_position_size_pct: float = MAX_POSITION_SIZE_PCT,
         equity: float | None = None,
         existing_exposure: float | None = None,
@@ -498,6 +535,12 @@ class RiskManager:
         balance : float
             *Free cash* available to spend on new positions (e.g.
             ``wallet.balance``). Never exceeded by newly approved orders.
+        max_positions : int | None
+            Explicit cap on concurrent open positions. If ``None``
+            (default), it is derived from equity via
+            :func:`dynamic_max_positions` — small accounts get fewer,
+            larger accounts get more, instead of one fixed number for
+            every account size.
         equity : float | None
             Total account equity = cash + value of open positions (e.g.
             ``wallet.equity``). Used as the base for the portfolio-wide
@@ -512,7 +555,6 @@ class RiskManager:
         self.balance = balance
         self.risk_per_trade = risk_per_trade
         self.max_daily_loss_amt = balance * (max_daily_loss / 100.0)
-        self.max_positions = max_positions
         self.max_position_size_pct = max_position_size_pct
         self.validator = TradeValidator()
         self.results: list[RiskResult] = []
@@ -532,6 +574,13 @@ class RiskManager:
         self.equity = (
             equity if equity is not None
             else balance + self._existing_exposure
+        )
+
+        # Equity-tiered by default — see POSITION_COUNT_TIERS. Callers
+        # can still force a fixed number by passing max_positions=N.
+        self.max_positions = (
+            max_positions if max_positions is not None
+            else dynamic_max_positions(self.equity)
         )
 
     def _max_new_position_value(self) -> float:
