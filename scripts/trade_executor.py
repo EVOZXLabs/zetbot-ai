@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from scripts.risk_manager import dynamic_max_positions, _resolve_account_state
+from scripts.money_management import (
+    DAILY_LOSS_LIMIT as MM_DAILY_LOSS_LIMIT,
+    MAX_OPEN_POSITIONS as MM_MAX_OPEN_POSITIONS,
+)
 
 # ---------------------------------------------------------------------------
 #  Config
@@ -36,8 +40,11 @@ EXCHANGE_MIN_QTY_DEFAULT = 0.00001  # default min quantity step
 # NOTE: max_positions and max_daily_loss are equity-relative by default
 # (see ExecutionValidator / TradeExecutor below) — these constants are
 # only the fallback used when no equity figure can be resolved at all.
-MAX_OPEN_POSITIONS = 2
-MAX_DAILY_LOSS_PCT = 5.0            # % of current equity, not a fixed $
+# Sourced from scripts.money_management so this module can never drift
+# from SPECIFICATION.md §25/§47/§49's production Money Management
+# defaults (1 max open position, 3% daily loss limit).
+MAX_OPEN_POSITIONS = MM_MAX_OPEN_POSITIONS
+MAX_DAILY_LOSS_PCT = MM_DAILY_LOSS_LIMIT * 100.0   # % of current equity
 MIN_RR = 1.5
 
 # ---------------------------------------------------------------------------
@@ -228,9 +235,11 @@ class ExecutionValidator:
             ``max_positions`` is not explicitly given, the equity-tiered
             position count from :func:`dynamic_max_positions`.
         max_positions : int | None
-            Explicit override. If ``None`` (default), derived from
-            ``equity`` so a $10 account and a $10,000 account don't run
-            the same diversification profile.
+            Explicit override. If ``None`` (default), falls back to
+            ``MAX_OPEN_POSITIONS`` (1) per SPECIFICATION.md
+            §25/§47/§49 — a fixed cap regardless of account size.
+            Position *size* (not position *count*) is what scales
+            with equity — see :mod:`scripts.money_management`.
         max_daily_loss : float | None
             Explicit $ override for the daily loss cap. If ``None``
             (default), computed as ``equity * max_daily_loss_pct / 100``
@@ -242,7 +251,7 @@ class ExecutionValidator:
         self.equity = equity
         self.max_positions = (
             max_positions if max_positions is not None
-            else dynamic_max_positions(equity)
+            else MAX_OPEN_POSITIONS
         )
         self.max_daily_loss = (
             max_daily_loss if max_daily_loss is not None

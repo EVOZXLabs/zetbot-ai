@@ -52,8 +52,18 @@ class AppConfig:
 
     # Account
     account_balance: float = 10_000.0
-    max_positions: int = 3
-    max_risk_per_trade_pct: float = 2.0
+    max_positions: int = 1
+    max_risk_per_trade_pct: float = 1.0
+
+    # Money Management (SPECIFICATION.md §25/§47) — RISK_PERCENTAGE is
+    # the default production mode. Fractional notation (0.01 == 1%),
+    # matching scripts/money_management.py, the single source of truth
+    # for these defaults.
+    money_management_mode: str = "RISK_PERCENTAGE"
+    risk_per_trade: float = 0.01
+    stop_loss_pct: float = 0.015
+    take_profit_pct: float = 0.03
+    daily_loss_limit: float = 0.03
 
     # Telegram
     telegram_enabled: bool = False
@@ -88,7 +98,7 @@ class AppConfig:
     tp3_sell_pct: float = 40.0
 
     # Safety limits
-    max_daily_loss_pct: float = 5.0
+    max_daily_loss_pct: float = 3.0
     max_consecutive_losses: int = 3
     max_daily_trades: int = 20
     exchange_failure_window_seconds: int = 300
@@ -125,8 +135,13 @@ def load_config() -> AppConfig:
         data_dir=os.getenv("DATA_DIR", "data"),
         logs_dir=os.getenv("LOGS_DIR", "logs"),
         account_balance=float(os.getenv("ACCOUNT_BALANCE", "10000")),
-        max_positions=int(os.getenv("MAX_POSITIONS", "2")),
-        max_risk_per_trade_pct=float(os.getenv("MAX_RISK_PER_TRADE_PCT", "2.0")),
+        max_positions=int(os.getenv("MAX_POSITIONS", "1")),
+        max_risk_per_trade_pct=float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.0")),
+        money_management_mode=os.getenv("MONEY_MANAGEMENT_MODE", "RISK_PERCENTAGE"),
+        risk_per_trade=float(os.getenv("RISK_PER_TRADE", "0.01")),
+        stop_loss_pct=float(os.getenv("MM_STOP_LOSS_PCT", "0.015")),
+        take_profit_pct=float(os.getenv("MM_TAKE_PROFIT_PCT", "0.03")),
+        daily_loss_limit=float(os.getenv("DAILY_LOSS_LIMIT", "0.03")),
         telegram_enabled=os.getenv("TELEGRAM_ENABLED", "false").lower() == "true",
         telegram_token=os.getenv("TELEGRAM_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
@@ -144,7 +159,7 @@ def load_config() -> AppConfig:
         stop_atr_multiplier=float(os.getenv("STOP_ATR_MULTIPLIER", "1.5")),
         stop_fixed_pct=float(os.getenv("STOP_FIXED_PCT", "5.0")),
         max_position_size_pct=float(os.getenv("MAX_POSITION_SIZE_PCT", "0.6")),
-        max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "5.0")),
+        max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "3.0")),
         max_consecutive_losses=int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3")),
         max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "20")),
         exchange_failure_window_seconds=int(os.getenv("EXCHANGE_FAILURE_WINDOW_SECONDS", "300")),
@@ -230,6 +245,29 @@ def validate_config(config: AppConfig) -> None:
         errors.append("TAKER_FEE and MAKER_FEE must be non-negative")
     if config.slippage_bps < 0:
         errors.append(f"SLIPPAGE_BPS must be >= 0 (got {config.slippage_bps})")
+    valid_mm_modes = {"FIXED_AMOUNT", "PERCENTAGE_BALANCE", "RISK_PERCENTAGE", "COMPOUNDING"}
+    if config.money_management_mode not in valid_mm_modes:
+        errors.append(
+            f"MONEY_MANAGEMENT_MODE must be one of {sorted(valid_mm_modes)} "
+            f"(got '{config.money_management_mode}')"
+        )
+    if config.risk_per_trade <= 0 or config.risk_per_trade > 1.0:
+        errors.append(
+            f"RISK_PER_TRADE must be between 0 and 1.0 (got {config.risk_per_trade})"
+        )
+    if config.stop_loss_pct <= 0 or config.stop_loss_pct > 1.0:
+        errors.append(
+            f"MM_STOP_LOSS_PCT must be between 0 and 1.0 (got {config.stop_loss_pct})"
+        )
+    if config.take_profit_pct <= 0 or config.take_profit_pct > 1.0:
+        errors.append(
+            f"MM_TAKE_PROFIT_PCT must be between 0 and 1.0 (got {config.take_profit_pct})"
+        )
+    if config.daily_loss_limit <= 0 or config.daily_loss_limit > 1.0:
+        errors.append(
+            f"DAILY_LOSS_LIMIT must be between 0 and 1.0 (got {config.daily_loss_limit})"
+        )
+
     if not config.paper_mode and (not config.api_key or not config.api_secret):
         errors.append(
             "PAPER_MODE=false requires API_KEY and API_SECRET to be set "

@@ -49,21 +49,32 @@ CONFIG_FIELDS: list[ConfigField] = [
     ConfigField("TELEGRAM_TOKEN", "Telegram Bot Token", "", secret=True),
     ConfigField("TELEGRAM_CHAT_ID", "Telegram Chat ID", "", secret=True),
     ConfigField("POSITION_SIZE", "Position Size (USDT)", "10"),
-    ConfigField("MAX_POSITIONS", "Max Open Positions", "3"),
+    ConfigField("MAX_POSITIONS", "Max Open Positions", "1"),
     ConfigField("TIMEFRAME", "Timeframe", "1h",
                 validator=lambda v: v in VALID_TIMEFRAMES),
-    ConfigField("STOP_LOSS_PCT", "Stop Loss (%)", "5.0"),
-    ConfigField("TAKE_PROFIT_PCT", "Take Profit (%)", "10.0"),
+    ConfigField("STOP_LOSS_PCT", "Stop Loss (%)", "1.5"),
+    ConfigField("TAKE_PROFIT_PCT", "Take Profit (%)", "3.0"),
     ConfigField("AUTO_PIPELINE", "Auto Pipeline (true/false)", "true",
                 validator=lambda v: v.lower() in ("true", "false")),
     ConfigField("PIPELINE_INTERVAL", "Pipeline Interval (seconds)", "300"),
     ConfigField("ACCOUNT_BALANCE", "Initial Account Balance (USDT)", "10000"),
-    ConfigField("MAX_RISK_PER_TRADE_PCT", "Max Risk Per Trade (%)", "2.0"),
+    ConfigField("MAX_RISK_PER_TRADE_PCT", "Max Risk Per Trade (%)", "1.0"),
     ConfigField("MIN_RR", "Min Risk/Reward Ratio", "1.5"),
     ConfigField("MAX_RR", "Max Risk/Reward Ratio", "5.0"),
     ConfigField("SCANNER_THREADS", "Scanner Threads", "5"),
     ConfigField("SCANNER_TOP_N", "Scanner Top N", "50"),
     ConfigField("SCANNER_MIN_VOLUME", "Scanner Min Volume (USDT)", "50000"),
+    # Money Management (SPECIFICATION.md §25/§47) — default production
+    # mode is RISK_PERCENTAGE. Fractional notation (0.01 == 1%).
+    ConfigField("MONEY_MANAGEMENT_MODE", "Money Management Mode", "RISK_PERCENTAGE",
+                validator=lambda v: v.upper() in (
+                    "FIXED_AMOUNT", "PERCENTAGE_BALANCE",
+                    "RISK_PERCENTAGE", "COMPOUNDING",
+                )),
+    ConfigField("RISK_PER_TRADE", "Risk Per Trade (fraction)", "0.01"),
+    ConfigField("MM_STOP_LOSS_PCT", "Money Mgmt Stop Loss (fraction)", "0.015"),
+    ConfigField("MM_TAKE_PROFIT_PCT", "Money Mgmt Take Profit (fraction)", "0.03"),
+    ConfigField("DAILY_LOSS_LIMIT", "Daily Loss Limit (fraction)", "0.03"),
 ]
 
 

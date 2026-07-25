@@ -19,6 +19,13 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
 
+from scripts.money_management import (
+    DAILY_LOSS_LIMIT as MM_DAILY_LOSS_LIMIT,
+    DEFAULT_MODE as MM_DEFAULT_MODE,
+    MAX_OPEN_POSITIONS as MM_MAX_OPEN_POSITIONS,
+    RISK_PER_TRADE as MM_RISK_PER_TRADE,
+)
+
 # ---------------------------------------------------------------------------
 #  Config
 # ---------------------------------------------------------------------------
@@ -28,11 +35,18 @@ DECISION_PATH = "data/decision_results.json"
 PAPER_STATE_PATH = "data/paper_state.json"
 LIVE_POSITIONS_PATH = "data/live_positions.json"
 
-# Account config (all overridable via module-level vars)
+# Account config (all overridable via module-level vars).
+#
+# Defaults are sourced from scripts.money_management (single source of
+# truth for SPECIFICATION.md §25/§47's production Money Management
+# defaults: 1% risk per trade, 1 max open position, 3% daily loss
+# limit) so this module and scripts/money_management.py can never
+# silently drift apart.
 ACCOUNT_BALANCE = 10_000.0
-MAX_RISK_PER_TRADE_PCT = 2.0       # % of account at risk per trade
-MAX_DAILY_LOSS_PCT = 5.0            # % max drawdown per day
-MAX_OPEN_POSITIONS = 2
+MAX_RISK_PER_TRADE_PCT = MM_RISK_PER_TRADE * 100.0   # % of account at risk per trade (1.0 = 1%)
+MAX_DAILY_LOSS_PCT = MM_DAILY_LOSS_LIMIT * 100.0      # % max drawdown per day (3.0 = 3%)
+MAX_OPEN_POSITIONS = MM_MAX_OPEN_POSITIONS            # default mode: RISK_PERCENTAGE (see money_management.py)
+MONEY_MANAGEMENT_MODE = MM_DEFAULT_MODE.value
 MIN_RR = 1.5                        # minimum acceptable risk-reward
 MAX_RR = 5.0                        # cap to avoid unrealistic targets
 MIN_POSITION_SIZE_USD = 10.0        # smallest trade value — reflects real
@@ -56,11 +70,11 @@ MAX_POSITION_SIZE_PCT = 0.6         # max % of account EQUITY across ALL open
 STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
 STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 
-# Concurrent-position cap, scaled by equity. Small accounts can't
-# diversify without pushing individual positions below the exchange
-# minimum notional, so they're kept to fewer, larger positions; larger
-# accounts unlock more concurrent positions. (equity_ceiling, max_positions)
-# — first tier whose ceiling exceeds current equity wins.
+# Optional equity-scaled concurrent-position tiers. NOT used by default
+# any more — SPECIFICATION.md §25/§47/§49 fixes "Maximum Open Position"
+# at 1 regardless of account size (position *size* scales with equity
+# instead, via Money Management's dynamic calculation). Kept available
+# for callers that explicitly opt in via :func:`dynamic_max_positions`.
 POSITION_COUNT_TIERS: list[tuple[float, int]] = [
     (100.0, 1),
     (1_000.0, 2),
@@ -141,6 +155,7 @@ class RiskResult:
     expected_rr: float
     approval: str
     rejection_reason: str
+    money_management_mode: str = MONEY_MANAGEMENT_MODE
 
 
 # ---------------------------------------------------------------------------
@@ -537,10 +552,13 @@ class RiskManager:
             ``wallet.balance``). Never exceeded by newly approved orders.
         max_positions : int | None
             Explicit cap on concurrent open positions. If ``None``
-            (default), it is derived from equity via
-            :func:`dynamic_max_positions` — small accounts get fewer,
-            larger accounts get more, instead of one fixed number for
-            every account size.
+            (default), falls back to ``MAX_OPEN_POSITIONS`` (1) per
+            SPECIFICATION.md §25/§47/§49 — a fixed cap regardless of
+            account size. Position *size* (not position *count*)
+            is what scales with equity — see
+            :mod:`scripts.money_management`. Callers that still want
+            the old equity-tiered position count can pass
+            ``max_positions=dynamic_max_positions(equity)`` explicitly.
         equity : float | None
             Total account equity = cash + value of open positions (e.g.
             ``wallet.equity``). Used as the base for the portfolio-wide
@@ -576,11 +594,13 @@ class RiskManager:
             else balance + self._existing_exposure
         )
 
-        # Equity-tiered by default — see POSITION_COUNT_TIERS. Callers
-        # can still force a fixed number by passing max_positions=N.
+        # Fixed at MAX_OPEN_POSITIONS (1) by default per SPECIFICATION.md
+        # §25/§47/§49. Callers can still opt into the legacy
+        # equity-tiered behaviour by passing max_positions explicitly
+        # (e.g. ``dynamic_max_positions(equity)``).
         self.max_positions = (
             max_positions if max_positions is not None
-            else dynamic_max_positions(self.equity)
+            else MAX_OPEN_POSITIONS
         )
 
     def _max_new_position_value(self) -> float:
@@ -606,6 +626,7 @@ class RiskManager:
         print(f"  ZETBOT AI — PROFESSIONAL RISK MANAGER")
         print(f"  {'=' * 78}")
         print(f"  Balance          : ${self.balance:>8,.2f}")
+        print(f"  Money Mgmt mode  : {MONEY_MANAGEMENT_MODE}")
         print(f"  Risk/trade       : {self.risk_per_trade:>5.1f}%  "
               f"(${self.balance * self.risk_per_trade / 100:>7,.2f})")
         pct_denom = self.balance if self.balance else self.equity
@@ -813,6 +834,7 @@ class RiskReport:
             "risk_amount", "risk_percent",
             "reward_amount", "expected_rr",
             "approval", "rejection_reason",
+            "money_management_mode",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
