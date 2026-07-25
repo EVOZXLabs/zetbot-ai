@@ -157,7 +157,9 @@ Position sizing in ``scripts/risk_manager.py``:
 4. ``max_position_value`` = available_capital × ``MAX_POSITION_SIZE_PCT`` (0.6 = 60 %)
 5. Final position_value = min(step 3, step 4)
 
-``available_capital`` = balance - sum(already-approved positions). Each position is capped at 60 % of the remaining capital at the time it is approved. Cumulative exposure can therefore exceed 60 % when multiple positions are approved (e.g. 60 % + 60 % of remaining 40 % = 84 % total). This is the intentional configured behavior, not a bug.
+``MAX_POSITION_SIZE_PCT`` is a **portfolio-wide** exposure cap, not a per-position allowance. ``RiskManager`` tracks total committed capital — positions already open from previous pipeline cycles (``_existing_exposure``) plus positions approved earlier in the current run (``_used_capital``) — and only allows a new position up to whatever headroom remains under ``max_position_size_pct * equity``. Two 60 % positions can therefore never combine into 84-100 % exposure; the second position is capped to whatever % of equity remains under the 60 % ceiling (e.g. equity $10,000, first position $4,000 (40 %) -> second position capped at $2,000 so total stays at $6,000 / 60 %).
+
+``main()`` (used by both the CLI entrypoint and the pipeline) resolves live ``balance``/``equity`` from ``data/paper_balance.json`` (``_resolve_account_state()``) before constructing ``RiskManager`` — it must never fall back to a hardcoded starting-balance constant once trading has begun, or the cap will be computed against stale capital and silently let exposure drift toward 100 %.
 
 ---
 
