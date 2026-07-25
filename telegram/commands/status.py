@@ -39,6 +39,11 @@ class StatusCommand(BaseCommand):
             open_pos = a.open_positions
             win_rate = a.win_rate
             exposure_pct = a.exposure_pct
+            # "Today" must be today's realized PnL, not the all-time
+            # net_pnl (that number is already shown by /balance's
+            # "all-time" line — reusing it here made the two commands
+            # display identical figures under different labels).
+            today_pnl = m.today_summary().get("pnl", 0.0)
 
             # Build position symbols string
             open_list = m.open_positions()
@@ -58,6 +63,10 @@ class StatusCommand(BaseCommand):
             win_rate = pb.get("win_rate", 0.0)
             exposure_pct = 0.0
             pos_label = "None"
+            # No MetricsManager available in this fallback path — best
+            # approximation is the all-time figure (same limitation as
+            # before this fix).
+            today_pnl = net_pnl
 
         paused = os.path.exists(PAUSE_FILE)
 
@@ -98,7 +107,7 @@ class StatusCommand(BaseCommand):
                     pass
 
         trading_label = "PAUSED" if paused else "ACTIVE"
-        pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+        today_emoji = "🟢" if today_pnl >= 0 else "🔴"
 
         return build_message(
             header(),
@@ -107,7 +116,7 @@ class StatusCommand(BaseCommand):
             f"💵 Cash\n${bal:,.2f}\n\n"
             f"📂 Positions\n{pos_label}",
             f"{SEPARATOR}\n"
-            f"📈 Today\n{pnl_emoji} ${net_pnl:+,.2f}\n\n"
+            f"📈 Today\n{today_emoji} ${today_pnl:+,.2f}\n\n"
             f"⏰ Next Scan\n{next_scan_str}",
             f"{SEPARATOR}\n"
             f"⚠️ Exposure\n{exposure_bar(exposure_pct)}\n\n"
