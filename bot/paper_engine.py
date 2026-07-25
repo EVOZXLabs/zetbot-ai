@@ -15,6 +15,7 @@ import pandas as pd
 
 from bot.config import CONFIG
 from bot.data import MarketData
+from bot.indicators import IndicatorEngine
 from bot.paper import PaperTrader
 from bot.state import STATE_VERSION, StateManager
 from bot.strategy import BUY, SELL, StrategyEngine
@@ -161,11 +162,25 @@ class PaperTradingEngine:
             self._last_signal = result
             if result["signal"] == BUY:
                 self._state = BUY_SIGNAL
+
+                atr_pct: float | None = None
+                try:
+                    atr_period = int(CONFIG.get("atr_period", 14))
+                    atr_value = IndicatorEngine.atr(df, period=atr_period)
+                    if price > 0:
+                        atr_pct = (atr_value / price) * 100.0
+                except (ValueError, KeyError) as exc:
+                    logger.warning(
+                        "ATR unavailable for %s, falling back to fixed "
+                        "SL/TP %% — %s", symbol, exc,
+                    )
+
                 pos = self._paper.open_position(
                     entry_price=price,
                     symbol=symbol,
                     timeframe=timeframe,
                     reasons=result["reason"],
+                    atr_pct=atr_pct,
                 )
                 if pos is not None and pos["entry_time"] != self._notified_buy_entry:
                     self._notified_buy_entry = pos["entry_time"]

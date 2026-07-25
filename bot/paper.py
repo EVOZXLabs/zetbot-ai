@@ -44,17 +44,34 @@ class PaperTrader:
         symbol: str,
         timeframe: str,
         reasons: list[str],
+        atr_pct: float | None = None,
     ) -> dict[str, Any] | None:
         """Open a virtual long position.
+
+        Position size is always equity-relative (``% of current
+        balance``, not a fixed dollar amount), so results scale
+        automatically whether the account is $10 or $100,000.
+
+        Stop-loss and take-profit are volatility-aware: when ``atr_pct``
+        is supplied, the stop distance is ``atr_pct * ATR_STOP_MULTIPLIER``
+        and the target is ``stop_distance * RISK_REWARD_RATIO`` — both
+        widen or tighten automatically with current market volatility.
+        If ``atr_pct`` is unavailable (e.g. not enough candles yet),
+        this falls back to the fixed ``stop_loss`` / ``take_profit`` %
+        from config.
 
         Args:
             entry_price: Price at which the position is opened.
             symbol: Trading pair (e.g. ``"BTC/USDT"``).
             timeframe: Candle timeframe (e.g. ``"1h"``).
             reasons: Strategy reasons that triggered the BUY signal.
+            atr_pct: Current ATR expressed as a % of price (e.g. ``2.3``
+                for 2.3%). Pass ``None`` to force the fixed-% fallback.
 
         Returns:
-            The position dict, or ``None`` if a position is already open.
+            The position dict, or ``None`` if a position is already
+            open, or if the sized position falls below the exchange's
+            minimum notional (``min_position_usd``) for this equity.
         """
         if self._position is not None:
             logger.warning(
@@ -63,10 +80,31 @@ class PaperTrader:
             return None
 
         position_size_pct = float(CONFIG.get("position_size", 10))
-        stop_loss_pct = float(CONFIG.get("stop_loss", 1.5))
-        take_profit_pct = float(CONFIG.get("take_profit", 2.5))
+        atr_multiplier = float(CONFIG.get("atr_stop_multiplier", 1.5))
+        risk_reward = float(CONFIG.get("risk_reward_ratio", 2.0))
+        min_position_usd = float(CONFIG.get("min_position_usd", 5.0))
+
+        if atr_pct is not None and atr_pct > 0:
+            stop_loss_pct = atr_pct * atr_multiplier
+            take_profit_pct = stop_loss_pct * risk_reward
+            sizing_method = "ATR"
+        else:
+            stop_loss_pct = float(CONFIG.get("stop_loss", 1.5))
+            take_profit_pct = float(CONFIG.get("take_profit", 2.5))
+            sizing_method = "Fixed%"
 
         position_value = self._balance * (position_size_pct / 100.0)
+
+        if position_value < min_position_usd:
+            logger.info(
+                "Paper BUY rejected — position $%.2f below min notional "
+                "$%.2f for balance=$%.2f (%.1f%% sizing). Account too "
+                "small for current position_size%% setting.",
+                position_value, min_position_usd, self._balance,
+                position_size_pct,
+            )
+            return None
+
         quantity = position_value / entry_price
 
         stop_loss_price = entry_price * (1.0 - stop_loss_pct / 100.0)
@@ -80,6 +118,9 @@ class PaperTrader:
             "position_size_percent": position_size_pct,
             "stop_loss_price": stop_loss_price,
             "take_profit_price": take_profit_price,
+            "stop_method": sizing_method,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
             "status": "OPEN",
             "symbol": symbol,
             "timeframe": timeframe,
@@ -88,11 +129,11 @@ class PaperTrader:
         reasons_str = " | ".join(reasons)
         logger.info(
             "Paper BUY opened | "
-            "Entry=%.2f SL=%.2f TP=%.2f "
+            "Entry=%.2f SL=%.2f (-%.2f%%, %s) TP=%.2f (+%.2f%%) "
             "Size=%s%.2f%% (%.4f %s) | %s",
             entry_price,
-            stop_loss_price,
-            take_profit_price,
+            stop_loss_price, stop_loss_pct, sizing_method,
+            take_profit_price, take_profit_pct,
             f"${position_value:,.2f} / ",
             position_size_pct,
             quantity,
