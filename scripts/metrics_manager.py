@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from scripts.balance_resolver import resolve_initial_balance
 from scripts.position_status import is_open
 
 
@@ -188,7 +189,7 @@ class MetricsManager:
         pb = self._read_balance_pb()
         cash = pb.get("final_balance", 0.0)
         realized = pb.get("realized_pnl", 0.0)
-        initial = pb.get("initial_balance", 0.0)
+        initial = resolve_initial_balance(pb, self._read_json("paper_state.json"))
         open_positions = self.open_positions()
 
         return self.compute_snapshot(
