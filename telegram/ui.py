@@ -184,7 +184,12 @@ def ai_insight(
                 parts.append(f"Trend: {trend}.")
 
     if reasons and len(parts) < 2:
-        clean = [r for r in reasons if r and r != "Paper trade executed"]
+        # Drop anything that just repeats exit_reason (e.g. reasons=[exit_reason])
+        # so we never produce "Stop Loss protected capital. Stop Loss."
+        clean = [
+            r for r in reasons
+            if r and r != "Paper trade executed" and r != exit_reason
+        ]
         if clean:
             parts.append(clean[0] + ("." if not clean[0].endswith(".") else ""))
 
@@ -196,6 +201,30 @@ def ai_insight(
 
     text = " ".join(parts[:2])
     return text
+
+
+# ── Compact design language (headline-first, details secondary) ───────
+#
+# Used by the "at a glance" notifications and account commands.
+# Rule: one bold headline with the result, then plain-language context,
+# then (optionally) a monospace block for people who want the raw
+# numbers. Never repeat the same number formatted two different ways.
+
+def compact_header() -> str:
+    """Minimal header — no separators, used by the compact message style."""
+    return "🤖 *ZetBot AI*"
+
+
+def detail_block(lines: list[str]) -> str:
+    """Render secondary/technical lines in a de-emphasized monospace block.
+
+    Kept visually distinct from the headline so a non-technical reader
+    can skip it, while it's still available for anyone who wants it.
+    """
+    clean = [ln for ln in lines if ln]
+    if not clean:
+        return ""
+    return "```\n" + "\n".join(clean) + "\n```"
 
 
 # ── Message assembly ──────────────────────────────────────────────────
