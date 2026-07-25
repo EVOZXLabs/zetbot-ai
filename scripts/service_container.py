@@ -497,6 +497,7 @@ class _RiskAdapter:
         from scripts import risk_manager  # noqa: PLC0415
         mgr = risk_manager.RiskManager(
             balance=wallet.balance,
+            equity=wallet.equity,
             risk_per_trade=self._config.max_risk_per_trade_pct,
             max_daily_loss=5.0,
             max_positions=self._config.max_positions,

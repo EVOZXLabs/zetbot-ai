@@ -39,7 +39,10 @@ MIN_POSITION_SIZE_USD = 10.0        # smallest trade value
 MIN_PROBABILITY = 50.0              # from decision engine
 MAX_ATR_PCT = 8.0                   # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
-MAX_POSITION_SIZE_PCT = 0.6         # max % of account equity per position ($ VALUE, not risk)
+MAX_POSITION_SIZE_PCT = 0.6         # max % of account EQUITY across ALL open
+                                     # positions combined ($ VALUE, not risk).
+                                     # This is a PORTFOLIO-WIDE exposure cap,
+                                     # not a per-position allowance.
 STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
 STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 
@@ -367,6 +370,63 @@ def _count_open_positions() -> int:
     return count
 
 
+def _position_notional(vp: dict[str, Any]) -> float:
+    """Best-effort notional (market) value for one open position record.
+
+    Prefers live mark-to-market (``current_price * remaining/quantity``);
+    falls back to cost basis / the recorded USD size if price data is
+    missing, so a position is never silently counted as $0 exposure.
+    """
+    qty = vp.get("remaining_qty", vp.get("quantity", 0.0)) or 0.0
+    price = vp.get("current_price", 0.0) or 0.0
+    if qty and price:
+        return qty * price
+    return (
+        vp.get("cost_basis")
+        or vp.get("position_size_usdt")
+        or vp.get("position_value")
+        or 0.0
+    )
+
+
+def _existing_open_exposure() -> float:
+    """Total $ notional value of positions already open from *previous*
+    pipeline cycles (paper + live).
+
+    Bug this fixes
+    ──────────────
+    ``RiskManager._used_capital`` only ever accumulated positions
+    approved *within the current run*. It was reset to 0.0 on every
+    fresh ``RiskManager`` instantiation, so capital already committed to
+    positions opened in earlier cycles was completely invisible to the
+    exposure cap. Each new pipeline run would happily approve new
+    positions up to ``MAX_POSITION_SIZE_PCT`` all over again, on top of
+    whatever was already open — letting real portfolio exposure grow
+    far past the configured cap (observed: 100% exposure with
+    MAX_POSITION_SIZE_PCT = 60%).
+    """
+    total = 0.0
+    try:
+        with open(PAPER_STATE_PATH) as f:
+            paper_state = json.load(f)
+        for vp in paper_state.get("positions", {}).values():
+            if vp.get("status") == "OPEN":
+                total += _position_notional(vp)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    try:
+        with open(LIVE_POSITIONS_PATH) as f:
+            live_positions = json.load(f)
+        if isinstance(live_positions, dict):
+            for vp in live_positions.values():
+                total += _position_notional(vp)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    return total
+
+
 class DataLoader:
     """Load and merge scanner + decision data."""
 
@@ -429,7 +489,26 @@ class RiskManager:
         max_daily_loss: float = MAX_DAILY_LOSS_PCT,
         max_positions: int = MAX_OPEN_POSITIONS,
         max_position_size_pct: float = MAX_POSITION_SIZE_PCT,
+        equity: float | None = None,
+        existing_exposure: float | None = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        balance : float
+            *Free cash* available to spend on new positions (e.g.
+            ``wallet.balance``). Never exceeded by newly approved orders.
+        equity : float | None
+            Total account equity = cash + value of open positions (e.g.
+            ``wallet.equity``). Used as the base for the portfolio-wide
+            ``MAX_POSITION_SIZE_PCT`` cap. If not supplied, it is derived
+            as ``balance + existing_exposure`` (best effort).
+        existing_exposure : float | None
+            $ notional value of positions already open from previous
+            cycles. If not supplied, it is read from
+            ``paper_state.json`` / ``live_positions.json`` via
+            :func:`_existing_open_exposure`.
+        """
         self.balance = balance
         self.risk_per_trade = risk_per_trade
         self.max_daily_loss_amt = balance * (max_daily_loss / 100.0)
@@ -438,6 +517,39 @@ class RiskManager:
         self.validator = TradeValidator()
         self.results: list[RiskResult] = []
         self._used_capital = 0.0
+
+        # Exposure already committed from *previous* pipeline cycles —
+        # must be counted against the portfolio-wide cap, not just
+        # positions approved within this run.
+        self._existing_exposure = (
+            existing_exposure if existing_exposure is not None
+            else _existing_open_exposure()
+        )
+
+        # Equity is the correct base for a % of "account equity" cap.
+        # ``balance`` alone (free cash) understates it once capital is
+        # already deployed into open positions.
+        self.equity = (
+            equity if equity is not None
+            else balance + self._existing_exposure
+        )
+
+    def _max_new_position_value(self) -> float:
+        """Max notional value allowed for the *next* new position.
+
+        Enforces that (existing open exposure) + (already approved this
+        run) + (this new position) never exceeds
+        ``max_position_size_pct * equity`` — a true portfolio-wide cap —
+        while also never exceeding the cash actually still available to
+        spend.
+        """
+        total_cap = self.equity * self.max_position_size_pct
+        committed = self._existing_exposure + self._used_capital
+        remaining_exposure_budget = max(0.0, total_cap - committed)
+
+        available_cash = max(0.0, self.balance - self._used_capital)
+
+        return min(remaining_exposure_budget, available_cash)
 
     def run(self) -> list[RiskResult]:
         """Full risk-management pipeline."""
@@ -451,6 +563,11 @@ class RiskManager:
               f"{self.max_daily_loss_amt / self.balance * 100:>5.1f}%  "
               f"(${self.max_daily_loss_amt:>7,.2f})")
         print(f"  Max positions    : {self.max_positions}")
+        print(f"  Equity           : ${self.equity:>8,.2f}")
+        print(f"  Existing exposure: ${self._existing_exposure:>8,.2f}  "
+              f"({self._existing_exposure / self.equity * 100.0 if self.equity else 0.0:>5.1f}%)")
+        print(f"  Max exposure cap : {self.max_position_size_pct * 100:>5.1f}%  "
+              f"(${self.equity * self.max_position_size_pct:>7,.2f})")
         print(f"  Min R:R          : {MIN_RR}")
         print(f"  Min probability  : {MIN_PROBABILITY:.0f}%")
         print()
@@ -483,9 +600,12 @@ class RiskManager:
                 (scanner.price - stop_price) / scanner.price * 100.0
             )
 
-            # Available capital (account equity minus already-approved positions)
-            available_capital = max(0.0, self.balance - self._used_capital)
-            max_pos_value = available_capital * self.max_position_size_pct
+            # Remaining room under the portfolio-wide exposure cap, i.e.
+            # (max_position_size_pct * equity) minus everything already
+            # committed — both from previous cycles (_existing_exposure)
+            # and from trades approved earlier in *this* run
+            # (_used_capital) — further bounded by actual free cash.
+            max_pos_value = self._max_new_position_value()
 
             # Position size (capped to protect account)
             pos_size, risk_amt, pos_value = PositionSizer.calculate(
