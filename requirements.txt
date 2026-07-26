@@ -4,4 +4,3 @@ python-dotenv
 colorama
 pandas
 pytest
-pyyaml
