@@ -370,13 +370,27 @@ check_dependencies() {
 
     info "Checking ${total_pkgs} packages from requirements.txt ..."
 
+    # Known cases where the PyPI package name differs from the importable
+    # module name — the naive hyphen→underscore rule below gets these wrong,
+    # which was causing false "missing" warnings even when installed.
+    _pkg_to_import() {
+        case "${1,,}" in
+            python-dotenv)        echo "dotenv" ;;
+            pyyaml)                echo "yaml" ;;
+            python-telegram-bot)   echo "telegram" ;;
+            beautifulsoup4)        echo "bs4" ;;
+            pillow)                echo "PIL" ;;
+            *)                     echo "${1//-/_}" ;;
+        esac
+    }
+
     # Build a single Python check for all packages (one process, fast)
     local pkg_names=""
     while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         local pkg_name
         pkg_name=$(echo "$line" | sed 's/[>=<!\[].*//' | xargs)
-        [[ -n "$pkg_name" ]] && pkg_names="${pkg_names} ${pkg_name//-/_}"
+        [[ -n "$pkg_name" ]] && pkg_names="${pkg_names} $(_pkg_to_import "$pkg_name")"
     done < "$req_file"
 
     local installed_list
