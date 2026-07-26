@@ -66,16 +66,6 @@ SYM_OK="✔"
 SYM_FAIL="✘"
 SYM_WARN="⚠"
 SYM_INFO="ℹ"
-SYM_ARROW="→"
-SYM_DOT="●"
-SYM_STAR="★"
-SYM_ROCKET="🚀"
-SYM_SHIELD="🛡"
-SYM_GEAR="⚙"
-SYM_CHECK="✅"
-SYM_CROSS="❌"
-SYM_CLOCK="⏱"
-SYM_BOX="┃"
 
 # ─── Counters ───────────────────────────────────────────────────────────────
 _PASS=0
@@ -258,7 +248,8 @@ check_system() {
 
     # ── Disk ──
     local disk_avail
-    disk_avail=$(df -B1 . 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+    disk_avail=$(df -B1 . 2>/dev/null | awk 'NR==2 {print $4}' || true)
+    disk_avail=${disk_avail:-0}
     if (( disk_avail > 0 )); then
         local disk_gb=$(( disk_avail / 1073741824 ))
         if (( disk_gb >= 1 )); then
@@ -364,7 +355,8 @@ check_dependencies() {
     fi
 
     local total_pkgs missing_pkgs installed_pkgs
-    total_pkgs=$(grep -cv '^\s*$\|^\s*#' "$req_file" 2>/dev/null || echo 0)
+    total_pkgs=$(grep -cv '^\s*$\|^\s*#' "$req_file" 2>/dev/null)
+    total_pkgs=${total_pkgs:-0}
     missing_pkgs=0
     installed_pkgs=0
 
@@ -405,13 +397,17 @@ for n in names:
         print(f'MISS {n}')
 " 2>/dev/null || echo "")
 
-    installed_pkgs=$(echo "$installed_list" | grep -c "^OK" || echo 0)
-    missing_pkgs=$(echo "$installed_list" | grep -c "^MISS" || echo 0)
+    installed_pkgs=$(grep -c "^OK" <<< "$installed_list")
+    missing_pkgs=$(grep -c "^MISS" <<< "$installed_list")
+    installed_pkgs=${installed_pkgs:-0}
+    missing_pkgs=${missing_pkgs:-0}
 
     if (( missing_pkgs == 0 )); then
         pass "All ${installed_pkgs} packages installed"
     else
-        warn "${missing_pkgs} package(s) missing out of ${total_pkgs}"
+        local missing_names
+        missing_names=$(grep "^MISS" <<< "$installed_list" | cut -d' ' -f2 | paste -sd, -)
+        warn "${missing_pkgs} package(s) missing out of ${total_pkgs} (${missing_names})"
 
         if [[ "$AUTO_MODE" == "true" ]]; then
             info "Installing missing packages (--auto mode) ..."
@@ -700,7 +696,8 @@ check_runtime() {
 
     # ── Log rotation info ──
     local log_count
-    log_count=$(ls logs/*.log 2>/dev/null | wc -l || echo 0)
+    log_count=$(ls logs/*.log 2>/dev/null | wc -l || true)
+    log_count=${log_count:-0}
     if (( log_count > 50 )); then
         info "Logs: ${log_count} log files — consider cleanup"
     fi
@@ -743,7 +740,8 @@ check_git() {
 
     # ── Working tree status ──
     local changes
-    changes=$(git status --porcelain 2>/dev/null | wc -l || echo 0)
+    changes=$(git status --porcelain 2>/dev/null | wc -l || true)
+    changes=${changes:-0}
     if (( changes == 0 )); then
         pass "Working tree: clean"
     else
