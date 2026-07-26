@@ -232,3 +232,63 @@ class TestEdgeCases:
         cfg = MoneyManagementConfig(max_position_pct_of_balance=0.5)
         result = calculate_position_size(1_000.0, cfg)
         assert result.position_value <= 500.0
+
+
+# ===================================================================
+#  Compounding — detailed calculations
+# ===================================================================
+
+
+class TestCompoundingCalculations:
+    """Verify compounding grows/shrinks correctly with balance changes."""
+
+    def test_compounding_with_profit_growth(self):
+        cfg = MoneyManagementConfig(mode=MoneyManagementMode.COMPOUNDING)
+        initial = 100.0
+        after_profit = 150.0
+        after_more = 500.0
+
+        r1 = calculate_position_size(initial, cfg)
+        r2 = calculate_position_size(after_profit, cfg)
+        r3 = calculate_position_size(after_more, cfg)
+
+        expected_risk_1 = initial * cfg.risk_per_trade
+        expected_risk_2 = after_profit * cfg.risk_per_trade
+        expected_risk_3 = after_more * cfg.risk_per_trade
+
+        assert r1.risk_amount == pytest.approx(expected_risk_1)
+        assert r2.risk_amount == pytest.approx(expected_risk_2)
+        assert r3.risk_amount == pytest.approx(expected_risk_3)
+
+        assert r2.position_value > r1.position_value
+        assert r3.position_value > r2.position_value
+
+    def test_compounding_with_loss_decline(self):
+        cfg = MoneyManagementConfig(mode=MoneyManagementMode.COMPOUNDING)
+        before = 10_000.0
+        after_loss_1 = 8_000.0
+        after_loss_2 = 6_000.0
+
+        r1 = calculate_position_size(before, cfg)
+        r2 = calculate_position_size(after_loss_1, cfg)
+        r3 = calculate_position_size(after_loss_2, cfg)
+
+        assert r2.position_value < r1.position_value
+        assert r3.position_value < r2.position_value
+
+    def test_compounding_position_value_exact(self):
+        cfg = MoneyManagementConfig(mode=MoneyManagementMode.COMPOUNDING)
+        result = calculate_position_size(10_000.0, cfg)
+        expected_position = (10_000.0 * cfg.risk_per_trade) / cfg.stop_loss_pct
+        assert result.position_value == pytest.approx(expected_position)
+        assert result.risk_amount == pytest.approx(100.0)
+
+    def test_compounding_respects_balance_cap(self):
+        cfg = MoneyManagementConfig(
+            mode=MoneyManagementMode.COMPOUNDING,
+            risk_per_trade=0.5,
+            stop_loss_pct=0.01,
+        )
+        result = calculate_position_size(100.0, cfg)
+        capped = min((100.0 * 0.5) / 0.01, 100.0)
+        assert result.position_value == pytest.approx(capped)

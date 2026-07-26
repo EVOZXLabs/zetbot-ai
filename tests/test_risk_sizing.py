@@ -15,9 +15,11 @@ from dataclasses import asdict
 import pytest
 
 from scripts.risk_manager import (
+    DecisionData,
     PositionSizer,
     RiskManager,
     RiskResult,
+    ScannerData,
     StopLossCalculator,
     TradeValidator,
 )
@@ -386,6 +388,177 @@ class TestPaperWallet:
 # ===================================================================
 #  Test helpers
 # ===================================================================
+
+
+# ===================================================================
+#  Daily Loss Protection
+# ===================================================================
+
+
+class TestDailyLossProtection:
+    """TradeValidator must reject trades that exceed the daily loss limit."""
+
+    def test_daily_loss_not_reached_allows_trade(self):
+        """When daily loss is below limit, trade is APPROVED."""
+        validator = TradeValidator()
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=50_000.0, volume_24h=10_000_000.0,
+            change_24h=2.0, ema50=49_000.0, ema100=48_500.0, ema200=48_000.0,
+            rsi14=55.0, adx14=30.0, atr_pct=1.5, relative_volume=1.2,
+            trend_alignment="BULLISH",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=75.0, recommendation="STRONG BUY",
+            risk_score=20.0, reward_score=70.0, trend_score=80.0,
+            momentum_score=60.0, volume_score=50.0, volatility_score=40.0,
+            expected_rr=2.5, overall_score=75.0,
+        )
+        validator.daily_risk_used = 0.0
+        approval, reason = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=100.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=3,
+        )
+        assert approval == "APPROVED"
+
+    def test_daily_loss_reached_rejects_trade(self):
+        """When daily loss is at limit, trade is REJECTED."""
+        validator = TradeValidator()
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=50_000.0, volume_24h=10_000_000.0,
+            change_24h=2.0, ema50=49_000.0, ema100=48_500.0, ema200=48_000.0,
+            rsi14=55.0, adx14=30.0, atr_pct=1.5, relative_volume=1.2,
+            trend_alignment="BULLISH",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=75.0, recommendation="STRONG BUY",
+            risk_score=20.0, reward_score=70.0, trend_score=80.0,
+            momentum_score=60.0, volume_score=50.0, volatility_score=40.0,
+            expected_rr=2.5, overall_score=75.0,
+        )
+        validator.daily_risk_used = 250.0
+        approval, reason = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=100.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=3,
+        )
+        assert approval == "REJECTED"
+        assert "Daily loss limit" in reason
+
+    def test_daily_loss_edge_case_at_limit(self):
+        """Risk amount exactly at daily loss limit boundary."""
+        validator = TradeValidator()
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=50_000.0, volume_24h=10_000_000.0,
+            change_24h=2.0, ema50=49_000.0, ema100=48_500.0, ema200=48_000.0,
+            rsi14=55.0, adx14=30.0, atr_pct=1.5, relative_volume=1.2,
+            trend_alignment="BULLISH",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=75.0, recommendation="STRONG BUY",
+            risk_score=20.0, reward_score=70.0, trend_score=80.0,
+            momentum_score=60.0, volume_score=50.0, volatility_score=40.0,
+            expected_rr=2.5, overall_score=75.0,
+        )
+        validator.daily_risk_used = 299.0
+        approval, reason = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=1.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=3,
+        )
+        assert approval == "APPROVED"
+
+
+# ===================================================================
+#  Max Open Position Protection
+# ===================================================================
+
+
+class TestMaxOpenPosition:
+    """TradeValidator must reject when max positions are reached."""
+
+    def test_open_positions_below_limit_allows_trade(self):
+        """When open positions < max, trade is APPROVED."""
+        validator = TradeValidator()
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=50_000.0, volume_24h=10_000_000.0,
+            change_24h=2.0, ema50=49_000.0, ema100=48_500.0, ema200=48_000.0,
+            rsi14=55.0, adx14=30.0, atr_pct=1.5, relative_volume=1.2,
+            trend_alignment="BULLISH",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=75.0, recommendation="STRONG BUY",
+            risk_score=20.0, reward_score=70.0, trend_score=80.0,
+            momentum_score=60.0, volume_score=50.0, volatility_score=40.0,
+            expected_rr=2.5, overall_score=75.0,
+        )
+        validator.open_positions = 0
+        approval, reason = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=100.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=2,
+        )
+        assert approval == "APPROVED"
+
+    def test_max_positions_reached_rejects_trade(self):
+        """When open positions >= max, trade is REJECTED."""
+        validator = TradeValidator()
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=50_000.0, volume_24h=10_000_000.0,
+            change_24h=2.0, ema50=49_000.0, ema100=48_500.0, ema200=48_000.0,
+            rsi14=55.0, adx14=30.0, atr_pct=1.5, relative_volume=1.2,
+            trend_alignment="BULLISH",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=75.0, recommendation="STRONG BUY",
+            risk_score=20.0, reward_score=70.0, trend_score=80.0,
+            momentum_score=60.0, volume_score=50.0, volatility_score=40.0,
+            expected_rr=2.5, overall_score=75.0,
+        )
+        validator.open_positions = 2
+        approval, reason = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=100.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=2,
+        )
+        assert approval == "REJECTED"
+        assert "Max positions" in reason
+
+    def test_risk_manager_default_max_positions_is_one(self):
+        """RiskManager must default to 1 max position."""
+        manager = RiskManager(balance=10_000.0)
+        assert manager.max_positions == 1
+
+    def test_risk_manager_respects_max_positions_from_risk_result(self):
+        """Validator correctly tracks approved count against max."""
+        validator = TradeValidator()
+        scanner = ScannerData(
+            symbol="BTC/USDT", price=50_000.0, volume_24h=10_000_000.0,
+            change_24h=2.0, ema50=49_000.0, ema100=48_500.0, ema200=48_000.0,
+            rsi14=55.0, adx14=30.0, atr_pct=1.5, relative_volume=1.2,
+            trend_alignment="BULLISH",
+        )
+        decision = DecisionData(
+            symbol="BTC/USDT", probability=75.0, recommendation="STRONG BUY",
+            risk_score=20.0, reward_score=70.0, trend_score=80.0,
+            momentum_score=60.0, volume_score=50.0, volatility_score=40.0,
+            expected_rr=2.5, overall_score=75.0,
+        )
+        validator.open_positions = 0
+        approval1, _ = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=100.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=1,
+        )
+        assert approval1 == "APPROVED"
+        validator.open_positions = 1
+        approval2, reason2 = validator.validate(
+            scanner=scanner, decision=decision,
+            actual_rr=2.5, position_value=1_000.0, risk_amount=100.0,
+            stop_distance_pct=2.0, max_daily_loss=300.0, max_positions=1,
+        )
+        assert approval2 == "REJECTED"
+        assert "Max positions" in reason2
 
 
 # ===================================================================

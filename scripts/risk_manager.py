@@ -23,7 +23,10 @@ from scripts.money_management import (
     DAILY_LOSS_LIMIT as MM_DAILY_LOSS_LIMIT,
     DEFAULT_MODE as MM_DEFAULT_MODE,
     MAX_OPEN_POSITIONS as MM_MAX_OPEN_POSITIONS,
+    MoneyManagementConfig,
+    MoneyManagementMode,
     RISK_PER_TRADE as MM_RISK_PER_TRADE,
+    calculate_position_size,
 )
 
 # ---------------------------------------------------------------------------
@@ -156,6 +159,8 @@ class RiskResult:
     approval: str
     rejection_reason: str
     money_management_mode: str = MONEY_MANAGEMENT_MODE
+    stop_loss_pct: float = 0.0
+    take_profit_pct: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +548,7 @@ class RiskManager:
         max_position_size_pct: float = MAX_POSITION_SIZE_PCT,
         equity: float | None = None,
         existing_exposure: float | None = None,
+        mm_config: MoneyManagementConfig | None = None,
     ) -> None:
         """
         Parameters
@@ -569,6 +575,10 @@ class RiskManager:
             cycles. If not supplied, it is read from
             ``paper_state.json`` / ``live_positions.json`` via
             :func:`_existing_open_exposure`.
+        mm_config : MoneyManagementConfig | None
+            Money Management configuration (mode, risk per trade, stop
+            loss, take profit, etc.). Defaults to RISK_PERCENTAGE mode
+            with production defaults (1% risk, 1.5% stop, 3% target).
         """
         self.balance = balance
         self.risk_per_trade = risk_per_trade
@@ -577,6 +587,7 @@ class RiskManager:
         self.validator = TradeValidator()
         self.results: list[RiskResult] = []
         self._used_capital = 0.0
+        self.mm_config = mm_config or MoneyManagementConfig()
 
         # Exposure already committed from *previous* pipeline cycles —
         # must be counted against the portfolio-wide cap, not just
@@ -679,12 +690,46 @@ class RiskManager:
             # (_used_capital) — further bounded by actual free cash.
             max_pos_value = self._max_new_position_value()
 
-            # Position size (capped to protect account)
-            pos_size, risk_amt, pos_value = PositionSizer.calculate(
-                self.balance, self.risk_per_trade,
-                scanner.price, stop_price,
-                max_position_value=max_pos_value,
+            # ── Position sizing via Money Management Engine ──────────
+            # Supports all 4 modes:
+            #   FIXED_AMOUNT:     fixed USD per trade, capped to balance
+            #   PERCENTAGE_BALANCE: fixed % of current balance
+            #   RISK_PERCENTAGE:   risk_amount = balance * risk_pct,
+            #                      position_value = risk_amount / stop_pct
+            #   COMPOUNDING:       same as RISK_PERCENTAGE, latest
+            #                      balance always used by caller
+            mm_cfg = MoneyManagementConfig(
+                mode=self.mm_config.mode,
+                risk_per_trade=self.mm_config.risk_per_trade,
+                stop_loss_pct=self.mm_config.stop_loss_pct,
+                take_profit_pct=self.mm_config.take_profit_pct,
+                fixed_amount=self.mm_config.fixed_amount,
+                percentage_balance=self.mm_config.percentage_balance,
+                max_position_pct_of_balance=self.max_position_size_pct,
             )
+            mm_result = calculate_position_size(self.balance, mm_cfg)
+            risk_amt = mm_result.risk_amount
+            pos_value = mm_result.position_value
+
+            # Convert notional position value to units
+            if scanner.price > 0 and pos_value > 0:
+                pos_size = pos_value / scanner.price
+                # Recompute risk_amount based on actual stop distance,
+                # not just the stop_loss_pct used in Money Management.
+                stop_distance = scanner.price - stop_price
+                if stop_distance > 0:
+                    actual_risk = pos_size * stop_distance
+                    risk_amt = min(actual_risk, risk_amt)
+            else:
+                pos_size = 0.0
+
+            # Apply portfolio-wide exposure cap
+            if max_pos_value is not None and pos_value > max_pos_value:
+                pos_value = max_pos_value
+                pos_size = pos_value / scanner.price if scanner.price > 0 else 0.0
+                stop_distance = scanner.price - stop_price
+                if stop_distance > 0:
+                    risk_amt = pos_size * stop_distance
 
             # Take profits
             tp_prices = TakeProfitCalculator.calculate(
@@ -743,6 +788,9 @@ class RiskManager:
                 expected_rr=round(rr_for_validation, 2),
                 approval=approval,
                 rejection_reason=reason,
+                money_management_mode=self.mm_config.mode.value,
+                stop_loss_pct=round(self.mm_config.stop_loss_pct * 100, 2),
+                take_profit_pct=round(self.mm_config.take_profit_pct * 100, 2),
             ))
 
         self.results = results
@@ -912,10 +960,14 @@ def main() -> None:
     # always exactly (equity - cash), per the canonical accounting
     # invariant in MetricsManager.compute_snapshot().
     existing_exposure = max(0.0, equity - balance)
+    mm_config = MoneyManagementConfig(
+        mode=MoneyManagementMode(MONEY_MANAGEMENT_MODE),
+    )
     manager = RiskManager(
         balance=balance,
         equity=equity,
         existing_exposure=existing_exposure,
+        mm_config=mm_config,
     )
     results = manager.run()
 

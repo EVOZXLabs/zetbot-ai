@@ -690,17 +690,19 @@ Protect trading capital.
 
 Responsibilities
 
-Maximum Open Position
+Risk Validation (Gate)
 
-Daily Loss Limit
+Maximum Open Position (default: 1)
+
+Daily Loss Limit (default: 3%)
 
 Cooldown
 
 Maximum Trades
 
-Stop Loss
+Stop Loss (default: 1.5%)
 
-Take Profit
+Take Profit (default: 3%)
 
 Emergency Stop
 
@@ -709,6 +711,13 @@ Risk Engine has the highest execution priority.
 If Risk Engine rejects a trade,
 
 the trade MUST NOT execute.
+
+Trading Flow
+
+Strategy Signal → Risk Validation → Position Calculation → Order Execution
+
+The Risk Engine MUST validate EVERY BUY signal before position sizing
+and order execution. No trade may bypass this gate.
 
 ---
 
@@ -724,7 +733,7 @@ Fixed Amount
 
 Percentage Balance
 
-Risk Percentage
+Risk Percentage (DEFAULT PRODUCTION mode)
 
 Compounding
 
@@ -748,6 +757,45 @@ Maximum Open Position: 1
 
 Daily Loss Limit: 3%
 
+Maximum Exposure: 60% of equity (portfolio-wide)
+
+Mode Details
+
+Fixed Amount
+
+A fixed USD amount per trade, capped to available balance.
+
+position_value = min(fixed_amount, balance)
+
+risk_amount = position_value × stop_loss_pct
+
+Percentage Balance
+
+A fixed percentage of the current balance.
+
+position_value = balance × percentage_balance
+
+risk_amount = position_value × stop_loss_pct
+
+Risk Percentage (DEFAULT)
+
+Position size derived from how much money the account is willing
+to risk and how far away the stop loss is.
+
+risk_amount = balance × risk_per_trade
+
+position_value = risk_amount / stop_loss_pct
+
+Compounding
+
+Identical formula to Risk Percentage. The caller must always
+pass the latest balance (including realized P&L) so that gains
+and losses compound into the next trade's size automatically.
+
+risk_amount = balance × risk_per_trade
+
+position_value = risk_amount / stop_loss_pct
+
 Dynamic Position Sizing
 
 Position size is NEVER a fixed dollar amount. It must always be
@@ -768,6 +816,11 @@ $100
 $1,000
 
 $10,000
+
+Exposure Cap
+
+Total portfolio exposure (sum of all open position values) must
+never exceed MAX_POSITION_SIZE_PCT (default: 60%) of total equity.
 
 Money Management never generates signals.
 
@@ -1367,7 +1420,7 @@ Fixed Amount
 
 Percentage Balance
 
-Risk Percentage
+Risk Percentage (DEFAULT PRODUCTION mode)
 
 Compounding
 
@@ -1388,6 +1441,31 @@ Position: Dynamic Calculation
 Maximum Open Position: 1
 
 Daily Loss Limit: 3%
+
+Maximum Portfolio Exposure: 60% of equity
+
+Mode Details
+
+Fixed Amount
+
+position_value = min(fixed_amount, balance)
+risk_amount = position_value × stop_loss_pct
+
+Percentage Balance
+
+position_value = balance × percentage_balance
+risk_amount = position_value × stop_loss_pct
+
+Risk Percentage (DEFAULT)
+
+risk_amount = balance × risk_per_trade
+position_value = risk_amount / stop_loss_pct
+
+Compounding
+
+Same formula as Risk Percentage, but the caller MUST always pass
+the latest balance (including realized P&L) so gains and losses
+compound into the next trade's size automatically.
 
 Position size in Risk Percentage mode is always computed as:
 
@@ -1412,39 +1490,22 @@ Enabled
 
 Mode
 
-Percentage Balance
+Risk Percentage (same formula, latest balance always used)
+
+Compounding uses the same formula as Risk Percentage.
+Since balance is always the caller's current balance,
+realized profit/loss is automatically folded into the
+next trade's sizing.
+
+Compounding must respect Risk Engine.
 
 Example
 
-Balance
+Balance: $100 → Trade risk: $1 → Position: ~$66.67
 
-100
+After win: Balance $150 → Trade risk: $1.50 → Position: ~$100
 
-Trade
-
-10
-
-↓
-
-Balance
-
-150
-
-Trade
-
-15
-
-↓
-
-Balance
-
-500
-
-Trade
-
-50
-
-Compounding must respect Risk Engine.
+After win: Balance $500 → Trade risk: $5 → Position: ~$333.33
 
 ---
 
@@ -1452,21 +1513,31 @@ Compounding must respect Risk Engine.
 
 Default
 
-Position Size
+Position Sizing Mode: Risk Percentage
 
-Dynamic Calculation (Risk Amount / Stop Loss Distance)
+Risk Per Trade: 1%
 
-Maximum Daily Loss
+Stop Loss: 1.5%
 
-3%
+Take Profit: 3%
 
-Maximum Daily Trades
+Maximum Daily Loss: 3%
 
-Configurable
+Maximum Daily Trades: Configurable
 
-Maximum Open Position
+Maximum Open Position: 1
 
-1
+Maximum Portfolio Exposure: 60% of equity
+
+Dynamic Position Sizing
+
+Risk Amount = Account Balance × Risk Percentage
+
+Position Value = Risk Amount / Stop Loss Percentage
+
+Portfolio Exposure Cap
+
+total_open_position_value <= equity × MAX_POSITION_SIZE_PCT (default 60%)
 
 Risk always overrides strategy.
 
