@@ -140,18 +140,20 @@ class PositionsCommand(BaseCommand):
                 if holding_hours:
                     holding_str = fmt_holding(holding_hours * 3600)
 
-            # Progress bar from entry to TP1
+            # Progress bar from entry to TP1 — only shown when there's an
+            # actual TP1 to measure against, rather than faking a 50%
+            # bar with no real meaning behind it.
             tp1 = p.get("tp1", 0.0)
             sl = p.get("current_stop") or p.get("stop_loss", 0.0)
+            progress_line = ""
             if entry > 0 and tp1 > entry:
                 pct_to_tp = max(0, min(100, (current - entry) / (tp1 - entry) * 100))
                 bar = progress_bar(pct_to_tp, 100, 10)
-            else:
-                bar = progress_bar(50, 100, 10)
+                progress_line = f"Entry → TP1  {bar} {pct_to_tp:.0f}%\n"
 
             card = (
-                f"{emoji} *{symbol}*  ${pnl:+,.2f}\n"
-                f"{bar}\n"
+                f"{emoji} *{symbol}*  ${pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
+                f"{progress_line}"
                 f"🕒 Held {holding_str}"
             )
             cards.append(card)
