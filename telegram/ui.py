@@ -126,23 +126,16 @@ def pnl_emoji(value: float) -> str:
 
 
 # ── AI Insight ────────────────────────────────────────────────────────
+#
+# Rule: never emit the same sentence for two different trades. Every
+# insight is built from the actual numbers of *this* trade (result %,
+# holding time) plus the real strategy reason, if one was supplied —
+# never a static line picked at random from a fixed list.
 
-_EXIT_INSIGHTS: dict[str, list[str]] = {
-    "Take Profit": [
-        "TP reached successfully.",
-        "Target hit — profit secured.",
-        "Exit at target level executed.",
-    ],
-    "Stop Loss": [
-        "Stop Loss protected capital.",
-        "Risk managed — loss capped.",
-        "SL triggered to limit downside.",
-    ],
-    "Strategy Exit": [
-        "Strategy signaled exit.",
-        "Signal reversed — position closed.",
-        "Trend shifted — orderly exit.",
-    ],
+_EXIT_LEAD: dict[str, str] = {
+    "Take Profit": "TP reached",
+    "Stop Loss": "Stop Loss triggered",
+    "Strategy Exit": "Strategy signaled the exit",
 }
 
 
@@ -153,54 +146,65 @@ def ai_insight(
     confidence: float = 0.0,
     is_buy: bool = True,
     exit_reason: str = "",
+    pnl_pct: Optional[float] = None,
+    holding_str: str = "",
 ) -> str:
-    """Generate a short AI insight from available strategy outputs.
+    """Build a short, trade-specific insight line.
 
-    Maximum 2 sentences. Never fabricates data.
+    Grounded in the actual outcome of this trade (result %, how long it
+    was held, the real strategy reason) so two different trades never
+    read as the same sentence. Never fabricates data — omits a detail
+    entirely if it wasn't supplied.
     """
+    if not is_buy:
+        lead = _EXIT_LEAD.get(
+            exit_reason, f"{exit_reason} exit" if exit_reason else "Position closed",
+        )
+
+        outcome: list[str] = []
+        if pnl_pct is not None:
+            direction = "up" if pnl_pct >= 0 else "down"
+            outcome.append(f"{direction} {pnl_pct:+.2f}%")
+        if holding_str:
+            outcome.append(f"after {holding_str}")
+
+        sentence = lead + (f" — {' '.join(outcome)}" if outcome else "")
+        sentence = sentence.rstrip(".") + "."
+
+        # Append the real strategy reason behind the exit, if one was
+        # supplied and it isn't just a repeat of exit_reason/placeholder.
+        clean = [
+            r for r in (reasons or [])
+            if r and r not in (exit_reason, "Paper trade executed")
+        ]
+        if clean:
+            sentence += f" {clean[0].rstrip('.')}."
+
+        return sentence
+
+    # Buy / open insight — lead with the concrete signal, then trend.
     parts: list[str] = []
 
-    # Exit-reason insights (highest priority for sell notifications)
-    if not is_buy and exit_reason in _EXIT_INSIGHTS:
-        parts.append(_EXIT_INSIGHTS[exit_reason][0])
-    elif not is_buy and exit_reason:
-        parts.append(f"{exit_reason} exit executed.")
+    clean = [r for r in (reasons or []) if r and r != "Paper trade executed"]
+    if clean:
+        parts.append(clean[0].rstrip("."))
 
     if trend and len(parts) < 2:
         trend_lower = trend.lower()
-        if is_buy:
-            if "up" in trend_lower or "bull" in trend_lower:
-                parts.append("Trend remains bullish.")
-            elif "down" in trend_lower or "bear" in trend_lower:
-                parts.append("Trend shows bearish pressure.")
-            else:
-                parts.append(f"Trend: {trend}.")
+        if "up" in trend_lower or "bull" in trend_lower:
+            parts.append("trend is bullish")
+        elif "down" in trend_lower or "bear" in trend_lower:
+            parts.append("despite bearish pressure")
         else:
-            if "up" in trend_lower or "bull" in trend_lower:
-                parts.append("Trend still bullish — momentum weakening.")
-            elif "down" in trend_lower or "bear" in trend_lower:
-                parts.append("Downtrend confirmed.")
-            else:
-                parts.append(f"Trend: {trend}.")
-
-    if reasons and len(parts) < 2:
-        # Drop anything that just repeats exit_reason (e.g. reasons=[exit_reason])
-        # so we never produce "Stop Loss protected capital. Stop Loss."
-        clean = [
-            r for r in reasons
-            if r and r != "Paper trade executed" and r != exit_reason
-        ]
-        if clean:
-            parts.append(clean[0] + ("." if not clean[0].endswith(".") else ""))
+            parts.append(f"trend: {trend}")
 
     if not parts:
-        if is_buy:
-            parts.append("Signal analysis complete.")
-        else:
-            parts.append("Position closed per strategy rules.")
+        parts.append("Signal analysis complete")
 
-    text = " ".join(parts[:2])
-    return text
+    text = ". ".join(
+        p[0].upper() + p[1:] if i == 0 else p for i, p in enumerate(parts[:2])
+    )
+    return text.rstrip(".") + "."
 
 
 # ── Compact design language (headline-first, details secondary) ───────
@@ -215,16 +219,25 @@ def compact_header() -> str:
     return "🤖 *ZetBot AI*"
 
 
-def detail_block(lines: list[str]) -> str:
+def detail_block(lines: list[str], label: str = "Details") -> str:
     """Render secondary/technical lines in a de-emphasized monospace block.
 
     Kept visually distinct from the headline so a non-technical reader
     can skip it, while it's still available for anyone who wants it.
+    Telegram collapses multi-line monospace blocks visually smaller than
+    the surrounding text, which is the effect we want for "secondary
+    info" — a true tap-to-reveal spoiler needs MarkdownV2 (a much wider
+    change across every message), so this is the safe equivalent.
     """
     clean = [ln for ln in lines if ln]
     if not clean:
         return ""
-    return "```\n" + "\n".join(clean) + "\n```"
+    return f"_{label}_\n```\n" + "\n".join(clean) + "\n```"
+
+
+def note(text: str) -> str:
+    """One-line, small/italic explainer — used instead of a jargon dump."""
+    return f"_{text}_"
 
 
 # ── Message assembly ──────────────────────────────────────────────────
