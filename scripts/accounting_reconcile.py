@@ -233,11 +233,18 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
                 f"unrealized=${snapshot.unrealized_pnl:+.2f} — repairing"
             )
 
-        # Write computed values from canonical snapshot
-        pb["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
-        pb["final_equity"] = round(snapshot.equity, 2)
-        pb["net_pnl"] = round(snapshot.net_pnl, 2)
-        pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
+        # Write computed values from canonical snapshot — only count
+        # as a repair if a value actually changed.
+        snap_fields = {
+            "unrealized_pnl": round(snapshot.unrealized_pnl, 2),
+            "final_equity": round(snapshot.equity, 2),
+            "net_pnl": round(snapshot.net_pnl, 2),
+            "total_return_pct": round(snapshot.total_return_pct, 2),
+        }
+        for key, val in snap_fields.items():
+            if pb.get(key) != val:
+                pb[key] = val
+                findings["repairs_applied"] += 1
 
         # ------------------------------------------------------------------
         #  3. Fix Infinity / NaN profit_factor
@@ -256,18 +263,22 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
             pb["initial_balance"] = initial
             findings["repairs_applied"] += 1
 
-        # Write repaired file (preserves all other fields including
-        # equity_history, generated timestamp, etc.)
-        _write_json(_BALANCE_PATH, pb)
-        findings["repairs_applied"] += 1
-
-        log.info(
-            f"[RECONCILE] Accounting reconciled: "
-            f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
-            f"unrealized=${snapshot.unrealized_pnl:+.2f} "
-            f"return={snapshot.total_return_pct:+.2f}% "
-            f"({len(open_positions)} open, "
-            f"{findings['repairs_applied']} repairs)"
-        )
+        # Write file only if any repair was applied
+        if findings["repairs_applied"] > 0:
+            _write_json(_BALANCE_PATH, pb)
+            log.info(
+                f"[RECONCILE] Accounting reconciled: "
+                f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
+                f"unrealized=${snapshot.unrealized_pnl:+.2f} "
+                f"return={snapshot.total_return_pct:+.2f}% "
+                f"({len(open_positions)} open, "
+                f"{findings['repairs_applied']} repair(s))"
+            )
+        else:
+            log.debug(
+                f"[RECONCILE] All clean — "
+                f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
+                f"({len(open_positions)} open)"
+            )
 
     return findings
