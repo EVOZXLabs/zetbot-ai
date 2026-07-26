@@ -73,7 +73,14 @@ def progress_bar(
 ) -> str:
     """Render a text-based progress bar.
 
-    Example: ████████░░
+    Example: `████████░░`
+
+    Wrapped in a monospace code span on purpose. Telegram (notably on
+    Android) renders block characters in the surrounding proportional
+    font, where they have inconsistent widths and end up smeared
+    together into a single black blob instead of a readable bar.
+    Forcing monospace via backticks gives every block the same width
+    and keeps the bar legible.
     """
     if maximum <= 0:
         ratio = 0.0
@@ -81,7 +88,8 @@ def progress_bar(
         ratio = max(0.0, min(1.0, value / maximum))
     filled = round(ratio * length)
     empty = length - filled
-    return "█" * filled + "░" * empty
+    bar = "█" * filled + "░" * empty
+    return f"`{bar}`"
 
 
 def confidence_bar(value: float) -> str:
