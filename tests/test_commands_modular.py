@@ -563,7 +563,7 @@ class TestNewUX:
     def test_help_has_sections(self) -> None:
         from telegram.commands.help import HelpCommand
         result = _execute(HelpCommand, _make_ctx())
-        assert "Available Commands" in result
+        assert "Command Reference" in result
         assert "Trading" in result
         assert "Monitoring" in result
         assert "System" in result
