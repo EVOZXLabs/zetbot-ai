@@ -1,1 +1,0 @@
-{"trace_id": "b5bc9a9f-9e31-4f94-b5e6-fb64e43177dc", "execution_id": "4bae74ca-6f8e-45f7-a785-60e9d71f5954", "order_id": "", "symbol": "BTC/USDT", "side": "BUY", "amount": 0.0, "status": "REJECTED", "executor": "", "mode": "", "exchange": "", "latency_ms": 0.0, "retries": 0, "error": "No approved decisions available.", "timestamp": "2026-07-25T14:17:47.457640+00:00"}
