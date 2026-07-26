@@ -181,11 +181,14 @@ class Notifier:
                 compact_header(),
                 f"🟢 *BUY OPENED — {symbol}*"
                 + (f"\n{where}" if where else ""),
-                f"Entry {fp(entry_price)}\n{ai_insight(reasons=reasons, is_buy=True)}",
-                detail_block([
-                    f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
-                    f"Take Profit  {fp(take_profit)}  ({tp_pct:+.2f}%)",
-                ]),
+                f"Entry {fp(entry_price)}\n🧠 {ai_insight(reasons=reasons, is_buy=True)}",
+                detail_block(
+                    [
+                        f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
+                        f"Take Profit  {fp(take_profit)}  ({tp_pct:+.2f}%)",
+                    ],
+                    label="Trade plan",
+                ),
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -234,20 +237,27 @@ class Notifier:
                 reasons=[exit_reason],
                 is_buy=False,
                 exit_reason=exit_reason,
+                pnl_pct=roi_pct,
+                holding_str=holding_str,
             )
 
             title = f"{symbol}" if symbol else "Position"
 
+            # One message, one focus: the result first, one plain-language
+            # line for why, then Entry/Exit as secondary technical info for
+            # anyone who wants to double-check the numbers.
             text = build_message(
                 compact_header(),
                 f"{result_emoji} *POSITION CLOSED — {title}*\n"
                 f"Profit ${pnl:+,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
                 f"🧠 AI Insight: {insight}\nBalance now ${balance:,.2f}",
-                detail_block([
-                    f"Entry  {fp(entry_price)}",
-                    f"Exit   {fp(exit_price)}",
-                    f"Reason {exit_reason}",
-                ]),
+                detail_block(
+                    [
+                        f"Entry  {fp(entry_price)}",
+                        f"Exit   {fp(exit_price)}",
+                    ],
+                    label="Trade details",
+                ),
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -267,7 +277,7 @@ class Notifier:
         """Send TAKE PROFIT HIT notification."""
         logger.info("[TG] Sending notification: TAKE_PROFIT %s", symbol)
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, pnl_emoji, build_message
+            from telegram.ui import compact_header, wib_now, detail_block, build_message
             from telegram.formatter import fmt_price as fp, fmt_holding
 
             if holding_time is None:
@@ -275,15 +285,14 @@ class Notifier:
             holding_str = fmt_holding(holding_time.total_seconds())
 
             text = build_message(
-                header(),
-                f"🎯 *TAKE PROFIT HIT*\n{symbol}",
-                f"{SEPARATOR}\n"
-                f"💰 Entry\n{fp(entry_price)}\n\n"
-                f"🚪 Exit\n{fp(exit_price)}",
-                f"{SEPARATOR}\n"
-                f"📈 Profit\n{pnl_emoji(profit)} ${profit:+,.2f}\n\n"
-                f"🕒 Held\n{holding_str}",
-                f"{SEPARATOR}\n🕐 {wib_now()}",
+                compact_header(),
+                f"🎯 *TAKE PROFIT HIT — {symbol}*\n"
+                f"Profit ${profit:+,.2f} · Held {holding_str}",
+                detail_block(
+                    [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],
+                    label="Trade details",
+                ),
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -302,7 +311,7 @@ class Notifier:
         """Send STOP LOSS HIT notification."""
         logger.info("[TG] Sending notification: STOP_LOSS %s", symbol)
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, pnl_emoji, build_message
+            from telegram.ui import compact_header, wib_now, detail_block, build_message
             from telegram.formatter import fmt_price as fp, fmt_holding
 
             if holding_time is None:
@@ -310,15 +319,14 @@ class Notifier:
             holding_str = fmt_holding(holding_time.total_seconds())
 
             text = build_message(
-                header(),
-                f"🛑 *STOP LOSS HIT*\n{symbol}",
-                f"{SEPARATOR}\n"
-                f"💰 Entry\n{fp(entry_price)}\n\n"
-                f"🚪 Exit\n{fp(exit_price)}",
-                f"{SEPARATOR}\n"
-                f"📉 Loss\n{pnl_emoji(loss)} ${loss:+,.2f}\n\n"
-                f"🕒 Held\n{holding_str}",
-                f"{SEPARATOR}\n🕐 {wib_now()}",
+                compact_header(),
+                f"🛑 *STOP LOSS HIT — {symbol}*\n"
+                f"Loss ${loss:+,.2f} · Held {holding_str}",
+                detail_block(
+                    [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],
+                    label="Trade details",
+                ),
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -334,14 +342,12 @@ class Notifier:
         """Send TRADE REJECTED notification (low priority system event)."""
         logger.info("[TG] Sending notification: TRADE_REJECTED %s — %s", symbol, reason)
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, build_message
+            from telegram.ui import compact_header, wib_now, build_message
 
             text = build_message(
-                header(),
-                f"⚠️ *TRADE REJECTED*\n{SEPARATOR}",
-                f"Symbol: `{symbol}`\n"
-                f"Reason: `{reason}`",
-                f"🕐 {wib_now()}",
+                compact_header(),
+                f"⚠️ *TRADE REJECTED — {symbol}*\n{reason}",
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -361,13 +367,13 @@ class Notifier:
         """Send BOT STARTED notification."""
         logger.info("[TG] Sending notification: BOT_STARTED")
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, build_message
+            from telegram.ui import compact_header, wib_now, build_message
 
+            where = " • ".join(p for p in (symbol, exchange, timeframe) if p)
             text = build_message(
-                header(),
-                f"🟢 *BOT STARTED*\n{SEPARATOR}",
-                f"📊 {symbol} • {exchange} • {timeframe}\n{SEPARATOR}",
-                f"🕐 {wib_now()}",
+                compact_header(),
+                "🟢 *BOT STARTED*" + (f"\n{where}" if where else ""),
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -382,13 +388,12 @@ class Notifier:
         """Send BOT STOPPED notification."""
         logger.info("[TG] Sending notification: BOT_STOPPED")
         try:
-            from telegram.ui import header, SEPARATOR, build_message
+            from telegram.ui import compact_header, build_message
 
             text = build_message(
-                header(),
-                f"🔴 *BOT STOPPED*\n{SEPARATOR}",
-                f"📊 Cycles: {cycles}\n"
-                f"💰 Balance: ${balance:,.2f}",
+                compact_header(),
+                f"🔴 *BOT STOPPED*\n"
+                f"{cycles} cycles run · Balance ${balance:,.2f}",
             )
             return self._send(text)
         except Exception as exc:
@@ -399,12 +404,12 @@ class Notifier:
         """Send ERROR notification."""
         logger.info("[TG] Sending notification: ERROR — %s", message[:80])
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, build_message
+            from telegram.ui import compact_header, wib_now, build_message
 
             text = build_message(
-                header(),
-                f"⚠️ *ERROR*\n{SEPARATOR}\n`{message}`",
-                f"🕐 {wib_now()}",
+                compact_header(),
+                f"⚠️ *ERROR*\n`{message}`",
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -415,12 +420,12 @@ class Notifier:
         """Send generic system notification."""
         logger.info("[TG] Sending notification: SYSTEM")
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, build_message
+            from telegram.ui import compact_header, wib_now, build_message
 
             text = build_message(
-                header(),
-                f"ℹ️ *SYSTEM*\n{SEPARATOR}\n{message}",
-                f"🕐 {wib_now()}",
+                compact_header(),
+                f"ℹ️ *SYSTEM*\n{message}",
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
@@ -432,16 +437,16 @@ class Notifier:
         logger.info("[TG] Sending notification: DAILY_SUMMARY")
         try:
             from telegram.ui import (
-                header, SEPARATOR, wib_now, confidence_bar, build_message,
+                compact_header, wib_now, confidence_bar, pnl_emoji, build_message,
             )
             from telegram.formatter import fmt_pf
 
             if stats.get("total_trades", 0) == 0:
                 text = build_message(
-                    header(),
-                    f"📅 *DAILY SUMMARY*\n{SEPARATOR}",
-                    f"No trades completed today.\n💰 Balance: ${balance:,.2f}",
-                    f"🕐 {wib_now()}",
+                    compact_header(),
+                    "📅 *DAILY SUMMARY*\nNo trades completed today.",
+                    f"Balance ${balance:,.2f}",
+                    wib_now().replace("\n", ", "),
                 )
             else:
                 win_count = stats.get("win_count", 0)
@@ -452,15 +457,13 @@ class Notifier:
                 pf = stats.get("profit_factor", 0.0)
 
                 text = build_message(
-                    header(),
-                    f"📅 *DAILY SUMMARY*\n{SEPARATOR}",
-                    f"📊 Trades: {total}\n"
-                    f"✅ Wins: {win_count}  ❌ Losses: {loss_count}\n"
-                    f"📈 Win Rate: {confidence_bar(win_rate)}",
-                    f"💰 PnL: ${total_pnl:+,.2f}\n"
-                    f"📐 Profit Factor: {fmt_pf(pf)}\n"
-                    f"💹 Balance: ${balance:,.2f}",
-                    f"🕐 {wib_now()}",
+                    compact_header(),
+                    f"📅 *DAILY SUMMARY* — {total} trades\n"
+                    f"{pnl_emoji(total_pnl)} PnL ${total_pnl:+,.2f} · "
+                    f"{win_count}W/{loss_count}L",
+                    f"Win rate {confidence_bar(win_rate)}\n"
+                    f"Balance ${balance:,.2f} · Profit factor {fmt_pf(pf)}",
+                    wib_now().replace("\n", ", "),
                 )
             return self._send(text)
         except Exception as exc:
@@ -476,15 +479,14 @@ class Notifier:
         """Send STATE RESTORED notification."""
         logger.info("[TG] Sending notification: STATE_RESTORED")
         try:
-            from telegram.ui import header, SEPARATOR, wib_now, build_message
+            from telegram.ui import compact_header, wib_now, build_message
             pos_str = "YES — managing open position" if has_position else "NO"
             text = build_message(
-                header(),
-                f"♻️ *STATE RESTORED*\n{SEPARATOR}",
-                f"💰 Balance: ${balance:,.2f}\n"
-                f"📂 Open Position: {pos_str}\n"
-                f"📊 Past Trades: {trades}",
-                f"🕐 {wib_now()}",
+                compact_header(),
+                f"♻️ *STATE RESTORED*\n"
+                f"Balance ${balance:,.2f} · Open position: {pos_str}\n"
+                f"Past trades: {trades}",
+                wib_now().replace("\n", ", "),
             )
             return self._send(text)
         except Exception as exc:
