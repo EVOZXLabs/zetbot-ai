@@ -79,7 +79,22 @@ class ServiceContainer:
             api_key=self._config_service.api_key,
             api_secret=self._config_service.api_secret,
         )
-        self._metrics = _MetricsAdapter(config=self._config_service)
+        # Wallet must exist before Metrics: in LIVE mode, MetricsManager
+        # needs the wallet to fetch the REAL exchange balance instead of
+        # the stale paper_balance.json figure (this is what /status,
+        # /wallet, /portfolio and /performance all read from).
+        self._wallet = (
+            _WalletAdapter(self._config_service)
+            if self._config_service.paper_mode
+            else _LiveWalletAdapter(self._config_service, self._exchange)
+        )
+        self._metrics = _MetricsAdapter(
+            config=self._config_service,
+            wallet=self._wallet,
+            mode_provider=lambda: (
+                "PAPER" if self._config_service.paper_mode else "LIVE"
+            ),
+        )
         self._notification = _NotificationAdapter(self._config_service)
         self._safeguard = SafeGuard(
             max_daily_loss_pct=self._config_service.max_daily_loss_pct,
@@ -90,11 +105,6 @@ class ServiceContainer:
             atr_spike_multiplier=self._config_service.atr_spike_multiplier,
         )
         self._safeguard.set_account_balance(self._config_service.account_balance)
-        self._wallet = (
-            _WalletAdapter(self._config_service)
-            if self._config_service.paper_mode
-            else _LiveWalletAdapter(self._config_service, self._exchange)
-        )
         self._scanner = _ScannerAdapter(self._config_service)
         self._strategy = _StrategyAdapter()
         self._risk = _RiskAdapter(self._config_service)
@@ -620,11 +630,20 @@ class _MetricsAdapter:
     legacy in-memory interface to the execution engine.
     """
 
-    def __init__(self, config: Optional[IConfigService] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[IConfigService] = None,
+        wallet: Any = None,
+        mode_provider: Any = None,
+    ) -> None:
         self._trades: list[dict[str, Any]] = []
         self._config = config
         from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
-        self._mgr = MetricsManager(data_dir=(config.data_dir if config else "data"))
+        self._mgr = MetricsManager(
+            data_dir=(config.data_dir if config else "data"),
+            wallet=wallet,
+            mode_provider=mode_provider,
+        )
 
     # ------------------------------------------------------------------
     #  Account snapshot (single source of truth)

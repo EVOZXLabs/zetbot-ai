@@ -74,8 +74,40 @@ class MetricsManager:
     snapshot.
     """
 
-    def __init__(self, data_dir: str = "data") -> None:
+    def __init__(
+        self,
+        data_dir: str = "data",
+        wallet: Any = None,
+        mode_provider: Any = None,
+    ) -> None:
         self._data_dir = data_dir
+        # ``wallet`` and ``mode_provider`` are optional so every existing
+        # caller (tests, scripts) that only passes ``data_dir`` keeps
+        # working exactly as before — this class defaults to the old
+        # PAPER-only behavior when they're not supplied.
+        #
+        # ``wallet`` — an IWalletManager-like object (see
+        # ``service_container._LiveWalletAdapter``) used to fetch the
+        # REAL cash balance from the exchange when the bot is running
+        # LIVE. Without this, every command that goes through
+        # ``account()`` kept reporting the stale paper-mode balance
+        # even after the bot switched to live trading.
+        # ``mode_provider`` — zero-arg callable returning "PAPER" or
+        # "LIVE" (e.g. ``lambda: order_manager.mode``).
+        self._wallet = wallet
+        self._mode_provider = mode_provider
+
+    # ------------------------------------------------------------------
+    #  Mode helpers
+    # ------------------------------------------------------------------
+
+    def _is_live(self) -> bool:
+        if self._mode_provider is None:
+            return False
+        try:
+            return self._mode_provider() == "LIVE"
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     #  File readers
@@ -94,8 +126,34 @@ class MetricsManager:
         return d if isinstance(d, list) else d.get("orders", [])
 
     def _read_positions(self) -> list[dict[str, Any]]:
+        if self._is_live():
+            return self._read_live_positions_normalized()
         d = self._read_json("positions.json")
         return d if isinstance(d, list) else d.get("positions", [])
+
+    def _read_live_positions_normalized(self) -> list[dict[str, Any]]:
+        """Adapt ``live_positions.json`` (exchange-sync schema: symbol,
+        quantity, entry_price, current_price, pnl_pct — written by
+        ``scripts.live_position_sync``) to the shape ``compute_snapshot()``
+        expects (``remaining_qty``, ``unrealized_pnl``, ``status``), so
+        LIVE and PAPER share the exact same canonical accounting path
+        instead of LIVE silently reporting zero exposure/PnL.
+        """
+        live = self._read_json("live_positions.json")
+        raw = list(live.values()) if isinstance(live, dict) else []
+        normalized: list[dict[str, Any]] = []
+        for p in raw:
+            qty = p.get("quantity", 0.0) or 0.0
+            entry = p.get("entry_price")
+            current = p.get("current_price")
+            unrealized = (current - entry) * qty if entry and current else 0.0
+            normalized.append({
+                **p,
+                "remaining_qty": qty,
+                "unrealized_pnl": unrealized,
+                "status": "OPEN",
+            })
+        return normalized
 
     def _read_balance_pb(self) -> dict[str, Any]:
         return self._read_json("paper_balance.json")
@@ -185,7 +243,14 @@ class MetricsManager:
         Reads raw data from ``paper_balance.json`` (cash, realized_pnl,
         initial_balance) and ``positions.json`` (open positions), then
         delegates to ``compute_snapshot()`` — the single canonical function.
+
+        In LIVE mode this delegates to ``_account_live()`` instead — see
+        that method for why ``paper_balance.json`` must never be used as
+        the cash source once the bot is trading real money.
         """
+        if self._is_live():
+            return self._account_live()
+
         pb = self._read_balance_pb()
         cash = pb.get("final_balance", 0.0)
         realized = pb.get("realized_pnl", 0.0)
@@ -204,6 +269,46 @@ class MetricsManager:
             profit_factor=pb.get("profit_factor", 0.0),
             gross_profit=pb.get("gross_profit", 0.0),
             gross_loss=pb.get("gross_loss", 0.0),
+        )
+
+    def _account_live(self) -> AccountSnapshot:
+        """LIVE-mode account snapshot.
+
+        Cash comes from the injected ``wallet`` (the exchange, via
+        ``_LiveWalletAdapter.fetch_balance()``) — never from
+        ``paper_balance.json``, which is only ever written to while the
+        engine mode is PAPER (see ``OrderManager.sync_paper_state``) and
+        would otherwise sit frozen at its last paper value forever,
+        which is exactly the bug this fixes: ``/status`` kept showing
+        the old paper balance after the bot switched to live trading.
+
+        Open positions come from ``live_positions.json`` (synced from
+        the exchange by ``scripts.live_position_sync``), so exposure %
+        and unrealized PnL reflect the real account too.
+
+        Realized PnL / win-rate / trade counts are intentionally left
+        at 0 here rather than reused from paper_balance.json — showing
+        a stale paper trade-history next to a real cash balance would
+        be its own, subtler version of the same bug. Live trade-history
+        reconciliation is a separate piece of work, not covered by this
+        fix.
+        """
+        cash = 0.0
+        if self._wallet is not None:
+            try:
+                cash = self._wallet.balance
+            except Exception:
+                cash = 0.0
+
+        pb = self._read_balance_pb()
+        initial = resolve_initial_balance(pb, self._read_json("paper_state.json"))
+        open_positions = self.open_positions()
+
+        return self.compute_snapshot(
+            cash=cash,
+            realized_pnl=0.0,
+            initial_balance=initial,
+            open_positions=open_positions,
         )
 
     # ------------------------------------------------------------------
