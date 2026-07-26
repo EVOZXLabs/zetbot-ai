@@ -147,8 +147,22 @@ class MetricsManager:
             entry = p.get("entry_price")
             current = p.get("current_price")
             unrealized = (current - entry) * qty if entry and current else 0.0
+            # ``current_price`` can legitimately be None — sync_positions()
+            # in scripts/live_position_sync.py sets it to None whenever the
+            # ticker fetch for that symbol fails (network hiccup, etc.), a
+            # normal/expected occurrence in LIVE mode. compute_snapshot()
+            # does ``current_price * qty`` directly with no None-guard
+            # (dict.get's default only kicks in when the key is *missing*,
+            # not when it's present-but-None), so an un-coerced None here
+            # crashed every account-figures command with a TypeError.
+            # Fall back to entry_price (best estimate of value) or 0.0.
+            safe_current = (
+                current if current is not None
+                else (entry if entry is not None else 0.0)
+            )
             normalized.append({
                 **p,
+                "current_price": safe_current,
                 "remaining_qty": qty,
                 "unrealized_pnl": unrealized,
                 "status": "OPEN",
