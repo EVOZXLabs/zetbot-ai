@@ -491,7 +491,17 @@ class MetricsManager:
         ):
             try:
                 clean = ts.split("+")[0].split("Z")[0]
-                return datetime.strptime(clean, fmt)
+                # Every exit_time in this codebase is written as UTC
+                # (``datetime.now(timezone.utc).isoformat()`` — see
+                # OrderManager._sync_paper_files), but stripping the
+                # "+00:00"/"Z" suffix above (needed so strptime can
+                # match the plain formats) also strips that fact,
+                # producing a naive datetime. trades_since() compares
+                # this against datetime.now(timezone.utc) (aware) —
+                # naive vs aware comparison raises TypeError. Re-attach
+                # UTC explicitly so every _parse_ts() result is aware,
+                # matching the cutoff it's compared against.
+                return datetime.strptime(clean, fmt).replace(tzinfo=timezone.utc)
             except (ValueError, IndexError):
                 continue
         return None
