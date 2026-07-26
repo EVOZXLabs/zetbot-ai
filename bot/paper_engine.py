@@ -245,6 +245,52 @@ class PaperTradingEngine:
         """Return the current virtual balance."""
         return self._paper._balance
 
+    def close_all_positions(
+        self,
+        symbol: str,
+        timeframe: str,
+        exit_reason: str = "Bot Stopped",
+    ) -> float:
+        """Close any open position at the current market price.
+
+        Fetches the latest price, closes the position, and returns the
+        final balance (cash = equity after closure).
+
+        Returns:
+            Final balance (all positions closed).
+        """
+        if not self._paper.has_position():
+            return self._paper._balance
+
+        try:
+            df = self._market_data.fetch_ohlcv(
+                symbol=symbol, timeframe=timeframe, limit=2,
+            )
+            price = float(df["close"].iloc[-1])
+        except Exception:
+            logger.warning(
+                "Could not fetch price for close-all — using last known price",
+            )
+            price = self._last_price or 0.0
+
+        if price <= 0 and self._last_price and self._last_price > 0:
+            price = self._last_price
+
+        if price <= 0:
+            logger.error("No valid price available — cannot close position")
+            return self._paper._balance
+
+        closed = self._paper.close_all_positions(price, exit_reason)
+        if closed is not None:
+            self._last_trade = closed
+            logger.info(
+                "Position closed on shutdown — %s PnL=%+.2f Balance=%.2f",
+                exit_reason, closed.get("net_pnl", 0.0), self._paper._balance,
+            )
+
+        self._save_auto_state()
+        return self._paper._balance
+
     def current_position(self) -> dict[str, Any] | None:
         """Return the current open position, or ``None``."""
         return self._paper.current_position()

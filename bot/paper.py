@@ -241,6 +241,30 @@ class PaperTrader:
         return dict(closed)
 
     # ------------------------------------------------------------------
+    # Public API – close all (shutdown)
+    # ------------------------------------------------------------------
+
+    def close_all_positions(
+        self,
+        exit_price: float,
+        exit_reason: str = "Bot Stopped",
+    ) -> dict[str, Any] | None:
+        """Close the currently open position at the given exit price.
+
+        A thin wrapper around :meth:`close_position` that allows the
+        shutdown routine to close any open position in one call without
+        knowing whether a position exists.
+
+        Args:
+            exit_price: Market price to close at.
+            exit_reason: Reason label (default ``"Bot Stopped"``).
+
+        Returns:
+            Closed-position dict, or ``None`` if no position was open.
+        """
+        return self.close_position(exit_price, exit_reason)
+
+    # ------------------------------------------------------------------
     # Public API – position queries
     # ------------------------------------------------------------------
 
