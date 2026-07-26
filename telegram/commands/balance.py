@@ -3,17 +3,19 @@ from telegram.commands.wallet import WalletCommand
 
 
 class BalanceCommand(WalletCommand):
-    """``/balance`` — kept as a familiar alias name for ``/wallet``.
+    """``/balance`` — the detailed version of ``/wallet``.
 
-    Renders through the exact same WalletCommand.execute() so the two
-    commands can never drift into two different formats for the same
-    overlapping account data. Only the command name/aliases differ.
+    Reuses WalletCommand's data gathering (``_data()``) so the numbers
+    can never drift from /wallet's — it only adds the full cash / P&L /
+    exposure breakdown that /wallet keeps hidden for a quicker glance.
     """
 
     meta = CommandMeta(
         name="balance",
         aliases=["bal", "equity"],
-        description="Your account balance, PnL and exposure (same as /wallet)",
+        description="Full balance breakdown — cash, P&L, exposure",
         usage="/balance",
         permission="user",
     )
+
+    show_breakdown = True

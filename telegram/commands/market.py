@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.ui import header, SEPARATOR, progress_bar, build_message
+from telegram.ui import compact_header, progress_bar, build_message
 
 
 class MarketCommand(BaseCommand):
@@ -43,14 +43,11 @@ class MarketCommand(BaseCommand):
         bearish_pct = (bearish / total * 100) if total > 0 else 0
 
         return build_message(
-            header(),
-            f"🌍 *MARKET OVERVIEW*\n{SEPARATOR}",
-            f"₿ BTC: {_trend(btc_pair)}\n"
-            f"⟠ ETH: {_trend(eth_pair)}",
-            f"{SEPARATOR}\n"
+            compact_header(),
+            f"🌍 *Market Overview*\n"
+            f"₿ BTC: {_trend(btc_pair)}  ·  ⟠ ETH: {_trend(eth_pair)}",
             f"📊 Market Bias\n"
-            f"🟢 Bullish: {bullish_pct:.0f}% ({bullish})\n"
+            f"🟢 Bullish: {bullish_pct:.0f}% ({bullish}) · "
             f"🔴 Bearish: {bearish_pct:.0f}% ({bearish})",
-            f"{SEPARATOR}\n"
             f"🏆 Strongest: {strongest}",
         )

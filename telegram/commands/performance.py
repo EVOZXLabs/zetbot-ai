@@ -3,7 +3,7 @@ from typing import Optional
 
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_compact_number, fmt_holding, fmt_pf
-from telegram.ui import header, SEPARATOR, progress_bar, pnl_emoji, build_message
+from telegram.ui import compact_header, build_message
 
 
 class PerformanceCommand(BaseCommand):
@@ -26,7 +26,7 @@ class PerformanceCommand(BaseCommand):
                     all_closed.append(o)
 
         if not all_closed:
-            return f"{header()}\n\nNo completed trades yet."
+            return build_message(compact_header(), "No completed trades yet.")
 
         def _parse_dt(s: str) -> Optional[datetime]:
             try:
@@ -90,7 +90,7 @@ class PerformanceCommand(BaseCommand):
         weekly_m = _metrics(weekly)
         monthly_m = _metrics(monthly)
 
-        blocks = [header(), f"📈 *PERFORMANCE*\n{SEPARATOR}"]
+        blocks = [compact_header(), "📈 *Performance*"]
 
         def _fmt_period(m: dict, label: str) -> str:
             if m["trades"] == 0:
@@ -113,4 +113,4 @@ class PerformanceCommand(BaseCommand):
             if text:
                 blocks.append(text)
 
-        return f"\n━━━━━━━━━━━━━━━━━━\n\n".join(blocks)
+        return build_message(*blocks)

@@ -4,7 +4,7 @@ from typing import Any
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_holding, fmt_price, fmt_pct
 from telegram.ui import (
-    header, SEPARATOR, wib_now, pnl_emoji, progress_bar,
+    compact_header, wib_now, pnl_emoji, progress_bar,
     ai_insight, build_message,
 )
 from scripts.position_status import is_open
@@ -70,14 +70,14 @@ class PositionsCommand(BaseCommand):
             from scripts.live_position_sync import load_live_positions  # noqa: PLC0415
             cached = load_live_positions()
             positions = list(cached.values())
-            warning = f"⚠️ Live sync failed ({sync_error}) — cached data may be stale.\n\n"
+            warning = "⚠️ Live sync failed (cached data may be stale)"
         else:
             warning = ""
 
         if not positions:
-            return f"{header()}\n\n{warning}No open positions."
+            return build_message(compact_header(), warning, "No open positions.")
 
-        cards = [header()]
+        cards = [compact_header()]
         if warning:
             cards.append(warning)
 
@@ -96,16 +96,12 @@ class PositionsCommand(BaseCommand):
 
             card = (
                 f"{emoji} *{symbol}*\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"💰 Entry {entry_str}\n"
-                f"📍 Current {curr_str}\n"
-                f"📈 PnL {pnl_str}\n"
-                f"📦 {qty:.6f} {base}\n"
-                f"🏦 {p.get('exchange', '?')}"
+                f"💰 Entry {entry_str} → 📍 {curr_str}\n"
+                f"📈 PnL {pnl_str}  ·  📦 {qty:.6f} {base}  ·  🏦 {p.get('exchange', '?')}"
             )
             cards.append(card)
 
-        return "\n\n".join(cards)
+        return build_message(*cards)
 
     def _execute_paper(self, ctx, args: str = "") -> str:
         if ctx.services is not None:
@@ -116,9 +112,9 @@ class PositionsCommand(BaseCommand):
             open_positions = [p for p in pos_list if is_open(p.get("status"))]
 
         if not open_positions:
-            return f"{header()}\n\nNo open positions."
+            return build_message(compact_header(), "No open positions.")
 
-        cards = [header()]
+        cards = [compact_header()]
 
         for p in open_positions:
             symbol = p.get("symbol", "?")
@@ -160,4 +156,4 @@ class PositionsCommand(BaseCommand):
             )
             cards.append(card)
 
-        return "\n━━━━━━━━━━━━━━━━━━\n\n".join(cards)
+        return build_message(*cards)

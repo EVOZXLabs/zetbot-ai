@@ -1,5 +1,5 @@
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.ui import header, SEPARATOR, build_message
+from telegram.ui import compact_header, build_message
 from scripts.decision_trace import DecisionTrace
 
 
@@ -24,8 +24,8 @@ class TraceCommand(BaseCommand):
         trace = DecisionTrace.load()
         if not trace.entries:
             return build_message(
-                header(),
-                f"📋 *DECISION TRACE*\n{SEPARATOR}",
+                compact_header(),
+                "📋 *Decision Trace*",
                 "No trace data. Run the pipeline first.",
             )
 
@@ -58,8 +58,8 @@ class TraceCommand(BaseCommand):
                 lines.append("  ↓")
 
         return build_message(
-            header(),
-            f"📋 *DECISION TRACE*\n{SEPARATOR}",
+            compact_header(),
+            "📋 *Decision Trace*",
             f"Top Candidate: `{trace.top_candidate}`\n"
             f"Run: {trace.timestamp or 'N/A'}",
             *lines,

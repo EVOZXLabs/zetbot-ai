@@ -2,7 +2,7 @@ import json
 
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_compact_number, fmt_price
-from telegram.ui import header, SEPARATOR, confidence_bar, build_message
+from telegram.ui import compact_header, confidence_bar, build_message
 
 
 class SignalsCommand(BaseCommand):
@@ -51,14 +51,10 @@ class SignalsCommand(BaseCommand):
         if not top:
             return "No BUY/WATCHLIST signals found in latest scan."
 
-        blocks = [header(), f"📡 *TOP SIGNALS*\n{SEPARATOR}"]
+        blocks = [compact_header(), "📡 *Top Signals*"]
 
         for i, c in enumerate(top, 1):
             emoji = "🟢" if "BUY" in c["signal"] else "🟡"
-            ema_dist = (
-                ((c["price"] - c["ema200"]) / c["ema200"] * 100)
-                if c["ema200"] > 0 and c["price"] > 0 else 0
-            )
             block = (
                 f"{emoji} *{c['symbol']}* — {c['signal']}\n"
                 f"{confidence_bar(c['score'])}\n"
@@ -66,4 +62,4 @@ class SignalsCommand(BaseCommand):
             )
             blocks.append(block)
 
-        return f"\n━━━━━━━━━━━━━━━━━━\n\n".join(blocks)
+        return build_message(*blocks)

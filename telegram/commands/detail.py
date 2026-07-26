@@ -1,7 +1,7 @@
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_price
 from telegram.ui import (
-    header, SEPARATOR, wib_now, confidence_bar, build_message,
+    compact_header, wib_now, confidence_bar, build_message,
 )
 
 
@@ -18,10 +18,10 @@ class DetailCommand(BaseCommand):
     def execute(self, ctx, args: str) -> str:
         symbol = args.strip().upper()
         if not symbol:
-            return (
-                f"{header()}\n\n"
+            return build_message(
+                compact_header(),
                 "Usage: `/detail <SYMBOL>`\n"
-                "Example: `/detail BTC/USDT`"
+                "Example: `/detail BTC/USDT`",
             )
 
         scanner = ctx.read_json("scanner_results.json")
@@ -58,11 +58,11 @@ class DetailCommand(BaseCommand):
                 break
 
         if not pair_data and not decision and not plan:
-            return (
-                f"{header()}\n\n"
-                f"🔍 *{symbol}*\n{SEPARATOR}\n\n"
+            return build_message(
+                compact_header(),
+                f"🔍 *{symbol}*",
                 "No data available for this symbol.\n"
-                "Run a scan first with /scan."
+                "Run a scan first with /scan.",
             )
 
         # Extract indicators
@@ -93,8 +93,8 @@ class DetailCommand(BaseCommand):
         recommendation = decision.get("recommendation", "N/A")
 
         blocks = [
-            header(),
-            f"🔍 *{symbol}*\n{SEPARATOR}",
+            compact_header(),
+            f"🔍 *{symbol}*",
         ]
 
         # Price & Trend

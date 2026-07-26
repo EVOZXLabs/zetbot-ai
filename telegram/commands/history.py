@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_price, fmt_holding, time_ago
-from telegram.ui import header, SEPARATOR, pnl_emoji, build_message
+from telegram.ui import compact_header, pnl_emoji, build_message
 
 
 class HistoryCommand(BaseCommand):
@@ -45,19 +45,18 @@ class HistoryCommand(BaseCommand):
                 })
 
         if not closed_orders:
-            return f"{header()}\n\nNo completed trades yet."
+            return build_message(compact_header(), "No completed trades yet.")
 
         closed_orders.sort(key=lambda o: o.get("closed_at", "") or "", reverse=True)
         shown = closed_orders[:limit]
 
-        blocks = [header(), f"📋 *TRADE HISTORY* (last {len(shown)})\n{SEPARATOR}"]
+        blocks = [compact_header(), f"📋 *Trade History* (last {len(shown)})"]
 
         for o in shown:
             symbol = o.get("symbol", "?")
             entry = o.get("entry_price", 0)
             exit_p = o.get("exit_price", 0)
             pnl = o.get("net_pnl", 0)
-            pnl_pct = o.get("net_pnl_pct", 0)
             reason = o.get("exit_reason", "?")
             closed_at = o.get("closed_at", "")
             filled = o.get("filled_at", "")
@@ -71,16 +70,12 @@ class HistoryCommand(BaseCommand):
                 except (ValueError, TypeError):
                     pass
 
-            result = f"{pnl_emoji(pnl)} WIN" if pnl >= 0 else f"{pnl_emoji(pnl)} LOSS"
-
             block = (
-                f"{pnl_emoji(pnl)} *{symbol}*\n"
-                f"💰 Entry {fmt_price(entry)}\n"
-                f"🚪 Exit {fmt_price(exit_p)}\n"
-                f"📈 PnL ${pnl:+,.2f}\n"
-                f"🕒 Held {hold}\n"
+                f"{pnl_emoji(pnl)} *{symbol}*  ${pnl:+,.2f}\n"
+                f"💰 {fmt_price(entry)} → 🚪 {fmt_price(exit_p)}"
+                f"{f'  ·  🕒 {hold}' if hold else ''}\n"
                 f"📋 {reason}"
             )
             blocks.append(block)
 
-        return f"\n━━━━━━━━━━━━━━━━━━\n\n".join(blocks)
+        return build_message(*blocks)

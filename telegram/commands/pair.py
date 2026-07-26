@@ -2,7 +2,7 @@ import json
 
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_compact_number, fmt_price
-from telegram.ui import header, SEPARATOR, confidence_bar, progress_bar, build_message
+from telegram.ui import compact_header, confidence_bar, build_message
 
 
 class PairCommand(BaseCommand):
@@ -18,10 +18,10 @@ class PairCommand(BaseCommand):
     def execute(self, ctx, args: str) -> str:
         query = args.strip().upper().replace(" ", "")
         if not query:
-            return (
-                f"{header()}\n\n"
+            return build_message(
+                compact_header(),
                 "Usage: `/pair <SYMBOL>`\n"
-                "Example: `/pair BTC`"
+                "Example: `/pair BTC`",
             )
 
         try:
@@ -65,19 +65,17 @@ class PairCommand(BaseCommand):
         ema200_dist = ((price - ema200) / ema200 * 100) if ema200 > 0 and price > 0 else 0
 
         blocks = [
-            header(),
-            f"🔍 *{symbol}*\n{SEPARATOR}",
+            compact_header(),
+            f"🔍 *{symbol}*\n"
             f"💰 Price: {fmt_price(price)}\n"
             f"📈 Change: {change:+.2f}%\n"
             f"📊 Trend: {trend}  Signal: {signal}",
-            f"{SEPARATOR}\n"
             f"📊 *Indicators*\n"
             f"RSI: {rsi:.1f}  ADX: {adx:.1f}\n"
             f"ATR: {atr_pct:.2f}%\n"
             f"EMA50: {fmt_price(ema50)}\n"
             f"EMA100: {fmt_price(ema100)}\n"
             f"EMA200: {fmt_price(ema200)} ({ema200_dist:+.1f}%)",
-            f"{SEPARATOR}\n"
             f"⭐ Confidence\n{confidence_bar(overall)}\n\n"
             f"📊 Volume\n{fmt_compact_number(volume)}",
         ]

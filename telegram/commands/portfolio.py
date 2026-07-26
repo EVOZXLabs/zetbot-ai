@@ -1,7 +1,6 @@
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.ui import (
-    header, SEPARATOR, exposure_bar, progress_bar,
-    pnl_emoji, build_message,
+    compact_header, exposure_bar, pnl_emoji, build_message,
 )
 from scripts.position_status import is_open
 
@@ -48,12 +47,10 @@ class PortfolioCommand(BaseCommand):
             exposure_pct = (pos_value / equity * 100) if equity > 0 else 0.0
 
         return build_message(
-            header(),
-            f"👛 *PORTFOLIO*\n{SEPARATOR}",
-            f"Cash\n${cash:,.2f}",
-            f"{SEPARATOR}\nEquity\n${equity:,.2f}",
-            f"{SEPARATOR}\n"
-            f"PnL\n{pnl_emoji(net_pnl)} ${net_pnl:+,.2f}",
-            f"{SEPARATOR}\n"
-            f"Exposure\n{exposure_bar(exposure_pct)}",
+            compact_header(),
+            f"👛 *Portfolio*\n"
+            f"Cash ${cash:,.2f} · Equity ${equity:,.2f}",
+            f"PnL {pnl_emoji(net_pnl)} ${net_pnl:+,.2f} · "
+            f"Open positions: {open_count}",
+            f"Exposure {exposure_bar(exposure_pct)}",
         )

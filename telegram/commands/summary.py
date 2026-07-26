@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.formatter import fmt_compact_number, fmt_holding, fmt_pf
 from telegram.ui import (
-    header, SEPARATOR, pnl_emoji, confidence_bar, build_message,
+    compact_header, confidence_bar, build_message,
 )
 
 
@@ -62,18 +62,17 @@ class SummaryCommand(BaseCommand):
 
         if not executions:
             return build_message(
-                header(),
-                f"📅 *DAILY SUMMARY*\n{SEPARATOR}\n{today_str}",
+                compact_header(),
+                f"📅 *Daily Summary* — {today_str}",
                 "No trades completed today.",
             )
 
         blocks = [
-            header(),
-            f"📅 *DAILY SUMMARY*\n{SEPARATOR}\n{today_str}",
+            compact_header(),
+            f"📅 *Daily Summary* — {today_str}",
             f"📊 Positions: {positions_closed}\n"
             f"✅ Wins: {win_count}  ❌ Losses: {loss_count}\n"
             f"📈 Win Rate: {confidence_bar(win_rate)}",
-            f"{SEPARATOR}\n"
             f"💰 PnL: {fmt_compact_number(today_pnl)}\n"
             f"📐 Profit Factor: {fmt_pf(pf)}",
         ]
@@ -81,7 +80,7 @@ class SummaryCommand(BaseCommand):
         if avg_hold := self._avg_holding(executions):
             blocks.append(f"🕒 Avg Hold: {avg_hold}")
 
-        return f"\n━━━━━━━━━━━━━━━━━━\n\n".join(blocks)
+        return build_message(*blocks)
 
     @staticmethod
     def _avg_holding(executions: list) -> str:

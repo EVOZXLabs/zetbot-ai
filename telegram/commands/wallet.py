@@ -8,24 +8,26 @@ from scripts.balance_resolver import resolve_initial_balance
 
 
 class WalletCommand(BaseCommand):
-    """Canonical account view — also used by ``/balance`` (see balance.py).
+    """``/wallet`` — quick-glance balance (see ``balance.py`` for the
+    detailed breakdown version, ``/balance``).
 
-    /balance and /wallet used to be two separate templates for the same
-    overlapping numbers (both showed equity, PnL, cash...) which could
-    drift out of sync and confuse users about which one to trust. Now
-    there is exactly one implementation; /balance is just a shorter
-    alias name that renders the same message.
+    Both commands read from the exact same numbers below (``_data()``)
+    so they can never drift into disagreeing figures — only how much of
+    that data is *shown* differs: /wallet is the short version for a
+    quick check, /balance adds the full cash/PnL/exposure breakdown.
     """
 
     meta = CommandMeta(
         name="wallet",
         aliases=["w", "wallet-info"],
-        description="Your account balance, PnL and exposure",
+        description="Quick balance check — total, today, all-time",
         usage="/wallet",
         permission="user",
     )
 
-    def execute(self, ctx, args: str) -> str:
+    show_breakdown = False
+
+    def _data(self, ctx):
         m = ctx.services.metrics if ctx.services else None
 
         if m is not None:
@@ -73,25 +75,54 @@ class WalletCommand(BaseCommand):
             )
             today_pnl = net_pnl  # fallback — same as /status
 
-        today_emoji = "🟢" if today_pnl >= 0 else "🔴"
+        return {
+            "cash": cash,
+            "pos_value": pos_value,
+            "realized": realized,
+            "unrealized": unrealized,
+            "total_balance": total_balance,
+            "net_pnl": net_pnl,
+            "total_return_pct": total_return_pct,
+            "win_rate": win_rate,
+            "total_trades": total_trades,
+            "in_positions_pct": in_positions_pct,
+            "today_pnl": today_pnl,
+        }
 
-        return build_message(
+    def execute(self, ctx, args: str) -> str:
+        d = self._data(ctx)
+        if isinstance(d, str):
+            return d  # "no data yet" message
+
+        today_emoji = "🟢" if d["today_pnl"] >= 0 else "🔴"
+
+        blocks = [
             compact_header(),
-            f"👛 *Wallet* — ${total_balance:,.2f}\n"
-            f"Today {today_emoji} ${today_pnl:+,.2f} · "
-            f"{pnl_emoji(net_pnl)} {net_pnl:+,.2f} ({total_return_pct:+.2f}%) all-time",
-            note("Total Balance = cash + current value of open trades"),
-            f"In open trades {exposure_bar(in_positions_pct)}\n"
-            f"Win rate {progress_bar(win_rate, 100, 10)} {win_rate:.1f}% ({total_trades} trades)",
-            detail_block(
-                [
-                    f"Cash (idle)      ${cash:,.2f}",
-                    f"Open trades      ${pos_value:,.2f}",
-                    f"Closed P&L       {realized:+,.2f}",
-                    f"Open P&L         {unrealized:+,.2f}",
-                    f"Total Balance    ${total_balance:,.2f}",
-                    f"In open trades   {in_positions_pct:.1f}%",
-                ],
-                label="Full breakdown",
-            ),
-        )
+            f"👛 *Wallet* — ${d['total_balance']:,.2f}\n"
+            f"Today {today_emoji} ${d['today_pnl']:+,.2f} · "
+            f"{pnl_emoji(d['net_pnl'])} {d['net_pnl']:+,.2f} "
+            f"({d['total_return_pct']:+.2f}%) all-time",
+            f"In open trades {exposure_bar(d['in_positions_pct'])}\n"
+            f"Win rate {progress_bar(d['win_rate'], 100, 10)} "
+            f"{d['win_rate']:.1f}% ({d['total_trades']} trades)",
+        ]
+
+        if self.show_breakdown:
+            blocks.insert(2, note("Total Balance = cash + current value of open trades"))
+            blocks.append(
+                detail_block(
+                    [
+                        f"Cash (idle)      ${d['cash']:,.2f}",
+                        f"Open trades      ${d['pos_value']:,.2f}",
+                        f"Closed P&L       {d['realized']:+,.2f}",
+                        f"Open P&L         {d['unrealized']:+,.2f}",
+                        f"Total Balance    ${d['total_balance']:,.2f}",
+                        f"In open trades   {d['in_positions_pct']:.1f}%",
+                    ],
+                    label="Full breakdown",
+                )
+            )
+        else:
+            blocks.append("_Type /balance for the full cash & P&L breakdown._")
+
+        return build_message(*blocks)
