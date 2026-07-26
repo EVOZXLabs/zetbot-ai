@@ -93,9 +93,7 @@ declare -a _RESULTS=()
 section() {
     local title="$1"
     echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}  ${SYM_GEAR}  ${title}${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${title}${NC}"
 }
 
 # Print a check result
@@ -198,58 +196,12 @@ elapsed_ms() {
 #  §2  BANNER
 # =============================================================================
 print_banner() {
-    local git_commit git_short repo_url
-    git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    git_short="${git_commit:0:7}"
-    repo_url=$(git remote get-url origin 2>/dev/null || echo "local")
-    # Truncate URL to fit box
-    if (( ${#repo_url} > 52 )); then
-        repo_url="${repo_url:0:49}..."
-    fi
-
-    local box_inner=62
-
-    # Print one line inside the box. $1 = plain (uncolored) text used to
-    # compute padding, $2 = the actual (possibly colored) text to print.
-    # Keeping padding driven by the plain-text length means this never
-    # goes out of alignment when dates, hashes, or URLs change length.
-    #
-    # NOTE: bash's ${#string} counts BYTES, not characters, under a
-    # non-UTF-8 locale (e.g. LC_CTYPE=POSIX) — which silently breaks the
-    # box alignment for any line containing multi-byte characters (█, ·).
-    # python3 is a hard dependency of this project, so use it for a
-    # locale-independent character count instead of ${#plain}.
-    _box_line() {
-        local plain="$1" colored="$2"
-        local plain_len
-        plain_len=$(printf '%s' "$plain" | python3 -c "import sys; print(len(sys.stdin.read()))")
-        local pad=$(( box_inner - 2 - plain_len ))
-        (( pad < 0 )) && pad=0
-        printf "${MAGENTA}║${NC}  %b%*s${MAGENTA}║${NC}\n" "$colored" "$pad" ""
-    }
-
-    local date_str
-    date_str="$(date '+%Y-%m-%d %H:%M %Z')"
-    local subtitle="Version ${SETUP_VERSION}  ·  Commit ${git_short}  ·  ${date_str}"
+    local git_short
+    git_short=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
     echo ""
-    echo -e "${MAGENTA}╔══════════════════════════════════════════════════════════════╗${NC}"
-    _box_line "" ""
-    _box_line "█████ █████ █████ ████   ███  █████" "${BOLD}${WHITE}█████ █████ █████ ████   ███  █████${NC}"
-    _box_line "    █ █       █   █   █ █   █   █  " "${BOLD}${WHITE}    █ █       █   █   █ █   █   █  ${NC}"
-    _box_line "   █  ████    █   ████  █   █   █    AI" "${BOLD}${WHITE}   █  ████    █   ████  █   █   █  ${NC}  ${DIM}AI${NC}"
-    _box_line "  █   █       █   █   █ █   █   █  " "${BOLD}${WHITE}  █   █       █   █   █ █   █   █  ${NC}"
-    _box_line " █    █       █   █   █ █   █   █  " "${BOLD}${WHITE} █    █       █   █   █ █   █   █  ${NC}"
-    _box_line "█████ █████   █   ████   ███    █  " "${BOLD}${WHITE}█████ █████   █   ████   ███    █  ${NC}"
-    _box_line "" ""
-    _box_line "Production Setup & Health Check" "${BOLD}Production Setup & Health Check${NC}"
-    _box_line "$subtitle" "${DIM}${subtitle}${NC}"
-    _box_line "$repo_url" "${DIM}${repo_url}${NC}"
-    _box_line "" ""
-    echo -e "${MAGENTA}╚══════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-
-    unset -f _box_line
+    echo -e "${BOLD}${WHITE}${PROJECT_NAME}${NC}  ${DIM}Setup & Health Check${NC}"
+    echo -e "${DIM}v${SETUP_VERSION} · ${git_short} · $(date '+%Y-%m-%d %H:%M %Z')${NC}"
 }
 
 # =============================================================================
@@ -829,40 +781,20 @@ check_optional_tools() {
 #  §12  SUMMARY
 # =============================================================================
 print_summary() {
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}  📋  SETUP REPORT${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-
-    # Count statuses per section
     local total=$(( _PASS + _FAIL + _WARN ))
 
-    printf "      ${GREEN}${SYM_OK} Passed${NC}   : %d\n" "$_PASS"
-    printf "      ${RED}${SYM_FAIL} Failed${NC}   : %d\n" "$_FAIL"
-    printf "      ${YELLOW}${SYM_WARN} Warnings${NC} : %d\n" "$_WARN"
-    printf "      ${DIM}Total${NC}      : %d\n" "$total"
-
+    echo ""
+    echo -e "${BOLD}Summary${NC}"
+    echo -e "  ${GREEN}${SYM_OK} ${_PASS} passed${NC}   ${RED}${SYM_FAIL} ${_FAIL} failed${NC}   ${YELLOW}${SYM_WARN} ${_WARN} warnings${NC}   ${DIM}· ${total} checks · $(elapsed_ms)${NC}"
     echo ""
 
     if (( _FAIL == 0 )); then
-        echo -e "      ${GREEN}${BOLD}${SYM_OK} ALL SYSTEMS OPERATIONAL${NC}"
-        echo ""
-        echo -e "      ${DIM}Run the bot with:${NC}"
-        echo -e "      ${BOLD}python main.py${NC}"
+        echo -e "  ${GREEN}${BOLD}${SYM_OK} Ready${NC} — run the bot with ${BOLD}python main.py${NC}"
     elif (( _FAIL <= 2 )); then
-        echo -e "      ${YELLOW}${BOLD}${SYM_WARN} SETUP COMPLETE WITH WARNINGS${NC}"
-        echo ""
-        echo -e "      ${DIM}Review the failures above before running.${NC}"
+        echo -e "  ${YELLOW}${BOLD}${SYM_WARN} Complete with warnings${NC} — review the failures above"
     else
-        echo -e "      ${RED}${BOLD}${SYM_FAIL} SETUP FAILED — ACTION REQUIRED${NC}"
-        echo ""
-        echo -e "      ${DIM}Fix the ${RED}${_FAIL}${DIM} issue(s) above and re-run:${NC}"
-        echo -e "      ${BOLD}bash setup.sh${NC}"
+        echo -e "  ${RED}${BOLD}${SYM_FAIL} Action required${NC} — fix ${_FAIL} issue(s) above, then re-run ${BOLD}bash setup.sh${NC}"
     fi
-
-    echo ""
-    echo -e "${DIM}  Elapsed: $(elapsed_ms)${NC}"
     echo ""
 }
 

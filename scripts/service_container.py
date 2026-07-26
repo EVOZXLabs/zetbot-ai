@@ -109,6 +109,7 @@ class ServiceContainer:
         self._position = _PositionAdapter(self._config_service)
         self._health = None  # created by main.py, injected later
         self._scheduler = None  # created by main.py, injected later
+        self._notifier = None  # injected by main.py after creation
 
         self._bootstrapped = True
 
@@ -119,6 +120,10 @@ class ServiceContainer:
     def inject_scheduler(self, scheduler: Any) -> None:
         """Inject PipelineScheduler after creation."""
         self._scheduler = scheduler
+
+    def inject_notifier(self, notifier: Any) -> None:
+        """Inject centralized Notifier after creation."""
+        self._notifier = notifier
 
     # ------------------------------------------------------------------
     #  Service properties
@@ -205,7 +210,10 @@ class ServiceContainer:
         return self._pipeline
 
     def run_pipeline(self) -> list[Any]:
-        return self.pipeline.run()
+        pipeline = self.pipeline
+        if self._notifier is not None:
+            pipeline.set_notifier(self._notifier)
+        return pipeline.run()
 
     def __repr__(self) -> str:
         return (
@@ -489,6 +497,7 @@ class _RiskAdapter:
         from scripts import risk_manager  # noqa: PLC0415
         mgr = risk_manager.RiskManager(
             balance=wallet.balance,
+            equity=wallet.equity,
             risk_per_trade=self._config.max_risk_per_trade_pct,
             max_daily_loss=5.0,
             max_positions=self._config.max_positions,
@@ -548,55 +557,60 @@ class _PositionAdapter:
 
 
 class _NotificationAdapter:
-    """Wraps TelegramNotifier as INotificationManager."""
+    """Wraps Notifier as INotificationManager.
+
+    Uses the centralized Notifier singleton from bot.notifier.
+    """
 
     def __init__(self, config: IConfigService) -> None:
         self._config = config
+        self._notifier: Any = None
 
     def _get_notifier(self) -> Any:
-        from bot.telegram import TelegramNotifier  # noqa: PLC0415
-        return TelegramNotifier()
+        if self._notifier is None:
+            from bot.notifier import Notifier  # noqa: PLC0415
+            self._notifier = Notifier.from_config(self._config)
+        return self._notifier
 
     def send(self, message: str) -> bool:
         notifier = self._get_notifier()
-        return notifier.send(message) if hasattr(notifier, 'send') else False
+        return notifier.send(message)
 
     def notify_buy(self, symbol: str, entry_price: float, quantity: float,
-                   position_size: float, stop_loss: float, tp1: float) -> None:
+                   position_size: float, stop_loss: float, tp1: float,
+                   tp2: float = 0.0, tp3: float = 0.0) -> None:
         notifier = self._get_notifier()
-        if hasattr(notifier, 'notify_buy'):
-            notifier.notify_buy(symbol, entry_price, quantity,
-                                position_size, stop_loss, tp1)
-        else:
-            self.send(
-                f"\U0001f4b0 *BUY OPENED*\n"
-                f"Symbol: `{symbol}`\n"
-                f"Entry: `{entry_price:.6f}`\n"
-                f"Size: `{position_size:.2f} USDT`\n"
-                f"SL: `{stop_loss:.6f}`\n"
-                f"TP: `{tp1:.6f}`"
-            )
+        notifier.notify_buy_opened(
+            symbol=symbol,
+            entry_price=entry_price,
+            quantity=quantity,
+            position_size=position_size,
+            stop_loss=stop_loss,
+            take_profit=tp1,
+            take_profit_2=tp2,
+            take_profit_3=tp3,
+        )
 
     def notify_close(self, symbol: str, pnl: float, reason: str, exit_price: float) -> None:
         notifier = self._get_notifier()
-        if hasattr(notifier, 'notify_close'):
-            notifier.notify_close(symbol, pnl, reason, exit_price)
-        else:
-            emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-            self.send(
-                f"{emoji} *POSITION CLOSED*\n"
-                f"Symbol: `{symbol}`\n"
-                f"PnL: `${pnl:+,.2f}`\n"
-                f"Reason: `{reason}`\n"
-                f"Exit: `{exit_price:.6f}`"
-            )
+        notifier.notify_position_closed(
+            symbol=symbol,
+            pnl=pnl,
+            exit_reason=reason,
+            exit_price=exit_price,
+        )
 
     def notify_error(self, error: str) -> None:
         notifier = self._get_notifier()
-        if hasattr(notifier, 'notify_error'):
-            notifier.notify_error(error)
-        else:
-            self.send(f"\u26a0\ufe0f *Error*\n`{error}`")
+        notifier.notify_error(error)
+
+    def notify_trade_rejected(self, symbol: str, reason: str) -> None:
+        notifier = self._get_notifier()
+        notifier.notify_trade_rejected(symbol, reason)
+
+    def notify_system(self, message: str) -> None:
+        notifier = self._get_notifier()
+        notifier.notify_system(message)
 
 
 class _MetricsAdapter:
@@ -666,6 +680,9 @@ class _MetricsAdapter:
     def worst_trade(self) -> dict[str, Any]:
         cm = self._mgr.computed()
         return cm.worst_trade
+
+    def today_summary(self) -> dict[str, Any]:
+        return self._mgr.today_summary()
 
     def total_trades(self) -> int:
         return len(self._trades) or self._mgr.account().total_trades

@@ -190,11 +190,11 @@ def _check_exchange(name: str) -> tuple[bool, str]:
 
 
 def _file_timestamp(path: str, now: float) -> tuple[str, float]:
-    """Return (formatted_mtime, age_seconds) for a data file."""
+    """Return (ISO timestamp, age_seconds) for a data file."""
     try:
         mtime = os.path.getmtime(path)
         age = now - mtime
-        ts = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%H:%M:%S UTC")
+        ts = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
         return ts, age
     except OSError:
         return "N/A", float("inf")

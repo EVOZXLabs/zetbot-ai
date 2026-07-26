@@ -47,7 +47,7 @@ class SafeGuard:
 
     def __init__(
         self,
-        max_daily_loss_pct: float = 5.0,
+        max_daily_loss_pct: float = 3.0,
         max_consecutive_losses: int = 3,
         max_daily_trades: int = 20,
         exchange_failure_window: int = 300,

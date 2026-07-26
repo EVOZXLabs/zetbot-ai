@@ -135,6 +135,7 @@ class TradingLoop:
                 if self._running:
                     self._sleep()
         finally:
+            self._close_all_on_shutdown()
             self._save_state_on_shutdown()
             self._restore_signal_handler()
             self._running = False
@@ -144,9 +145,11 @@ class TradingLoop:
         )
         notifier = getattr(self._engine, "_notifier", None)
         if notifier:
+            final_balance = self._engine.current_balance()
             notifier.bot_stopped(
                 cycles=self._cycle_count,
-                balance=self._engine.current_balance(),
+                balance=final_balance,
+                equity=final_balance,
             )
 
     def stop(self) -> None:
@@ -173,6 +176,18 @@ class TradingLoop:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
+
+    def _close_all_on_shutdown(self) -> None:
+        """Close any open position at market price before saving state.
+
+        This ensures the ``bot_stopped`` notification reflects the final
+        realised balance (cash = equity) rather than showing cash without
+        including the open position's value.
+        """
+        try:
+            self._engine.close_all_positions(self._symbol, self._timeframe)
+        except Exception:
+            logger.exception("Failed to close positions on shutdown")
 
     def _save_state_on_shutdown(self) -> None:
         """Persist engine state during shutdown so the next start can

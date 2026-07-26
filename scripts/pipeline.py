@@ -19,12 +19,15 @@ Usage::
 
 import concurrent.futures
 import importlib
+import json
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from scripts.app_config import AppConfig
+from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
 
 
@@ -106,17 +109,30 @@ class Pipeline:
         self.config = config
         self.logger = logger
         self.container = container
+        self._notifier = None
         self.results: list[StageResult] = []
+
+    def set_notifier(self, notifier: Any) -> None:
+        """Set the centralized Notifier for notification dispatch."""
+        self._notifier = notifier
 
     def run(self) -> list[StageResult]:
         """Run all stages in sequence. Returns list of ``StageResult``.
 
         If any stage fails, subsequent stages are skipped and the
         pipeline returns immediately.
+
+        A ``DecisionTrace`` is recorded across all stages tracing the
+        top-ranked candidate's journey — accepted, rejected, or skipped
+        at each stage, with the specific reason and scores.
         """
         self.results = []
         self.logger.pipeline_start()
         self._apply_config()
+
+        trace = DecisionTrace(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
 
         # Use DI stage runners when container is available
         if self.container is not None:
@@ -141,12 +157,16 @@ class Pipeline:
         for name, fn, output_file in stages:
             result = self._run_stage(name, fn, output_file)
             self.results.append(result)
+            if result.success:
+                self._trace_stage(name, output_file, trace)
             if not result.success:
+                trace.save()
                 self.logger.pipeline_end(
                     sum(r.duration for r in self.results)
                 )
                 return self.results
 
+        trace.save()
         total_elapsed = sum(r.duration for r in self.results)
         self.logger.pipeline_end(total_elapsed)
         return self.results
@@ -214,6 +234,134 @@ class Pipeline:
                 value = getattr(self.config, config_key, None)
                 if value is not None and hasattr(mod, attr_name):
                     setattr(mod, attr_name, value)
+
+    # ------------------------------------------------------------------
+    #  Decision Trace — records why the top candidate was accepted /
+    #  rejected at every pipeline stage.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _trace_stage(name: str, output_file: str, trace: DecisionTrace) -> None:
+        """Read the stage output and append a trace entry for the top candidate."""
+        if not os.path.exists(output_file):
+            return
+
+        try:
+            with open(output_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        if name == "Scanner":
+            pairs = data.get("pairs", [])
+            if not pairs:
+                return
+            top = pairs[0]
+            trace.top_candidate = top["symbol"]
+            trace.add(
+                "Scanner", top["symbol"], "ACCEPTED",
+                f"Rank #{top.get('rank', 1)} overall={top.get('overall', 0):.1f} "
+                f"signal={top.get('signal', 'N/A')}",
+                {k: top[k] for k in (
+                    "overall", "signal", "trend_score", "momentum_score",
+                    "volume_score", "volatility_score", "liquidity_score",
+                ) if k in top},
+            )
+        elif name == "Decision":
+            decisions = data.get("decisions", [])
+            for d in decisions:
+                if d.get("symbol") == trace.top_candidate:
+                    prob = d.get("probability", 0)
+                    rec = d.get("recommendation", "N/A")
+                    accepted = prob >= 35
+                    trace.add(
+                        "Decision", trace.top_candidate,
+                        "ACCEPTED" if accepted else "REJECTED",
+                        f"probability={prob:.1f} → {rec}"
+                        f"{' (below IGNORE threshold)' if not accepted else ''}",
+                        {k: d[k] for k in (
+                            "probability", "recommendation", "trend_score",
+                            "momentum_score", "volume_score", "volatility_score",
+                            "risk_score", "reward_score", "expected_rr",
+                            "overall_score",
+                        ) if k in d},
+                    )
+                    return
+            trace.add("Decision", trace.top_candidate, "SKIPPED",
+                      "Symbol not found in decision results")
+        elif name == "Risk":
+            results = data.get("results", [])
+            for r in results:
+                if r.get("symbol") == trace.top_candidate:
+                    approval = r.get("approval", "REJECTED")
+                    reason = r.get("rejection_reason", "") or "All checks passed"
+                    trace.add(
+                        "Risk", trace.top_candidate, approval, reason,
+                        {k: r[k] for k in (
+                            "probability", "entry_price", "stop_loss",
+                            "position_size", "position_value", "risk_percent",
+                            "expected_rr", "stop_method", "risk_amount",
+                        ) if k in r},
+                    )
+                    return
+            trace.add("Risk", trace.top_candidate, "SKIPPED",
+                      "Symbol not found in risk results")
+        elif name == "Trade":
+            plans = data.get("plans", [])
+            for p in plans:
+                if p.get("symbol") == trace.top_candidate:
+                    status = p.get("status", "UNKNOWN")
+                    conf = p.get("confidence", 0)
+                    trace.add(
+                        "Trade", trace.top_candidate,
+                        "ACCEPTED" if status == "READY" else status,
+                        f"confidence={conf:.1f} status={status}",
+                        {k: p[k] for k in (
+                            "confidence", "entry_price", "quantity",
+                            "position_size_usdt", "probability",
+                            "recommendation", "risk_reward",
+                        ) if k in p},
+                    )
+                    return
+            trace.add("Trade", trace.top_candidate, "SKIPPED",
+                      "Symbol not found in trade plans")
+        elif name == "Position":
+            positions = data.get("positions", [])
+            for p in positions:
+                if p.get("symbol") == trace.top_candidate:
+                    status = p.get("status", "UNKNOWN")
+                    pnl = p.get("floating_pnl", 0)
+                    pnl_str = f" PnL={pnl:+.2f}" if status == "OPEN" else ""
+                    trace.add(
+                        "Position", trace.top_candidate, status,
+                        f"Position {status}{pnl_str}",
+                        {k: p[k] for k in (
+                            "status", "entry_price", "current_price",
+                            "floating_pnl", "floating_pnl_pct",
+                            "remaining_qty", "stop_loss",
+                        ) if k in p},
+                    )
+                    return
+            trace.add("Position", trace.top_candidate, "SKIPPED",
+                      "Symbol not found in positions")
+        elif name == "Paper":
+            orders = data.get("orders", []) if isinstance(data, dict) else data
+            for o in orders:
+                if o.get("symbol") == trace.top_candidate:
+                    status = o.get("status", "UNKNOWN")
+                    side = o.get("side", "N/A")
+                    fill = o.get("fill_price", o.get("entry_price", 0))
+                    action = f"{side} {status} @ ${fill}" if status == "FILLED" else f"{side} {status}"
+                    trace.add(
+                        "Paper", trace.top_candidate, status, action,
+                        {k: o[k] for k in (
+                            "side", "status", "fill_price", "entry_price",
+                            "quantity", "filled_quantity", "net_pnl",
+                        ) if k in o},
+                    )
+                    return
+            trace.add("Paper", trace.top_candidate, "SKIPPED",
+                      "Symbol not found in paper orders")
 
     # ------------------------------------------------------------------
     #  Stage runners (delayed imports to avoid circular dependencies)
@@ -293,4 +441,4 @@ class Pipeline:
                 return
 
         from scripts import paper_trading_engine
-        paper_trading_engine.main()
+        paper_trading_engine.main(notifier=self._notifier)

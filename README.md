@@ -1,134 +1,417 @@
 # ZetBot AI
 
-Professional Spot Trading Bot for:
+Professional AI-powered Spot Trading Bot.
+
+ZetBot AI is an automated cryptocurrency spot trading system designed for safe, systematic, and transparent trading.
+
+Supported Exchanges:
 
 - Binance
 - Bybit
 - Tokocrypto
 
-## Features
+---
 
-- EMA 200
-- RSI 14
-- ADX Filter
-- Sideways Detection
+# Features
+
+## Trading Engine
+
+- EMA 200 Trend Filter
+- RSI 14 Momentum Filter
+- ADX Trend Strength Filter
+- Sideways Market Detection
+- ATR Volatility Filter
+- Trend Following Strategy
+- Automated Risk Management
 - Position Sizing
-- Stop Loss
-- Take Profit
-- Telegram Notification
-- Telegram Command Center (/status, /balance, /pipeline, /pause, etc.)
-- Paper Trading
-- Live Trading
+- Stop Loss Management
+- Take Profit Management
+- Paper Trading Mode
+- Live Trading Mode
 
-## Quick Start
+---
+
+## Execution & Accounting
+
+- Paper Trading Engine
+- Order Management
+- Position Management
+- Balance Tracking
+- Realized PnL Tracking
+- Unrealized PnL Tracking
+- Accounting Reconciliation
+- Position State Recovery
+- State Synchronization Protection
+- Trade History Tracking
+
+---
+
+# AI Decision Pipeline
+
+ZetBot uses a multi-stage decision pipeline:
+
+```
+Scanner
+   ↓
+Decision
+   ↓
+Risk
+   ↓
+Trade
+   ↓
+Position
+   ↓
+Paper Execution
+```
+
+Each trade passes through:
+
+### Scanner
+
+Market scanning and candidate selection.
+
+### Decision
+
+Evaluates:
+
+- Probability score
+- Trading signal
+- Market condition
+- Entry quality
+
+### Risk
+
+Checks:
+
+- Risk/reward ratio
+- Volatility
+- Position limits
+- Safety rules
+
+### Trade
+
+Creates and validates trade execution.
+
+### Position
+
+Manages:
+
+- Open positions
+- Exit conditions
+- Position lifecycle
+
+### Paper Execution
+
+Simulates execution without real funds.
+
+---
+
+# Decision Trace
+
+Decision Trace provides visibility into the complete AI decision process.
+
+It shows:
+
+- Selected candidate
+- Scanner result
+- Decision result
+- Risk approval/rejection
+- Execution status
+- Final position state
+
+Telegram command:
+
+```
+/trace
+```
+
+---
+
+# Telegram Command Center
+
+ZetBot includes an integrated Telegram control interface.
+
+No additional terminal session is required.
+
+The Telegram Command Center runs automatically with the bot.
+
+Available commands:
+
+| Command | Description |
+|---|---|
+| `/help` | List available commands |
+| `/status` | Bot status overview |
+| `/balance` | Account balance and PnL |
+| `/wallet` | Wallet summary |
+| `/positions` | Open positions |
+| `/pipeline` | Run complete pipeline |
+| `/scan` | Run market scanner |
+| `/summary` | Trading statistics |
+| `/health` | System health information |
+| `/trace` | AI decision trace |
+| `/version` | Version information |
+| `/pause` | Disable new trades |
+| `/resume` | Enable new trades |
+| `/shutdown` | Graceful shutdown |
+| `/logs` | View recent logs |
+| `/config` | Current configuration |
+
+---
+
+# Quick Start
+
+## Install Dependencies
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
+```
 
-# Configure
+---
+
+## Configure Environment
+
+Create configuration file:
+
+```bash
 cp .env.example .env
-# Edit .env with your exchange API keys and Telegram credentials
+```
 
-# Start ZetBot (single command — Telegram Command Center starts automatically)
+Edit `.env`:
+
+```env
+EXCHANGE=binance
+TIMEFRAME=1h
+
+PAPER_MODE=true
+
+ACCOUNT_BALANCE=10000
+
+TELEGRAM_ENABLED=true
+TELEGRAM_TOKEN=
+TELEGRAM_CHAT_ID=
+```
+
+---
+
+## Production Health Check
+
+Run:
+
+```bash
+./setup.sh
+```
+
+The setup checker validates:
+
+- Python environment
+- Virtual environment
+- Dependencies
+- Configuration
+- Exchange connectivity
+- Telegram configuration
+- Runtime directories
+- Git status
+
+---
+
+## Start ZetBot AI
+
+Run:
+
+```bash
 python main.py
 ```
 
-That's it. The pipeline runs once on startup, then the Telegram Command Center
-stays active in the background. Send `/help` to your bot to see all commands.
+The bot automatically starts:
 
-No second terminal, no `nohup`, no `tmux`, no `screen` required.
+- Trading Engine
+- Pipeline Scheduler
+- Telegram Command Center
+- Position Monitoring
+- Accounting System
+- Health Monitor
 
-## Architecture
+No:
+
+- nohup
+- tmux
+- screen
+
+required.
+
+---
+
+# Architecture
+
+```
+ZetBot AI
+
+main.py
+ |
+ ├── Trading Engine
+ |
+ ├── Pipeline
+ |     |
+ |     ├── Scanner
+ |     ├── Decision
+ |     ├── Risk
+ |     ├── Trade
+ |     ├── Position
+ |     └── Paper
+ |
+ ├── Accounting System
+ |
+ ├── Position Manager
+ |
+ ├── Notifier
+ |
+ ├── Health Monitor
+ |
+ └── Telegram Command Center
+```
+
+---
+
+# Telegram Architecture
 
 ```
 telegram/
-├── command_center.py    # Dispatcher: parse → middleware → execute → reply
-├── registry.py          # Auto-discovers commands in telegram/commands/
-├── context.py           # Per-request context (config, exchange, logger, ...)
-├── middleware.py        # Auth, cooldown, exception handling pipeline
-├── permissions.py       # Chat authorization
-├── formatter.py         # Markdown formatting helpers
-├── base_command.py      # Abstract base class for all commands
-└── commands/            # One file per command — drop a file, it's registered
-    ├── status.py        # /status — bot status overview
-    ├── balance.py       # /balance — account balance & PnL
-    ├── positions.py     # /positions — open positions with SL/TP
-    ├── pipeline.py      # /pipeline — run analysis pipeline
-    ├── scan.py          # /scan — run scanner only
-    ├── summary.py       # /summary — trading statistics
-    ├── health.py        # /health — system health overview
-    ├── version.py       # /version — ZetBot version info
-    ├── pause.py         # /pause — disable new trades
-    ├── resume.py        # /resume — enable new trades
-    ├── shutdown.py      # /shutdown — graceful shutdown
-    ├── help.py          # /help — list all commands
-    ├── logs.py          # /logs — recent log output
-    ├── config.py        # /config — show configuration
-    ├── wallet.py        # /wallet — wallet summary
-    └── ...              # Extend by adding one file
+
+├── command_center.py
+├── registry.py
+├── context.py
+├── middleware.py
+├── permissions.py
+├── formatter.py
+├── base_command.py
+
+└── commands/
+
+    ├── status.py
+    ├── balance.py
+    ├── wallet.py
+    ├── positions.py
+    ├── pipeline.py
+    ├── scan.py
+    ├── summary.py
+    ├── health.py
+    ├── trace.py
+    ├── version.py
+    ├── pause.py
+    ├── resume.py
+    ├── shutdown.py
+    ├── logs.py
+    ├── config.py
+    └── help.py
 ```
 
-### Adding a New Command
+Commands are automatically discovered.
 
-Create one file in `telegram/commands/`:
+Adding a new command only requires creating a new command module.
 
-```python
-from telegram.base_command import BaseCommand, CommandMeta
+---
 
-class MyCommand(BaseCommand):
-    meta = CommandMeta(
-        name="mycommand",
-        aliases=["mc"],
-        description="Does something useful",
-        usage="/mycommand [arg]",
-        permission="user",   # or "admin"
-    )
-    def execute(self, ctx, args: str) -> str:
-        return "Hello from my command!"
+# Configuration
+
+All settings are managed through `.env`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EXCHANGE` | binance | Exchange provider |
+| `TIMEFRAME` | 1h | Trading timeframe |
+| `PAPER_MODE` | true | Enable paper trading |
+| `ACCOUNT_BALANCE` | 10000 | Starting paper balance |
+| `TELEGRAM_ENABLED` | false | Enable Telegram |
+| `TELEGRAM_TOKEN` | | Telegram bot token |
+| `TELEGRAM_CHAT_ID` | | Authorized Telegram ID |
+
+See `.env.example` for complete configuration.
+
+---
+
+# Runtime Safety
+
+ZetBot includes:
+
+- PID locking
+- Health monitoring
+- Automatic recovery
+- Accounting reconciliation
+- Position synchronization
+- Notification retry handling
+- Error isolation
+
+Runtime directories:
+
+```
+data/
+logs/
+backups/
 ```
 
-That's it. No imports, no registration, no `if/elif`. The registry auto-discovers it.
+are excluded from Git tracking.
 
-## Telegram Commands
+---
 
-| Command        | Description                        |
-|----------------|------------------------------------|
-| `/help`        | List all available commands        |
-| `/start`       | Alias for /help                    |
-| `/status`      | Bot status, balance, positions     |
-| `/balance`     | Account balance & equity           |
-| `/positions`   | Show open positions with PnL       |
-| `/pipeline`    | Run full analysis pipeline         |
-| `/scan`        | Run market scanner only            |
-| `/summary`     | Today's trading statistics         |
-| `/health`      | System health & component status   |
-| `/version`     | Bot version & system info          |
-| `/pause`       | Disable new trade openings         |
-| `/resume`      | Enable new trade openings          |
-| `/shutdown`    | Gracefully shut down the bot       |
-| `/logs`        | Show recent log output             |
+# Development
 
-## Configuration
+Run tests:
 
-All settings via environment variables (`.env`):
+```bash
+pytest
+```
 
-| Variable             | Default    | Description                   |
-|----------------------|------------|-------------------------------|
-| `EXCHANGE`           | binance    | Exchange name                 |
-| `TIMEFRAME`          | 1h         | Trading timeframe             |
-| `PAPER_MODE`         | true       | Paper trading when true       |
-| `TELEGRAM_ENABLED`   | false      | Enable Telegram integration   |
-| `TELEGRAM_TOKEN`     |            | Bot token from BotFather      |
-| `TELEGRAM_CHAT_ID`   |            | Your Telegram chat ID         |
-| `ACCOUNT_BALANCE`    | 10000      | Starting paper balance        |
+Validation includes:
 
-See `.env.example` for the full list.
+- Accounting consistency
+- Paper trading validation
+- Position synchronization
+- Service container testing
+- Production regression testing
 
-## Version
+---
 
-v0.4.0 — Integrated Telegram Command Center
+# Future Expansion
 
-## Author
+ZetBot AI is designed with future Web3 integration in mind.
+
+Planned expansion:
+
+## Blockchain Trading
+
+Potential future support:
+
+- DEX trading integration
+- On-chain market analysis
+- Wallet-based portfolio management
+- Smart contract interaction
+- Web3 liquidity monitoring
+- Cross-chain market intelligence
+
+## AI Crypto Assistant
+
+Future capabilities:
+
+- Conversational trading assistant
+- Market analysis through AI
+- Portfolio insights
+- Trading strategy assistance
+- Web3 ecosystem monitoring
+
+Blockchain trading features will be introduced after the core centralized exchange trading engine reaches production maturity.
+
+---
+
+# Version
+
+```
+v0.5.0
+
+Decision Trace & Paper Trading Stability Update
+```
+
+---
+
+# Author
 
 EVOZXLabs

@@ -184,8 +184,18 @@ class TestSellWorkflow:
 
     def test_sell_closes_position(self) -> None:
         import bot.config as cfg
+        from bot.indicators import IndicatorEngine
         orig_sl = cfg.CONFIG.get("stop_loss")
         cfg.CONFIG["stop_loss"] = 10.0
+        # This test targets the Strategy-Exit code path, not stop
+        # sizing, so it needs the wide 10% fixed stop above rather than
+        # the tighter ATR-based stop that's now used by default when
+        # candle data is available. Force the ATR path unavailable so
+        # PaperTrader falls back to the fixed % configured above.
+        orig_atr = IndicatorEngine.atr
+        IndicatorEngine.atr = staticmethod(
+            lambda *a, **kw: (_ for _ in ()).throw(ValueError("no atr in test"))
+        )
         try:
             engine = PaperTradingEngine(initial_balance=10_000.0)
             engine.run_once(df=_uptrend_buy_df())
@@ -213,6 +223,7 @@ class TestSellWorkflow:
             assert result["position"] is None
         finally:
             cfg.CONFIG["stop_loss"] = orig_sl
+            IndicatorEngine.atr = orig_atr
 
     def test_sell_returns_trade_result(self) -> None:
         engine = PaperTradingEngine(initial_balance=10_000.0)
@@ -715,8 +726,16 @@ class TestFullLifecycle:
 
     def test_complete_cycle_buy_strategy_exit(self) -> None:
         import bot.config as cfg
+        from bot.indicators import IndicatorEngine
         orig_sl = cfg.CONFIG.get("stop_loss")
         cfg.CONFIG["stop_loss"] = 10.0
+        # Force the ATR path unavailable so PaperTrader falls back to
+        # the wide fixed % above — see test_sell_closes_position for
+        # why (this test targets Strategy-Exit, not stop sizing).
+        orig_atr = IndicatorEngine.atr
+        IndicatorEngine.atr = staticmethod(
+            lambda *a, **kw: (_ for _ in ()).throw(ValueError("no atr in test"))
+        )
         try:
             engine = PaperTradingEngine(initial_balance=10_000.0)
             engine.run_once(df=_uptrend_buy_df())
@@ -739,6 +758,7 @@ class TestFullLifecycle:
             assert engine.current_position() is None
         finally:
             cfg.CONFIG["stop_loss"] = orig_sl
+            IndicatorEngine.atr = orig_atr
 
     def test_multiple_full_cycles(self) -> None:
         engine = PaperTradingEngine(initial_balance=10_000.0)

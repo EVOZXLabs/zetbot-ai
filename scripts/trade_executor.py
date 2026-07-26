@@ -18,6 +18,12 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
 
+from scripts.risk_manager import dynamic_max_positions, _resolve_account_state
+from scripts.money_management import (
+    DAILY_LOSS_LIMIT as MM_DAILY_LOSS_LIMIT,
+    MAX_OPEN_POSITIONS as MM_MAX_OPEN_POSITIONS,
+)
+
 # ---------------------------------------------------------------------------
 #  Config
 # ---------------------------------------------------------------------------
@@ -30,13 +36,21 @@ LIVE_POSITIONS_PATH = "data/live_positions.json"
 # Simulated exchange requirements (Binance spot defaults)
 EXCHANGE_MIN_NOTIONAL = 10.0        # $10 minimum order value
 EXCHANGE_MIN_QTY_DEFAULT = 0.00001  # default min quantity step
-MAX_OPEN_POSITIONS = 2
-MAX_DAILY_LOSS_USD = 500.0          # 5 % of $10 000
+
+# NOTE: max_positions and max_daily_loss are equity-relative by default
+# (see ExecutionValidator / TradeExecutor below) — these constants are
+# only the fallback used when no equity figure can be resolved at all.
+# Sourced from scripts.money_management so this module can never drift
+# from SPECIFICATION.md §25/§47/§49's production Money Management
+# defaults (1 max open position, 3% daily loss limit).
+MAX_OPEN_POSITIONS = MM_MAX_OPEN_POSITIONS
+MAX_DAILY_LOSS_PCT = MM_DAILY_LOSS_LIMIT * 100.0   # % of current equity
 MIN_RR = 1.5
 
 # ---------------------------------------------------------------------------
 #  Data types
 # ---------------------------------------------------------------------------
+
 
 
 @dataclass
@@ -207,13 +221,42 @@ class ExecutionValidator:
         self,
         min_notional: float = EXCHANGE_MIN_NOTIONAL,
         min_rr: float = MIN_RR,
-        max_positions: int = MAX_OPEN_POSITIONS,
-        max_daily_loss: float = MAX_DAILY_LOSS_USD,
+        equity: float = 10_000.0,
+        max_positions: int | None = None,
+        max_daily_loss_pct: float = MAX_DAILY_LOSS_PCT,
+        max_daily_loss: float | None = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        equity : float
+            Current account equity. Base for both the daily-loss cap
+            (``equity * max_daily_loss_pct / 100``) and, when
+            ``max_positions`` is not explicitly given, the equity-tiered
+            position count from :func:`dynamic_max_positions`.
+        max_positions : int | None
+            Explicit override. If ``None`` (default), falls back to
+            ``MAX_OPEN_POSITIONS`` (1) per SPECIFICATION.md
+            §25/§47/§49 — a fixed cap regardless of account size.
+            Position *size* (not position *count*) is what scales
+            with equity — see :mod:`scripts.money_management`.
+        max_daily_loss : float | None
+            Explicit $ override for the daily loss cap. If ``None``
+            (default), computed as ``equity * max_daily_loss_pct / 100``
+            instead of a fixed dollar figure — so the cap scales with
+            the account instead of assuming a $10,000 baseline.
+        """
         self.min_notional = min_notional
         self.min_rr = min_rr
-        self.max_positions = max_positions
-        self.max_daily_loss = max_daily_loss
+        self.equity = equity
+        self.max_positions = (
+            max_positions if max_positions is not None
+            else MAX_OPEN_POSITIONS
+        )
+        self.max_daily_loss = (
+            max_daily_loss if max_daily_loss is not None
+            else equity * (max_daily_loss_pct / 100.0)
+        )
         self._used_positions = 0
         self._used_daily_risk = 0.0
         self._seen_symbols: set[str] = set()
@@ -327,8 +370,20 @@ class TradeExecutor:
     sorted execution plan.
     """
 
-    def __init__(self) -> None:
-        self.validator = ExecutionValidator()
+    def __init__(self, equity: float | None = None) -> None:
+        """
+        Parameters
+        ----------
+        equity : float | None
+            Current account equity, used to scale ``max_positions`` and
+            the daily-loss cap. If ``None`` (default), resolved from
+            the same canonical ``data/paper_balance.json`` source the
+            risk manager and Telegram use, so all three always agree.
+        """
+        if equity is None:
+            _, equity = _resolve_account_state()
+        self.equity = equity
+        self.validator = ExecutionValidator(equity=equity)
         self.executions: list[TradeExecution] = []
 
     def run(self) -> list[TradeExecution]:
@@ -336,6 +391,11 @@ class TradeExecutor:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PROFESSIONAL TRADE EXECUTOR")
         print(f"  {'=' * 78}")
+        print(f"  Equity           : ${self.equity:>8,.2f}")
+        print(f"  Max positions    : {self.validator.max_positions}")
+        print(f"  Max daily loss   : ${self.validator.max_daily_loss:>8,.2f}  "
+              f"({MAX_DAILY_LOSS_PCT:.1f}% of equity)")
+        print()
 
         t0 = time.time()
 

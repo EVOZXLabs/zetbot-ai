@@ -2,9 +2,10 @@ import os
 
 from telegram.base_command import BaseCommand, CommandMeta
 from telegram.ui import (
-    header, SEPARATOR, wib_now, wib_short, progress_bar,
-    exposure_bar, build_message,
+    compact_header, wib_now, progress_bar, exposure_bar,
+    detail_block, build_message,
 )
+from scripts.position_status import is_open
 
 PAUSE_FILE = "data/.paused"
 
@@ -38,6 +39,21 @@ class StatusCommand(BaseCommand):
             open_pos = a.open_positions
             win_rate = a.win_rate
             exposure_pct = a.exposure_pct
+            # "Today" must be today's realized PnL, not the all-time
+            # net_pnl (that number is already shown by /wallet's
+            # "all-time" line — reusing it here made the two commands
+            # display identical figures under different labels).
+            today_pnl = m.today_summary().get("pnl", 0.0)
+
+            # Build position symbols string
+            open_list = m.open_positions()
+            if open_list:
+                symbols = ", ".join(
+                    p.get("symbol", "?") for p in open_list
+                )
+                pos_label = f"{open_pos}: {symbols}"
+            else:
+                pos_label = "None"
         else:
             pb = ctx.read_json("paper_balance.json")
             bal = pb.get("final_balance", 0.0)
@@ -46,6 +62,11 @@ class StatusCommand(BaseCommand):
             open_pos = 0
             win_rate = pb.get("win_rate", 0.0)
             exposure_pct = 0.0
+            pos_label = "None"
+            # No MetricsManager available in this fallback path — best
+            # approximation is the all-time figure (same limitation as
+            # before this fix).
+            today_pnl = net_pnl
 
         paused = os.path.exists(PAUSE_FILE)
 
@@ -85,20 +106,26 @@ class StatusCommand(BaseCommand):
                 except Exception:
                     pass
 
-        trading_label = "PAUSED" if paused else "ACTIVE"
-        pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+        trading_label = "Paused" if paused else "Active"
+        today_emoji = "🟢" if today_pnl >= 0 else "🔴"
 
+        # One glance answers "is it working and how's it doing" — the
+        # rest (exposure %, raw health score, pipeline state) is
+        # secondary and lives in the collapsible breakdown below.
         return build_message(
-            header(),
-            f"🟢 *ONLINE*\n"
-            f"💰 Equity\n${eq:,.2f}\n\n"
-            f"💵 Cash\n${bal:,.2f}\n\n"
-            f"📂 Positions\n{open_pos}",
-            f"{SEPARATOR}\n"
-            f"📈 Today\n{pnl_emoji} ${net_pnl:+,.2f}\n\n"
-            f"⏰ Next Scan\n{next_scan_str}",
-            f"{SEPARATOR}\n"
-            f"⚠️ Exposure\n{exposure_bar(exposure_pct)}\n\n"
-            f"❤️ Health\n{progress_bar(health_score, 100, 10)} {health_score:.0f}",
-            f"🕐 {wib_now()}",
+            compact_header(),
+            f"🟢 *ONLINE* — trading {trading_label}\n"
+            f"Total Balance ${eq:,.2f} · Cash ${bal:,.2f}",
+            f"Positions: {pos_label}\n"
+            f"Today {today_emoji} ${today_pnl:+,.2f} · Next scan {next_scan_str}",
+            detail_block(
+                [
+                    f"Pipeline    {pipeline_status}",
+                    f"Uptime      {runtime}",
+                    f"In trades   {exposure_pct:.1f}%",
+                    f"Health      {health_score:.0f}/100",
+                ],
+                label="System",
+            ),
+            wib_now().replace("\n", ", "),
         )

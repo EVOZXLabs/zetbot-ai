@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from scripts.balance_resolver import resolve_initial_balance
 from scripts.position_status import is_open
 
 
@@ -100,72 +101,102 @@ class MetricsManager:
         return self._read_json("paper_balance.json")
 
     # ------------------------------------------------------------------
+    #  Canonical accounting computation — single source of truth
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_snapshot(
+        cash: float,
+        realized_pnl: float,
+        initial_balance: float,
+        open_positions: list[dict[str, Any]],
+        total_trades: int = 0,
+        winning_trades: int = 0,
+        losing_trades: int = 0,
+        win_rate: float = 0.0,
+        profit_factor: float = 0.0,
+        gross_profit: float = 0.0,
+        gross_loss: float = 0.0,
+    ) -> AccountSnapshot:
+        """Canonical computation of ALL derived accounting metrics.
+
+        This is the SINGLE function every component must use:
+          - startup reconcile
+          - Health Monitor
+          - /wallet, /balance
+          - Telegram report
+          - paper_balance.json writers
+
+        Parameters are raw inputs — no pre-computed derived values.
+
+        Invariants (always true, by construction):
+            equity == cash + position_market_value
+            net_pnl == realized_pnl + unrealized_pnl
+            exposure_pct == (position_value / equity * 100) if equity > 0 else 0
+            total_return_pct == ((equity - initial_balance) / initial_balance) * 100
+        """
+        open_count = len(open_positions)
+
+        # Compute from raw position data
+        unrealized_pnl = sum(
+            p.get("unrealized_pnl", 0.0) for p in open_positions
+        )
+        position_market_value = sum(
+            p.get("current_price", 0) * (p.get("remaining_qty", 0) or p.get("quantity", 0))
+            for p in open_positions
+        )
+
+        equity = cash + position_market_value
+        net_pnl = realized_pnl + unrealized_pnl
+        position_value = equity - cash
+        exposure_pct = (position_value / equity * 100.0) if equity > 0 else 0.0
+        total_return_pct = (
+            ((equity - initial_balance) / initial_balance * 100.0)
+            if initial_balance > 0 else 0.0
+        )
+
+        return AccountSnapshot(
+            balance=cash,
+            equity=equity,
+            realized_pnl=realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            net_pnl=net_pnl,
+            total_return_pct=total_return_pct,
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=win_rate,
+            profit_factor=profit_factor,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
+            open_positions=open_count,
+            initial_balance=initial_balance,
+            position_value=position_value,
+            exposure_pct=exposure_pct,
+        )
+
+    # ------------------------------------------------------------------
     #  Account snapshot
     # ------------------------------------------------------------------
 
     def account(self) -> AccountSnapshot:
-        """Compute the authoritative account snapshot.
+        """Authoritative account snapshot, computed from raw data.
 
-        ``paper_balance.json`` is written by ``scripts.paper_trading_engine``
-        (``PaperExport.balance_json``) from the exact same in-memory
-        ``VirtualPosition`` objects, at the exact same instant, as the
-        ``positions.json`` it also writes (see ``_save_state`` /
-        ``PaperTradingEngine.run``). It is therefore the authoritative
-        accounting output — balance, equity, realized/unrealized/net PnL,
-        and total_return_pct are read directly from it, never
-        recomputed here. Recomputing them independently from
-        positions.json would be a second, divergence-prone accounting
-        implementation of the same numbers.
-
-        positions.json is used ONLY to identify which records are
-        currently open (open_positions / open_positions_count and
-        position listings) — never to derive a dollar figure.
-
-        Invariants (always true, by construction):
-            equity == balance + position_value
-            net_pnl == realized_pnl + unrealized_pnl
-            exposure_pct == (position_value / equity * 100) if equity > 0 else 0
+        Reads raw data from ``paper_balance.json`` (cash, realized_pnl,
+        initial_balance) and ``positions.json`` (open positions), then
+        delegates to ``compute_snapshot()`` — the single canonical function.
         """
         pb = self._read_balance_pb()
-        bal = pb.get("final_balance", 0.0)
+        cash = pb.get("final_balance", 0.0)
         realized = pb.get("realized_pnl", 0.0)
-        initial = pb.get("initial_balance", 10_000.0)
-        equity = pb.get("final_equity", bal)
-        unrealized = pb.get("unrealized_pnl", 0.0)
-        net = pb.get("net_pnl", realized + unrealized)
-        total_return_pct = pb.get(
-            "total_return_pct",
-            ((equity - initial) / initial * 100.0) if initial > 0 else 0.0,
-        )
+        initial = resolve_initial_balance(pb, self._read_json("paper_state.json"))
+        open_positions = self.open_positions()
 
-        open_count = self.open_positions_count()
-
-        # Runtime invariant enforcement: when no positions are open,
-        # unrealized_pnl MUST be zero and equity MUST equal balance.
-        # paper_balance.json can contain stale unrealized_pnl from a
-        # recently-closed position that hasn't been reconciled yet.
-        if open_count == 0:
-            unrealized = 0.0
-            net = realized
-            equity = bal
-            total_return_pct = (
-                ((equity - initial) / initial * 100.0) if initial > 0 else 0.0
-            )
-
-        # position_value is derived from the authoritative equity/balance
-        # (equity == balance + position_value by construction in the
-        # paper engine's own VirtualWallet.snapshot()) rather than summed
-        # from positions.json, so it can never disagree with equity/exposure.
-        position_value = equity - bal
-        exposure_pct = (position_value / equity * 100.0) if equity > 0 else 0.0
-
-        return AccountSnapshot(
-            balance=bal,
-            equity=equity,
+        return self.compute_snapshot(
+            cash=cash,
             realized_pnl=realized,
-            unrealized_pnl=unrealized,
-            net_pnl=net,
-            total_return_pct=total_return_pct,
+            initial_balance=initial,
+            open_positions=open_positions,
             total_trades=pb.get("total_trades", 0),
             winning_trades=pb.get("winning_trades", 0),
             losing_trades=pb.get("losing_trades", 0),
@@ -173,10 +204,6 @@ class MetricsManager:
             profit_factor=pb.get("profit_factor", 0.0),
             gross_profit=pb.get("gross_profit", 0.0),
             gross_loss=pb.get("gross_loss", 0.0),
-            open_positions=open_count,
-            initial_balance=initial,
-            position_value=position_value,
-            exposure_pct=exposure_pct,
         )
 
     # ------------------------------------------------------------------

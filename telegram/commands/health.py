@@ -1,9 +1,7 @@
 import threading
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.ui import (
-    header, SEPARATOR, wib_now, status_dot, build_message,
-)
+from telegram.ui import compact_header, wib_now, build_message
 
 
 class HealthCommand(BaseCommand):
@@ -44,20 +42,40 @@ class HealthCommand(BaseCommand):
             s_status = ctx.services.scheduler.status
             pipeline_ok = s_status not in ("stopped",) and not s_status.startswith("failed")
 
+        checks = [
+            ("Bot", True, "Running", "Down"),
+            ("Exchange", exchange_ok, "Connected", "Disconnected"),
+            ("Telegram", tg_ok, "Connected", "Disconnected"),
+            ("Scanner", scanner_ok, "Healthy", "Unhealthy"),
+            ("Pipeline", pipeline_ok, "Healthy", "Unhealthy"),
+        ]
+        all_ok = all(ok for _, ok, _, _ in checks)
+
+        # Headline answers the one question people actually ask ("is
+        # anything broken?"); the per-component grid is the secondary
+        # detail for anyone troubleshooting.
+        lines = "\n".join(
+            f"{'🟢' if ok else '🔴'} {label} — {good if ok else bad}"
+            for label, ok, good, bad in checks
+        )
+
         scanner_time = snapshot.get("scanner_time", "N/A")
-        last_scan_str = ""
+        last_scan_line = ""
         if scanner_time != "N/A":
-            from telegram.formatter import time_ago
-            last_scan_str = f"\n\nLast Scan\n{time_ago(scanner_time)}"
+            try:
+                from datetime import datetime, timezone, timedelta
+                _wib = timezone(timedelta(hours=7))
+                dt = datetime.fromisoformat(scanner_time.replace("Z", "+00:00"))
+                wib_dt = dt.astimezone(_wib)
+                last_scan_line = f"Last scan: {wib_dt.strftime('%d %b %Y %H:%M WIB')}"
+            except (ValueError, AttributeError):
+                last_scan_line = f"Last scan: {scanner_time}"
 
         return build_message(
-            header(),
-            f"❤️ *SYSTEM HEALTH*\n{SEPARATOR}",
-            f"{status_dot(internet_ok, 'Bot')}  🟢 Running",
-            f"{status_dot(exchange_ok, 'Exchange')}  {'🟢 Connected' if exchange_ok else '🔴 Disconnected'}",
-            f"{status_dot(tg_ok, 'Telegram')}  {'🟢 Connected' if tg_ok else '🔴 Disconnected'}",
-            f"{status_dot(scanner_ok, 'Scanner')}  {'🟢 Healthy' if scanner_ok else '🔴 Unhealthy'}",
-            f"{status_dot(pipeline_ok, 'Pipeline')}  {'🟢 Healthy' if pipeline_ok else '🔴 Unhealthy'}",
-            f"{SEPARATOR}{last_scan_str}",
-            f"🕐 {wib_now()}",
+            compact_header(),
+            f"{'🟢' if all_ok else '🟡'} *SYSTEM HEALTH*\n"
+            + ("Everything looks good." if all_ok else "Something needs attention."),
+            lines,
+            last_scan_line,
+            wib_now().replace("\n", ", "),
         )
