@@ -62,8 +62,14 @@ class HealthCommand(BaseCommand):
         scanner_time = snapshot.get("scanner_time", "N/A")
         last_scan_line = ""
         if scanner_time != "N/A":
-            from telegram.formatter import time_ago
-            last_scan_line = f"Last scan: {time_ago(scanner_time)}"
+            try:
+                from datetime import datetime, timezone, timedelta
+                _wib = timezone(timedelta(hours=7))
+                dt = datetime.fromisoformat(scanner_time.replace("Z", "+00:00"))
+                wib_dt = dt.astimezone(_wib)
+                last_scan_line = f"Last scan: {wib_dt.strftime('%d %b %Y %H:%M WIB')}"
+            except (ValueError, AttributeError):
+                last_scan_line = f"Last scan: {scanner_time}"
 
         return build_message(
             compact_header(),

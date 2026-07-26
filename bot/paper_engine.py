@@ -175,12 +175,14 @@ class PaperTradingEngine:
                         "SL/TP %% — %s", symbol, exc,
                     )
 
+                ema200_val = float(IndicatorEngine.ema200(df))
                 pos = self._paper.open_position(
                     entry_price=price,
                     symbol=symbol,
                     timeframe=timeframe,
                     reasons=result["reason"],
                     atr_pct=atr_pct,
+                    ema200=ema200_val,
                 )
                 if pos is not None and pos["entry_time"] != self._notified_buy_entry:
                     self._notified_buy_entry = pos["entry_time"]

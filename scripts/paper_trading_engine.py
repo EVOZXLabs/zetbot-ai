@@ -351,6 +351,8 @@ class PaperTradingEngine:
             timeframe = str(os.getenv("TIMEFRAME", "1h"))
             sl = plan.get("stop_loss", 0)
             tp1 = plan.get("tp1", 0)
+            tp2 = plan.get("tp2", 0)
+            tp3 = plan.get("tp3", 0)
             reasons = plan.get("reasons", ["Paper trade executed"])
 
             self._notifier.notify_buy_opened(
@@ -362,6 +364,8 @@ class PaperTradingEngine:
                 position_size=plan.get("position_size_usdt", 0),
                 stop_loss=sl,
                 take_profit=tp1,
+                take_profit_2=tp2,
+                take_profit_3=tp3,
                 reasons=reasons,
             )
         except Exception as exc:

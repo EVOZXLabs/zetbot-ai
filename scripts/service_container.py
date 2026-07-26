@@ -577,7 +577,8 @@ class _NotificationAdapter:
         return notifier.send(message)
 
     def notify_buy(self, symbol: str, entry_price: float, quantity: float,
-                   position_size: float, stop_loss: float, tp1: float) -> None:
+                   position_size: float, stop_loss: float, tp1: float,
+                   tp2: float = 0.0, tp3: float = 0.0) -> None:
         notifier = self._get_notifier()
         notifier.notify_buy_opened(
             symbol=symbol,
@@ -586,6 +587,8 @@ class _NotificationAdapter:
             position_size=position_size,
             stop_loss=stop_loss,
             take_profit=tp1,
+            take_profit_2=tp2,
+            take_profit_3=tp3,
         )
 
     def notify_close(self, symbol: str, pnl: float, reason: str, exit_price: float) -> None:
@@ -677,6 +680,9 @@ class _MetricsAdapter:
     def worst_trade(self) -> dict[str, Any]:
         cm = self._mgr.computed()
         return cm.worst_trade
+
+    def today_summary(self) -> dict[str, Any]:
+        return self._mgr.today_summary()
 
     def total_trades(self) -> int:
         return len(self._trades) or self._mgr.account().total_trades

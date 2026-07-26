@@ -45,6 +45,7 @@ class PaperTrader:
         timeframe: str,
         reasons: list[str],
         atr_pct: float | None = None,
+        ema200: float | None = None,
     ) -> dict[str, Any] | None:
         """Open a virtual long position.
 
@@ -84,14 +85,27 @@ class PaperTrader:
         risk_reward = float(CONFIG.get("risk_reward_ratio", 2.0))
         min_position_usd = float(CONFIG.get("min_position_usd", 5.0))
 
-        if atr_pct is not None and atr_pct > 0:
-            stop_loss_pct = atr_pct * atr_multiplier
-            take_profit_pct = stop_loss_pct * risk_reward
-            sizing_method = "ATR"
+        # ── Dynamic SL/TP via risk_manager (same as live pipeline) ──
+        if atr_pct is not None and atr_pct > 0 and ema200 is not None and ema200 > 0:
+            from scripts.risk_manager import StopLossCalculator, TakeProfitCalculator
+            stop_loss_price, stop_method = StopLossCalculator.safest(
+                entry_price, atr_pct, ema200,
+            )
+            tp_prices = TakeProfitCalculator.calculate(entry_price, stop_loss_price)
+            tp1 = tp_prices[0] if tp_prices else entry_price
+            tp2 = tp_prices[1] if len(tp_prices) > 1 else 0.0
+            tp3 = tp_prices[2] if len(tp_prices) > 2 else 0.0
+            stop_loss_pct = (entry_price - stop_loss_price) / entry_price * 100.0
+            sizing_method = stop_method
+            take_profit_price = tp1
         else:
+            # Fallback to fixed % (legacy — EMA200 or ATR unavailable)
             stop_loss_pct = float(CONFIG.get("stop_loss", 1.5))
             take_profit_pct = float(CONFIG.get("take_profit", 2.5))
             sizing_method = "Fixed%"
+            stop_loss_price = entry_price * (1.0 - stop_loss_pct / 100.0)
+            take_profit_price = entry_price * (1.0 + take_profit_pct / 100.0)
+            tp1, tp2, tp3 = take_profit_price, 0.0, 0.0
 
         position_value = self._balance * (position_size_pct / 100.0)
 
@@ -107,9 +121,6 @@ class PaperTrader:
 
         quantity = position_value / entry_price
 
-        stop_loss_price = entry_price * (1.0 - stop_loss_pct / 100.0)
-        take_profit_price = entry_price * (1.0 + take_profit_pct / 100.0)
-
         self._position = {
             "entry_time": datetime.now(timezone.utc),
             "entry_price": entry_price,
@@ -118,9 +129,12 @@ class PaperTrader:
             "position_size_percent": position_size_pct,
             "stop_loss_price": stop_loss_price,
             "take_profit_price": take_profit_price,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
             "stop_method": sizing_method,
             "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
+            "take_profit_pct": ((take_profit_price - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0,
             "status": "OPEN",
             "symbol": symbol,
             "timeframe": timeframe,
@@ -133,7 +147,10 @@ class PaperTrader:
             "Size=%s%.2f%% (%.4f %s) | %s",
             entry_price,
             stop_loss_price, stop_loss_pct, sizing_method,
-            take_profit_price, take_profit_pct,
+            take_profit_price, (
+                (take_profit_price - entry_price) / entry_price * 100.0
+                if entry_price > 0 else 0.0
+            ),
             f"${position_value:,.2f} / ",
             position_size_pct,
             quantity,

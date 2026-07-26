@@ -543,6 +543,8 @@ def _notify_buy_opened(
     position_size: float,
     stop_loss: float,
     tp1: float,
+    tp2: float = 0.0,
+    tp3: float = 0.0,
 ) -> None:
     """Send Telegram notification when a buy is opened."""
     try:
@@ -556,6 +558,8 @@ def _notify_buy_opened(
             position_size=position_size,
             stop_loss=stop_loss,
             take_profit=tp1,
+            take_profit_2=tp2,
+            take_profit_3=tp3,
             reasons=["Pipeline execution"],
         )
     except Exception as exc:
@@ -593,6 +597,8 @@ def _notify_existing_positions(
                 position_size=pos.get("position_size_usdt", 0),
                 stop_loss=pos.get("stop_loss", 0),
                 tp1=pos.get("tp1", 0),
+                tp2=pos.get("tp2", 0),
+                tp3=pos.get("tp3", 0),
             )
             notified.add(sym)
             new_notified = True
@@ -887,10 +893,21 @@ def main() -> None:
     # so a run would show "BOT STOPPED" on exit with no matching
     # "BOT STARTED" on startup.
     try:
+        import json as _json
+        try:
+            with open("data/paper_balance.json") as _f:
+                _pb = _json.load(_f)
+            _bal = _pb.get("final_balance", 0.0)
+            _eq = _pb.get("final_equity", 0.0)
+        except (FileNotFoundError, _json.JSONDecodeError):
+            _bal = float(config.account_balance)
+            _eq = float(config.account_balance)
         _notifier.notify_bot_started(
             symbol=f"{config.quote_currency} pairs",
             timeframe=config.timeframe,
             exchange=config.exchange,
+            balance=_bal,
+            equity=_eq,
         )
     except Exception:
         pass
@@ -1190,7 +1207,16 @@ def main() -> None:
 
     # Send bot_stopped notification BEFORE stopping workers
     try:
-        _notifier.notify_bot_stopped(cycles=0, balance=config.account_balance)
+        import json as _json
+        try:
+            with open("data/paper_balance.json") as _f:
+                _pb = _json.load(_f)
+            _bal = _pb.get("final_balance", 0.0)
+            _eq = _pb.get("final_equity", 0.0)
+        except (FileNotFoundError, _json.JSONDecodeError):
+            _bal = float(config.account_balance)
+            _eq = float(config.account_balance)
+        _notifier.notify_bot_stopped(cycles=0, balance=_bal, equity=_eq)
     except Exception:
         pass
 

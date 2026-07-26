@@ -155,6 +155,8 @@ class Notifier:
         position_size: float = 0.0,
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
+        take_profit_2: float = 0.0,
+        take_profit_3: float = 0.0,
         strategy: str = "",
         reasons: Optional[list[str]] = None,
         **kwargs: Any,
@@ -172,7 +174,20 @@ class Notifier:
             from telegram.formatter import fmt_price as fp
 
             sl_pct = ((stop_loss - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
-            tp_pct = ((take_profit - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+
+            lines = [
+                f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
+            ]
+
+            if take_profit > 0:
+                tp1_pct = ((take_profit - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                lines.append(f"TP①          {fp(take_profit)}  ({tp1_pct:+.2f}%)")
+            if take_profit_2 > 0:
+                tp2_pct = ((take_profit_2 - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                lines.append(f"TP②          {fp(take_profit_2)}  ({tp2_pct:+.2f}%)")
+            if take_profit_3 > 0:
+                tp3_pct = ((take_profit_3 - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                lines.append(f"TP③          {fp(take_profit_3)}  ({tp3_pct:+.2f}%)")
 
             reasons = reasons or ["Pipeline execution"]
             where = " · ".join(p for p in (exchange, timeframe) if p)
@@ -182,13 +197,7 @@ class Notifier:
                 f"🟢 *BUY OPENED — {symbol}*"
                 + (f"\n{where}" if where else ""),
                 f"Entry {fp(entry_price)}\n🧠 {ai_insight(reasons=reasons, is_buy=True)}",
-                detail_block(
-                    [
-                        f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
-                        f"Take Profit  {fp(take_profit)}  ({tp_pct:+.2f}%)",
-                    ],
-                    label="Trade plan",
-                ),
+                detail_block(lines, label="Trade plan"),
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -242,14 +251,12 @@ class Notifier:
             )
 
             title = f"{symbol}" if symbol else "Position"
+            pnl_label = "Profit" if pnl >= 0 else "Loss"
 
-            # One message, one focus: the result first, one plain-language
-            # line for why, then Entry/Exit as secondary technical info for
-            # anyone who wants to double-check the numbers.
             text = build_message(
                 compact_header(),
                 f"{result_emoji} *POSITION CLOSED — {title}*\n"
-                f"Profit ${pnl:+,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
+                f"{pnl_label} ${abs(pnl):,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
                 f"🧠 AI Insight: {insight}\nBalance now ${balance:,.2f}",
                 detail_block(
                     [
@@ -363,6 +370,8 @@ class Notifier:
         symbol: str = "",
         timeframe: str = "",
         exchange: str = "",
+        balance: float = 0.0,
+        equity: float = 0.0,
     ) -> bool:
         """Send BOT STARTED notification."""
         logger.info("[TG] Sending notification: BOT_STARTED")
@@ -370,9 +379,10 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, build_message
 
             where = " • ".join(p for p in (symbol, exchange, timeframe) if p)
+            bal_line = f"\nTotal ${equity:,.2f} · Cash ${balance:,.2f}" if equity > 0 else ""
             text = build_message(
                 compact_header(),
-                "🟢 *BOT STARTED*" + (f"\n{where}" if where else ""),
+                "🟢 *BOT STARTED*" + (f"\n{where}" if where else "") + bal_line,
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -384,16 +394,18 @@ class Notifier:
         self,
         cycles: int = 0,
         balance: float = 0.0,
+        equity: float = 0.0,
     ) -> bool:
         """Send BOT STOPPED notification."""
         logger.info("[TG] Sending notification: BOT_STOPPED")
         try:
             from telegram.ui import compact_header, build_message
 
+            equity_line = f" · Total ${equity:,.2f}" if equity > 0 else ""
             text = build_message(
                 compact_header(),
                 f"🔴 *BOT STOPPED*\n"
-                f"{cycles} cycles run · Balance ${balance:,.2f}",
+                f"{cycles} cycles run · Cash ${balance:,.2f}{equity_line}",
             )
             return self._send(text)
         except Exception as exc:

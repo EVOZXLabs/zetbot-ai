@@ -40,6 +40,7 @@ class WalletCommand(BaseCommand):
             win_rate = a.win_rate
             total_trades = a.total_trades
             in_positions_pct = a.exposure_pct
+            today_pnl = m.today_summary().get("pnl", 0.0)
         else:
             pb = ctx.read_json("paper_balance.json")
             if not pb:
@@ -66,21 +67,21 @@ class WalletCommand(BaseCommand):
             in_positions_pct = (
                 (pos_value / total_balance * 100) if total_balance > 0 else 0.0
             )
+            today_pnl = net_pnl  # fallback — same as /status
 
-        # One result, one shape: the headline is always Total Balance +
-        # all-time PnL. Exposure and win-rate ride along on the same
-        # message instead of a separate command with its own format, so
-        # /balance and /wallet can never show conflicting numbers.
+        today_emoji = "🟢" if today_pnl >= 0 else "🔴"
+
         return build_message(
             compact_header(),
             f"👛 *Wallet* — ${total_balance:,.2f}\n"
+            f"Today {today_emoji} ${today_pnl:+,.2f} · "
             f"{pnl_emoji(net_pnl)} {net_pnl:+,.2f} ({total_return_pct:+.2f}%) all-time",
-            note("Total Balance = your cash plus the current value of open trades"),
+            note("Total Balance = cash + current value of open trades"),
             f"In open trades {exposure_bar(in_positions_pct)}\n"
             f"Win rate {progress_bar(win_rate, 100, 10)} {win_rate:.1f}% ({total_trades} trades)",
             detail_block(
                 [
-                    f"Cash             ${cash:,.2f}",
+                    f"Cash (idle)      ${cash:,.2f}",
                     f"Open trades      ${pos_value:,.2f}",
                     f"Closed P&L       {realized:+,.2f}",
                     f"Open P&L         {unrealized:+,.2f}",
