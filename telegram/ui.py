@@ -5,8 +5,7 @@ mobile-first appearance.
 
 Design Language
 ───────────────
-Separator: ━━━━━━━━━━━━━━━━━━
-Header:    🤖 ZetBot AI
+Header:    🤖 ZetBot AI  (no separators — see compact_header())
 """
 
 from datetime import datetime, timezone, timedelta
@@ -15,8 +14,6 @@ from typing import Optional
 # ── Timezone ──────────────────────────────────────────────────────────
 
 _WIB = timezone(timedelta(hours=7))
-
-SEPARATOR = "━" * 18
 
 
 def wib_now() -> str:
@@ -51,11 +48,6 @@ def wib_short(ts: Optional[float] = None) -> str:
 
 
 # ── Layout primitives ─────────────────────────────────────────────────
-
-def header() -> str:
-    """Standard bot header block."""
-    return f"{SEPARATOR}\n🤖 *ZetBot AI*\n{SEPARATOR}"
-
 
 def section(title: str) -> str:
     """Section divider with title."""
@@ -245,8 +237,3 @@ def note(text: str) -> str:
 def build_message(*blocks: str) -> str:
     """Join message blocks with double newlines."""
     return "\n\n".join(b for b in blocks if b)
-
-
-def empty_positions() -> str:
-    """Standard 'no open positions' message."""
-    return f"{header()}\n\nNo open positions."
