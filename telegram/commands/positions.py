@@ -10,6 +10,20 @@ from telegram.ui import (
 from scripts.position_status import is_open
 
 
+def _parse_timestamp(ts: str) -> datetime | None:
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            clean = ts.split("+")[0].split("Z")[0]
+            return datetime.strptime(clean, fmt).replace(tzinfo=timezone.utc)
+        except (ValueError, IndexError):
+            continue
+    return None
+
+
 class PositionsCommand(BaseCommand):
     meta = CommandMeta(
         name="positions",
@@ -110,20 +124,21 @@ class PositionsCommand(BaseCommand):
             symbol = p.get("symbol", "?")
             entry = p.get("entry_price", 0.0)
             current = p.get("current_price", 0.0)
-            pnl = p.get("floating_pnl", 0)
-            pnl_pct = p.get("floating_pnl_pct", 0)
+            remaining = p.get("remaining_qty", p.get("quantity", 0.0))
+            cost_basis = p.get("cost_basis", 0.0)
+
+            pnl = current * remaining - cost_basis
+            pnl_pct = ((current / entry) - 1) * 100 if entry > 0 else 0.0
 
             emoji = pnl_emoji(pnl)
 
             holding_str = "N/A"
             entry_time_raw = p.get("opened_at", p.get("entry_time", ""))
             if entry_time_raw:
-                try:
-                    dt = datetime.fromisoformat(entry_time_raw.replace("Z", "+00:00"))
+                dt = _parse_timestamp(entry_time_raw)
+                if dt is not None:
                     hold_sec = (datetime.now(timezone.utc) - dt).total_seconds()
                     holding_str = fmt_holding(hold_sec)
-                except (ValueError, TypeError):
-                    pass
             if holding_str == "N/A":
                 holding_hours = p.get("holding_hours", 0)
                 if holding_hours:
@@ -132,7 +147,7 @@ class PositionsCommand(BaseCommand):
             # Progress bar from entry to TP1
             tp1 = p.get("tp1", 0.0)
             sl = p.get("current_stop") or p.get("stop_loss", 0.0)
-            if entry > 0 and tp1 > 0:
+            if entry > 0 and tp1 > entry:
                 pct_to_tp = max(0, min(100, (current - entry) / (tp1 - entry) * 100))
                 bar = progress_bar(pct_to_tp, 100, 10)
             else:

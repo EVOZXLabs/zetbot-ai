@@ -63,7 +63,11 @@ class WalletCommand(BaseCommand):
             pos_data = ctx.read_json("positions.json")
             pos_list = pos_data.get("positions", []) if pos_data else []
             positions = [p for p in pos_list if is_open(p.get("status"))]
-            unrealized = sum(p.get("unrealized_pnl", 0.0) for p in positions)
+            unrealized = sum(
+                p.get("current_price", 0.0) * p.get("remaining_qty", p.get("quantity", 0.0))
+                - p.get("cost_basis", 0.0)
+                for p in positions
+            )
             in_positions_pct = (
                 (pos_value / total_balance * 100) if total_balance > 0 else 0.0
             )

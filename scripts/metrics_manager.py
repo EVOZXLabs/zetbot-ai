@@ -477,7 +477,7 @@ class MetricsManager:
         ):
             try:
                 clean = ts.split("+")[0].split("Z")[0]
-                return datetime.strptime(clean, fmt)
+                return datetime.strptime(clean, fmt).replace(tzinfo=timezone.utc)
             except (ValueError, IndexError):
                 continue
         return None
