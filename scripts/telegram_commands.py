@@ -340,11 +340,7 @@ class TelegramCommandCenter:
 
         if response is not None:
             if self._running and not self._is_shutdown():
-                # Help command → plain text, not Markdown
-                parse_mode = None if command in ("/help", "/start") else "Markdown"
-                if parse_mode is None:
-                    _log(f"HELP repr: {response!r}")
-                self._send(response, parse_mode=parse_mode)
+                self._send(response, parse_mode="Markdown")
 
     # ------------------------------------------------------------------
     #  Send
