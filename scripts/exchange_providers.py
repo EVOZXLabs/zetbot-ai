@@ -102,6 +102,24 @@ class ExchangeProvider(Protocol):
         """True if this provider was constructed with API key + secret."""
         ...
 
+    def fetch_api_key_permissions(self) -> dict[str, Any]:
+        """Best-effort fetch of THIS API key's own granted permissions.
+
+        Deliberately separate from ``fetch_balance()``'s raw ``info``
+        dict: on Binance (and Binance-derived exchanges like
+        Tokocrypto), the account endpoint's ``canWithdraw`` /
+        ``canTrade`` / ``canDeposit`` flags reflect the *account's*
+        overall capability, not what this specific API key is actually
+        allowed to do — they are commonly ``true`` even for a
+        read-only key. See:
+        https://dev.binance.vision/t/how-to-validate-an-api-key-permissions/1519
+
+        Returns ``{}`` when the exchange/ccxt build doesn't expose a
+        dedicated permissions endpoint — callers must treat that as
+        "unknown", never as "no restrictions".
+        """
+        ...
+
     def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
         """Return the ccxt ``params`` dict to tag an order with a client id.
 
@@ -154,6 +172,27 @@ class BaseProvider:
     def has_credentials(self) -> bool:
         """True if this provider was constructed with API key + secret."""
         return bool(self._api_key and self._api_secret)
+
+    def fetch_api_key_permissions(self) -> dict[str, Any]:
+        """Best-effort fetch of this API key's own granted permissions.
+
+        Default implementation tries Binance's dedicated
+        ``GET /sapi/v1/account/apiRestrictions`` endpoint (exposed by
+        ccxt as the implicit method ``sapiGetAccountApiRestrictions``),
+        which is the ONLY reliable source for a key-specific
+        ``enableWithdrawals`` flag. Exchanges that don't expose this
+        (or older ccxt builds without the implicit method) return
+        ``{}`` — see the Protocol docstring for why this must NOT be
+        treated as "no restrictions".
+        """
+        try:
+            ex = self._get_exchange()
+            method = getattr(ex, "sapiGetAccountApiRestrictions", None)
+            if method is None:
+                return {}
+            return dict(method())
+        except Exception:
+            return {}
 
     def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
         """Default: unified ccxt ``clientOrderId`` param.

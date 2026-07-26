@@ -773,12 +773,27 @@ class ExecutionEngine:
         # is ever compromised, a withdrawal-capable key lets funds be
         # moved off-exchange entirely, not just traded. Treat this as
         # disqualifying rather than a soft warning.
+        #
+        # IMPORTANT: do NOT use info["canWithdraw"] here. That field
+        # (from the account endpoint underlying fetch_balance()) reflects
+        # the ACCOUNT's overall withdrawal capability, not what THIS
+        # specific API key is actually permitted to do — it is commonly
+        # `true` even for a read-only key. See:
+        # https://dev.binance.vision/t/how-to-validate-an-api-key-permissions/1519
+        # The only reliable source is the dedicated per-key permissions
+        # endpoint (fetch_api_key_permissions() -> enableWithdrawals).
         can_withdraw: Optional[bool] = None
-        if isinstance(info, dict):
-            if "canWithdraw" in info:
-                can_withdraw = bool(info.get("canWithdraw"))
-            elif isinstance(info.get("permissions"), list):
-                can_withdraw = "WITHDRAWALS" in info["permissions"]
+        try:
+            key_perms = provider.fetch_api_key_permissions()
+        except Exception:
+            key_perms = {}
+        if "enableWithdrawals" in key_perms:
+            can_withdraw = bool(key_perms["enableWithdrawals"])
+        elif isinstance(info, dict) and isinstance(info.get("permissions"), list):
+            # Fallback for exchanges without a dedicated permissions
+            # endpoint: Binance's unified "permissions" list (e.g.
+            # ["SPOT"]) does sometimes include "WITHDRAWALS" explicitly.
+            can_withdraw = "WITHDRAWALS" in info["permissions"]
         report["can_withdraw"] = can_withdraw
         if can_withdraw is True:
             report["reasons"].append(
