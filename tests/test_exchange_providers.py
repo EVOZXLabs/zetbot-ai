@@ -249,6 +249,10 @@ def test_protocol_structural_check() -> None:
             return {}
         def has_credentials(self) -> bool:
             return False
+        def fetch_api_key_permissions(self) -> dict[str, Any]:
+            return {}
+        def fetch_api_key_permissions(self) -> dict[str, Any]:
+            return {}
         def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
             return {}
         def get_markets(self) -> list[dict[str, Any]]:
