@@ -306,7 +306,15 @@ class TelegramCommandCenter:
         chat_id = message.get("chat", {}).get("id")
         text = (message.get("text") or "").strip()
 
-        if not text or not text.startswith("/"):
+        # Every real command is typed as "/something" — EXCEPT the one
+        # deliberate exception: "CONFIRM LIVE" is a plain-text reply (by
+        # design, see telegram/commands/live.py) that must reach
+        # ConfirmLiveCommand. Without this exception it was silently
+        # dropped right here, before ever reaching the command registry —
+        # /golive would tell the operator to reply "CONFIRM LIVE" and the
+        # bot would then never respond to it at all.
+        is_confirm_live = text.strip().upper() == "CONFIRM LIVE"
+        if not text or not (text.startswith("/") or is_confirm_live):
             return
 
         # Authenticate chat before logging the command
