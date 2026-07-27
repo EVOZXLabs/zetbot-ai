@@ -4,3 +4,11 @@ python-dotenv
 colorama
 pandas
 pytest
+
+# On-chain / Web3 trading
+web3>=6
+solders
+
+# WhatsApp channel (webhook server; outbound uses Twilio's REST API
+# directly via `requests`, no twilio SDK needed)
+flask

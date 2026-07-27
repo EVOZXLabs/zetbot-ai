@@ -1033,6 +1033,49 @@ def main() -> None:
             logger.info("Telegram disabled — command center not started")
 
     # ------------------------------------------------------------------
+    #  WhatsApp Command Center (via Twilio) — optional second channel,
+    #  runs alongside Telegram and shares the same command set/registry.
+    # ------------------------------------------------------------------
+
+    wa_center: Any = None
+    wa_thread: threading.Thread | None = None
+
+    wa_has_creds = bool(
+        config.twilio_account_sid and config.twilio_auth_token
+        and config.twilio_whatsapp_from and config.whatsapp_allowed_numbers
+    )
+
+    if test_mode or (config.whatsapp_enabled and wa_has_creds):
+        from whatsapp.whatsapp_commands import WhatsAppCommandCenter
+
+        wa_center = WhatsAppCommandCenter(
+            config,
+            test_mode=test_mode,
+            health_monitor=health,
+            shutdown_event=shutdown,
+            pid_file=pid_file,
+            services=container,
+        )
+        wa_thread = _start_worker(
+            "WhatsAppCmd",
+            wa_center.run,
+            logger,
+        )
+        if wa_thread:
+            logger.info("WhatsApp Command Center started (background thread)")
+        else:
+            logger.error("Failed to start WhatsApp Command Center")
+    else:
+        if config.whatsapp_enabled and not wa_has_creds:
+            logger.warning(
+                "WhatsApp enabled but TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN /"
+                " TWILIO_WHATSAPP_FROM / WHATSAPP_ALLOWED_NUMBERS missing"
+                " — command center disabled"
+            )
+        else:
+            logger.info("WhatsApp disabled — command center not started")
+
+    # ------------------------------------------------------------------
     #  Startup — load state, recover positions, check TP/SL, update stats
     # ------------------------------------------------------------------
 
