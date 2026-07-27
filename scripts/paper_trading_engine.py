@@ -1181,9 +1181,9 @@ class PaperExport:
 # -------------------------------------------------------------------
 
 
-def main(notifier: Any = None) -> None:
+def main(notifier: Any = None, allow_new_positions: bool = True) -> None:
     engine = PaperTradingEngine(notifier=notifier)
-    metrics = engine.run()
+    metrics = engine.run(allow_new_positions=allow_new_positions)
 
     if not metrics:
         return
