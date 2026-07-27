@@ -114,6 +114,35 @@ class AppConfig:
     auto_pipeline: bool = True
     pipeline_interval_seconds: int = 300
 
+    # ------------------------------------------------------------------
+    # On-chain / Web3 trading (DEX swaps on EVM chains + Solana)
+    # ------------------------------------------------------------------
+    onchain_enabled: bool = False
+    onchain_chains: str = ""          # comma-separated: "ethereum,bsc,polygon,solana"
+    onchain_slippage_bps: int = 50    # 0.50% default slippage tolerance
+    onchain_live_confirmed: bool = False  # mirrors the CEX "CONFIRM LIVE" gate
+
+    # EVM (used for ethereum/bsc/polygon/arbitrum/base — pick RPC per chain)
+    evm_rpc_url: str = ""
+    evm_wallet_address: str = ""
+    evm_private_key: str = ""         # NEVER logged or sent over Telegram/WhatsApp
+
+    # Solana
+    solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
+    solana_wallet_address: str = ""
+    solana_private_key: str = ""      # base58-encoded secret key, NEVER logged
+
+    # ------------------------------------------------------------------
+    # WhatsApp control channel (via Twilio)
+    # ------------------------------------------------------------------
+    whatsapp_enabled: bool = False
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_from: str = ""    # e.g. "whatsapp:+14155238886"
+    whatsapp_allowed_numbers: str = ""  # comma-separated allow-list, e.g. "whatsapp:+628123456789"
+    whatsapp_webhook_host: str = "0.0.0.0"
+    whatsapp_webhook_port: int = 8088
+
 
 def load_config() -> AppConfig:
     """Load configuration from environment variables (via .env)."""
@@ -175,6 +204,23 @@ def load_config() -> AppConfig:
         slippage_bps=int(os.getenv("SLIPPAGE_BPS", "3")),
         auto_pipeline=os.getenv("AUTO_PIPELINE", "true").lower() == "true",
         pipeline_interval_seconds=int(os.getenv("PIPELINE_INTERVAL", "300")),
+        onchain_enabled=os.getenv("ONCHAIN_ENABLED", "false").lower() == "true",
+        onchain_chains=os.getenv("ONCHAIN_CHAINS", ""),
+        onchain_slippage_bps=int(os.getenv("ONCHAIN_SLIPPAGE_BPS", "50")),
+        onchain_live_confirmed=os.getenv("ONCHAIN_LIVE_CONFIRMED", "false").lower() == "true",
+        evm_rpc_url=os.getenv("EVM_RPC_URL", ""),
+        evm_wallet_address=os.getenv("EVM_WALLET_ADDRESS", ""),
+        evm_private_key=os.getenv("EVM_PRIVATE_KEY", ""),
+        solana_rpc_url=os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
+        solana_wallet_address=os.getenv("SOLANA_WALLET_ADDRESS", ""),
+        solana_private_key=os.getenv("SOLANA_PRIVATE_KEY", ""),
+        whatsapp_enabled=os.getenv("WHATSAPP_ENABLED", "false").lower() == "true",
+        twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
+        twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
+        twilio_whatsapp_from=os.getenv("TWILIO_WHATSAPP_FROM", ""),
+        whatsapp_allowed_numbers=os.getenv("WHATSAPP_ALLOWED_NUMBERS", ""),
+        whatsapp_webhook_host=os.getenv("WHATSAPP_WEBHOOK_HOST", "0.0.0.0"),
+        whatsapp_webhook_port=int(os.getenv("WHATSAPP_WEBHOOK_PORT", "8088")),
     )
 
 

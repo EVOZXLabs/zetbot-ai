@@ -86,6 +86,11 @@ class PairRaw:
     change_24h: float = 0.0
     high_24h: float = 0.0
     low_24h: float = 0.0
+    # On-chain routing metadata — empty/"cex" for regular exchange pairs.
+    venue: str = "cex"
+    chain: str = ""
+    token_address: str = ""
+    quote_address: str = ""
 
 
 @dataclass
@@ -111,6 +116,7 @@ class PairAnalysis:
     candle_count: int
     status: str = "ok"
     error: str = ""
+    venue: str = "cex"
 
 
 @dataclass
@@ -137,6 +143,7 @@ class ScoredPair:
     overall: float
     signal: str
     rank: int
+    venue: str = "cex"
 
 
 # ---------------------------------------------------------------------------
@@ -342,10 +349,59 @@ class PairAnalyzer:
             })
         return cls._thread_local.exchange
 
+    @staticmethod
+    def _from_ohlcv(pair: PairRaw, raw: list) -> PairAnalysis:
+        """Build a PairAnalysis from already-fetched OHLCV candles.
+
+        This is the single shared scoring path — identical indicator
+        math (``IndicatorAnalyzer.analyze``) runs regardless of whether
+        the candles came from a CEX (ccxt) or a DEX (on-chain
+        providers), so a token scanned on-chain is ranked by exactly
+        the same rules as a Binance pair, not a parallel implementation.
+        """
+        import pandas as pd
+
+        if not raw or len(raw) < MIN_CANDLES:
+            return PairAnalysis(
+                symbol=pair.symbol, base=pair.base,
+                price=pair.price, volume_24h=pair.volume_24h,
+                change_24h=pair.change_24h,
+                ema50=0, ema100=0, ema200=0,
+                rsi14=0, adx14=0, atr14=0,
+                volume_ma20=0, highest_high_20=0, lowest_low_20=0,
+                atr_pct=0, relative_volume=0,
+                trend_alignment="", candle_count=len(raw) if raw else 0,
+                status="skipped",
+                error=f"only {len(raw)} candles (< {MIN_CANDLES})",
+                venue=pair.venue,
+            )
+
+        df = pd.DataFrame(raw, columns=NORMALIZED_COLUMNS)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        ind = IndicatorAnalyzer.analyze(df, pair.price)
+
+        return PairAnalysis(
+            symbol=pair.symbol, base=pair.base,
+            price=pair.price, volume_24h=pair.volume_24h,
+            change_24h=pair.change_24h,
+            ema50=ind["ema50"], ema100=ind["ema100"],
+            ema200=ind["ema200"],
+            rsi14=ind["rsi14"], adx14=ind["adx14"],
+            atr14=ind["atr14"],
+            volume_ma20=ind["volume_ma20"],
+            highest_high_20=ind["highest_high_20"],
+            lowest_low_20=ind["lowest_low_20"],
+            atr_pct=ind["atr_pct"],
+            relative_volume=ind["relative_volume"],
+            trend_alignment=ind["trend_alignment"],
+            candle_count=ind["candle_count"],
+            status="ok",
+            venue=pair.venue,
+        )
+
     @classmethod
     def analyze(cls, pair: PairRaw) -> PairAnalysis:
-        """Fetch OHLCV, calculate indicators, return analysis."""
-        import pandas as pd
+        """Fetch OHLCV from the CEX (ccxt), calculate indicators, return analysis."""
         try:
             exchange = cls._get_exchange()
             raw = exchange.fetch_ohlcv(
@@ -353,41 +409,7 @@ class PairAnalyzer:
                 timeframe=TIMEFRAME,
                 limit=OHLCV_LIMIT,
             )
-            if not raw or len(raw) < MIN_CANDLES:
-                return PairAnalysis(
-                    symbol=pair.symbol, base=pair.base,
-                    price=pair.price, volume_24h=pair.volume_24h,
-                    change_24h=pair.change_24h,
-                    ema50=0, ema100=0, ema200=0,
-                    rsi14=0, adx14=0, atr14=0,
-                    volume_ma20=0, highest_high_20=0, lowest_low_20=0,
-                    atr_pct=0, relative_volume=0,
-                    trend_alignment="", candle_count=len(raw) if raw else 0,
-                    status="skipped",
-                    error=f"only {len(raw)} candles (< {MIN_CANDLES})",
-                )
-
-            df = pd.DataFrame(raw, columns=NORMALIZED_COLUMNS)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            ind = IndicatorAnalyzer.analyze(df, pair.price)
-
-            return PairAnalysis(
-                symbol=pair.symbol, base=pair.base,
-                price=pair.price, volume_24h=pair.volume_24h,
-                change_24h=pair.change_24h,
-                ema50=ind["ema50"], ema100=ind["ema100"],
-                ema200=ind["ema200"],
-                rsi14=ind["rsi14"], adx14=ind["adx14"],
-                atr14=ind["atr14"],
-                volume_ma20=ind["volume_ma20"],
-                highest_high_20=ind["highest_high_20"],
-                lowest_low_20=ind["lowest_low_20"],
-                atr_pct=ind["atr_pct"],
-                relative_volume=ind["relative_volume"],
-                trend_alignment=ind["trend_alignment"],
-                candle_count=ind["candle_count"],
-                status="ok",
-            )
+            return cls._from_ohlcv(pair, raw)
         except Exception as e:
             return PairAnalysis(
                 symbol=pair.symbol, base=pair.base,
@@ -399,6 +421,32 @@ class PairAnalyzer:
                 atr_pct=0, relative_volume=0,
                 trend_alignment="", candle_count=0,
                 status="error", error=str(e),
+                venue=pair.venue,
+            )
+
+    @classmethod
+    def analyze_onchain(cls, pair: PairRaw, config: Any) -> PairAnalysis:
+        """Fetch OHLCV from the on-chain provider for *pair*'s chain,
+        then reuse the exact same indicator/scoring path as ``analyze()``.
+        """
+        try:
+            from scripts.onchain_providers import get_onchain_provider  # noqa: PLC0415
+
+            provider = get_onchain_provider(pair.chain, config)
+            raw = provider.fetch_ohlcv(pair.token_address, TIMEFRAME, OHLCV_LIMIT)
+            return cls._from_ohlcv(pair, raw)
+        except Exception as e:
+            return PairAnalysis(
+                symbol=pair.symbol, base=pair.base,
+                price=pair.price, volume_24h=pair.volume_24h,
+                change_24h=pair.change_24h,
+                ema50=0, ema100=0, ema200=0,
+                rsi14=0, adx14=0, atr14=0,
+                volume_ma20=0, highest_high_20=0, lowest_low_20=0,
+                atr_pct=0, relative_volume=0,
+                trend_alignment="", candle_count=0,
+                status="error", error=str(e),
+                venue=pair.venue,
             )
 
 
@@ -410,10 +458,14 @@ class PairAnalyzer:
 class MarketScanner:
     """Orchestrate the multi-pair scan."""
 
-    def __init__(self, threads: int = THREADS) -> None:
+    def __init__(self, threads: int = THREADS, config: Any = None) -> None:
         self.md = MarketData(exchange_name=EXCHANGE_NAME)
         self.threads = threads
         self.pair_raws: list[PairRaw] = []
+        if config is None:
+            from scripts.app_config import load_config  # noqa: PLC0415
+            config = load_config()
+        self.config = config
 
     def fetch_markets(self) -> list[PairRaw]:
         """Fetch and filter all Spot USDT markets from Binance."""
@@ -463,6 +515,63 @@ class MarketScanner:
         print()
         return results
 
+    # ------------------------------------------------------------------
+    #  On-chain (DEX) pairs — separate data source, same downstream path
+    # ------------------------------------------------------------------
+
+    def fetch_onchain_pairs(self) -> list[PairRaw]:
+        """Build PairRaw entries from the on-chain watchlist, with live
+        price/volume pulled from each token's DEX pool (DexScreener/
+        Jupiter, via onchain_providers) — the on-chain equivalent of
+        ``fetch_markets()`` + ``attach_tickers()`` combined, since a
+        watchlist entry has no price until queried.
+        """
+        from scripts.onchain_providers import get_onchain_provider
+        from scripts.onchain_watchlist import load_onchain_watchlist
+
+        entries = load_onchain_watchlist(self.config)
+        pairs: list[PairRaw] = []
+        for entry in entries:
+            try:
+                provider = get_onchain_provider(entry.chain, self.config)
+                ticker = provider.get_ticker(entry.token_address)
+                if not ticker or not ticker.get("price_usd"):
+                    continue
+                base = entry.symbol.split("/")[0] if "/" in entry.symbol else entry.symbol
+                pairs.append(PairRaw(
+                    symbol=entry.symbol,
+                    base=base,
+                    price=float(ticker.get("price_usd") or 0),
+                    volume_24h=float(ticker.get("volume_24h_usd") or 0),
+                    change_24h=float(ticker.get("price_change_24h") or 0),
+                    venue="onchain",
+                    chain=entry.chain,
+                    token_address=entry.token_address,
+                    quote_address=entry.quote_address,
+                ))
+            except Exception as exc:
+                print(f"        [onchain] skipped {entry.symbol} ({entry.chain}): {exc}")
+        return pairs
+
+    def analyze_onchain_all(self, pairs: list[PairRaw]) -> list[PairAnalysis]:
+        """Same shape as ``analyze_all`` but routes each pair through
+        its on-chain provider instead of ccxt. Kept as a separate,
+        smaller thread pool since on-chain watchlists are expected to
+        be far shorter than a full CEX market scan (tens, not hundreds,
+        of tokens) — and to avoid hammering public RPC/API rate limits.
+        """
+        results: list[PairAnalysis] = []
+        if not pairs:
+            return results
+        with ThreadPoolExecutor(max_workers=min(4, len(pairs))) as pool:
+            fut_map = {
+                pool.submit(PairAnalyzer.analyze_onchain, p, self.config): p
+                for p in pairs
+            }
+            for f in as_completed(fut_map):
+                results.append(f.result())
+        return results
+
     def run(self) -> tuple[list[PairAnalysis], dict[str, int]]:
         """Full scan pipeline. Returns (scored_pairs, stats dict)."""
         stats: dict[str, int] = {}
@@ -474,6 +583,8 @@ class MarketScanner:
         print(f"  Timeframe  : {TIMEFRAME}")
         print(f"  OHLCV limit: {OHLCV_LIMIT}")
         print(f"  Threads    : {self.threads}")
+        if getattr(self.config, "onchain_enabled", False):
+            print(f"  On-chain   : enabled ({self.config.onchain_chains or 'no chains configured'})")
         print()
 
         # 1. Markets
@@ -514,6 +625,25 @@ class MarketScanner:
         print(f"        Errors  : {len(errors)}")
         print(f"        Time    : {ohlcv_elapsed:.1f}s")
 
+        # 3b. On-chain pairs — same indicator/scoring path, merged into
+        # the same `ok` list so ranking (and the scanner_results.json
+        # output every downstream command reads) is a single unified
+        # list, not two separate scans.
+        onchain_pairs = self.fetch_onchain_pairs()
+        stats["onchain_pairs"] = len(onchain_pairs)
+        if onchain_pairs:
+            print(f"  [3b/4] Analyzing {len(onchain_pairs)} on-chain pairs …", flush=True)
+            onchain_analyses = self.analyze_onchain_all(onchain_pairs)
+            onchain_ok = [a for a in onchain_analyses if a.status == "ok"]
+            stats["onchain_analyzed"] = len(onchain_ok)
+            stats["onchain_errors"] = len(
+                [a for a in onchain_analyses if a.status == "error"],
+            )
+            print(f"        OK      : {len(onchain_ok)}")
+            print(f"        Errors  : {stats['onchain_errors']}")
+            ok = ok + onchain_ok
+            self._write_onchain_symbol_map(onchain_pairs)
+
         # 4. Score & rank
         print("  [4/4] Scoring … ", end="", flush=True)
         scored = _score_and_rank(ok)
@@ -522,6 +652,30 @@ class MarketScanner:
         print()
 
         return scored, stats
+
+    @staticmethod
+    def _write_onchain_symbol_map(pairs: list[PairRaw]) -> None:
+        """Persist symbol → chain/contract routing info for on-chain
+        pairs. Separate from scanner_results.json on purpose: it's
+        execution-routing metadata (needed only when actually placing a
+        trade), not scan/ranking output — keeping it out of the main
+        results file avoids changing that file's consumers.
+        """
+        path = "data/onchain_symbol_map.json"
+        try:
+            mapping = {
+                p.symbol: {
+                    "chain": p.chain,
+                    "token_address": p.token_address,
+                    "quote_address": p.quote_address,
+                }
+                for p in pairs
+            }
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(mapping, f, indent=2)
+        except OSError as exc:
+            print(f"        [onchain] failed to write symbol map: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +712,7 @@ def _score_and_rank(analyses: list[PairAnalysis]) -> list[ScoredPair]:
             overall=round(overall, 1),
             signal=signal,
             rank=0,
+            venue=a.venue,
         ))
 
     scored.sort(key=lambda s: s.overall, reverse=True)
@@ -638,6 +793,7 @@ class ScannerReport:
             "relative_volume", "trend_alignment",
             "trend_score", "momentum_score", "volume_score",
             "volatility_score", "liquidity_score", "overall", "signal",
+            "venue",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
