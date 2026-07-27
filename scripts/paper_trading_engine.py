@@ -448,7 +448,7 @@ class PaperTradingEngine:
         with open("data/positions.json", "w") as f:
             json.dump(positions_data, f, indent=2, default=str)
 
-    def run(self) -> dict[str, Any]:
+    def run(self, allow_new_positions: bool = True) -> dict[str, Any]:
         """Full paper trading pipeline."""
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PAPER TRADING ENGINE")
@@ -470,6 +470,12 @@ class PaperTradingEngine:
             self._save_state()
             print("  No READY plans.  Exiting.")
             return {}
+
+        # Guard: skip new order execution if safety limits blocked it,
+        # but still reconcile existing positions (TP/SL, PnL).
+        if not allow_new_positions:
+            print("  [2/5] New positions blocked by safety guard …", flush=True)
+            plans = []
 
         # 2. Execute orders (best confidence first)
         print("  [2/5] Executing orders …", flush=True)
@@ -522,7 +528,7 @@ class PaperTradingEngine:
         # 4. Compute metrics
         print("  [4/5] Computing metrics …", flush=True)
         self.metrics = MetricsCalculator.compute(
-            self.orders, self.equity_history, INITIAL_BALANCE,
+            self.orders, self.equity_history, self.wallet.initial,
             unrealized_pnl=self._total_unrealized_pnl(),
         )
 
@@ -552,8 +558,11 @@ class PaperTradingEngine:
         ]
 
     def _load_positions(self, path: str) -> dict[str, dict]:
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
         return {p["symbol"]: p for p in data.get("positions", [])}
 
     def _execute_plan(self, plan: dict, pos_state: dict | None) -> Order | None:

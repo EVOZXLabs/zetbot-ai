@@ -574,7 +574,7 @@ class LiveExecutor:
                 type=request.type,
                 amount=precise_amount,
                 filled_amount=float(ccxt_order.get("filled", 0)),
-                filled_price=float(ccxt_order.get("price", price)),
+                filled_price=float(ccxt_order.get("average") or ccxt_order.get("price", price)),
                 fee=float(ccxt_order.get("fee", {}).get("cost", 0)),
                 cost=float(ccxt_order.get("cost", 0)),
                 latency_ms=round(elapsed, 2),

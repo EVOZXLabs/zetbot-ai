@@ -188,24 +188,34 @@ def _count_open_positions() -> int:
     ``MAX_OPEN_POSITIONS`` was silently reset to 0 every run and could
     never account for positions still open from earlier cycles,
     letting real exposure grow past the configured cap.
-    """
-    count = 0
-    try:
-        with open(PAPER_STATE_PATH) as f:
-            paper_state = json.load(f)
-        for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") == "OPEN":
-                count += 1
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
 
-    try:
-        with open(LIVE_POSITIONS_PATH) as f:
-            live_positions = json.load(f)
-        if isinstance(live_positions, dict):
-            count += len(live_positions)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    Reads only from the file matching the current trading mode
+    (paper_state.json for PAPER, live_positions.json for LIVE) to
+    avoid double-counting stale data from the other mode.
+    """
+    import os
+    from scripts.position_status import is_open  # noqa: PLC0415
+
+    count = 0
+    paper_mode = os.getenv("PAPER_MODE", "true").lower() in ("true", "1", "yes")
+
+    if paper_mode:
+        try:
+            with open(PAPER_STATE_PATH) as f:
+                paper_state = json.load(f)
+            for vp in paper_state.get("positions", {}).values():
+                if is_open(vp.get("status")):
+                    count += 1
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+    else:
+        try:
+            with open(LIVE_POSITIONS_PATH) as f:
+                live_positions = json.load(f)
+            if isinstance(live_positions, dict):
+                count += len(live_positions)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
 
     return count
 

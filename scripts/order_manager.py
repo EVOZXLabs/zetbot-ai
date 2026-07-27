@@ -504,6 +504,7 @@ class OrderManager:
             cost = result.get("cost", amt * price)
             status = result.get("status", "UNKNOWN")
             pnl = result.get("net_pnl", 0.0)
+            fee = float(result.get("fee", 0.0) or 0.0)
         else:
             sym = result.symbol
             side = result.side
@@ -512,11 +513,12 @@ class OrderManager:
             cost = result.cost or amt * price
             status = result.status
             pnl = getattr(result, 'net_pnl', 0.0)
+            fee = float(getattr(result, 'fee', 0.0) or 0.0)
 
         if status not in ("FILLED", "EXECUTED"):
             return
 
-        _sync_paper_files(sym, side.upper(), amt, price, cost, pnl)
+        _sync_paper_files(sym, side.upper(), amt, price, cost, pnl, fee=fee)
 
     def sync_position(self, result: Any) -> None:
         """Mode-aware position sync — call this after a successful order
@@ -758,7 +760,7 @@ class OrderManager:
         instead of resubmitting it."""
         status_map = {
             "closed": "FILLED",
-            "open": "EXECUTED",
+            "open": "PENDING",
             "canceled": "CANCELLED",
             "cancelled": "CANCELLED",
             "expired": "CANCELLED",

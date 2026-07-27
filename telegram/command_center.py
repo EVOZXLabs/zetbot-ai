@@ -87,7 +87,7 @@ class CommandCenter:
             message_id=message_id,
             update_id=update_id,
             raw_text=text,
-            is_admin=True,
+            is_admin=str(chat_id) == str(self._config.telegram_chat_id),
             **known_fields,
         )
 

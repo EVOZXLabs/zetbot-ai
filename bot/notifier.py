@@ -135,8 +135,9 @@ class Notifier:
                     attempt, self._max_retry, exc,
                 )
                 if attempt < self._max_retry:
-                    delay = min(30, 2 ** attempt) + random.uniform(0, 1)
-                    time.sleep(delay)
+                    delay = min(10, 2 ** attempt) + random.uniform(0, 1)
+                    import threading
+                    threading.Event().wait(delay)
 
         logger.error("[TG] Send failed after %d attempts", self._max_retry)
         return False

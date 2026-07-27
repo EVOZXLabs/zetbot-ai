@@ -411,7 +411,7 @@ def _count_open_positions() -> int:
         with open(PAPER_STATE_PATH) as f:
             paper_state = json.load(f)
         for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") == "OPEN":
+            if vp.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
                 count += 1
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -467,7 +467,7 @@ def _existing_open_exposure() -> float:
         with open(PAPER_STATE_PATH) as f:
             paper_state = json.load(f)
         for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") == "OPEN":
+            if vp.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
                 total += _position_notional(vp)
     except (FileNotFoundError, json.JSONDecodeError):
         pass

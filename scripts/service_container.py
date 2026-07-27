@@ -512,6 +512,8 @@ class _RiskAdapter:
             max_daily_loss=5.0,
             max_positions=self._config.max_positions,
         )
+        if decisions:
+            mgr._data.decisions = decisions
         return [r.__dict__ if hasattr(r, '__dict__') else r for r in mgr.run()]
 
     def get_approved(self) -> list[dict[str, Any]]:

@@ -467,8 +467,11 @@ class DecisionEngine:
 
     def load(self) -> list[ScannerPair]:
         """Load and parse scanner_results.json."""
-        with open(self.scanner_path) as f:
-            data = json.load(f)
+        try:
+            with open(self.scanner_path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
 
         pairs: list[ScannerPair] = []
         for p in data.get("pairs", []):

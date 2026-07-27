@@ -121,8 +121,9 @@ class TelegramNotifier:
 
     def bot_stopped(
         self,
-        cycles: int,
-        balance: float,
+        cycles: int = 0,
+        balance: float = 0.0,
+        equity: float = 0.0,
     ) -> None:
         """Notify that the trading bot has stopped."""
         from telegram.ui import compact_header, build_message

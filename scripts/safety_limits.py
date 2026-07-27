@@ -65,6 +65,17 @@ class SafeGuard:
     def set_account_balance(self, balance: float) -> None:
         self._account_balance = balance
 
+    @staticmethod
+    def _live_balance() -> float:
+        """Read live balance from paper_balance.json for daily loss calculation."""
+        import json  # noqa: PLC0415
+        try:
+            with open("data/paper_balance.json") as f:
+                pb = json.load(f)
+            return float(pb.get("final_balance", 0.0))
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+            return 0.0
+
     def can_open_new_position(
         self, symbol: str = "", atr_pct: float = 0.0, normal_atr_pct: float = 0.0
     ) -> tuple[bool, str]:
@@ -113,7 +124,8 @@ class SafeGuard:
             return True, ""
 
         realized_pnl = tracking.get("realized_pnl", 0.0)
-        max_loss = self._account_balance * (self._max_daily_loss_pct / 100.0)
+        balance = self._live_balance() or self._account_balance
+        max_loss = balance * (self._max_daily_loss_pct / 100.0)
 
         if realized_pnl < 0 and abs(realized_pnl) >= max_loss:
             return False, (

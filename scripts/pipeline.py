@@ -433,12 +433,15 @@ class Pipeline:
         paper_trading_engine.main()
 
     def _run_paper_di(self) -> None:
-        # Check safety guards before executing new orders
+        from scripts import paper_trading_engine
+
+        # Check safety guards — always run reconciliation (TP/SL, PnL),
+        # but only allow new positions when the guard passes.
+        allow_new = True
         if self.container is not None:
             ok, reason = self.container.safeguard.can_open_new_position()
             if not ok:
-                self.logger.info(f"Pipeline paper stage skipped: {reason}")
-                return
+                self.logger.info(f"Pipeline paper new-order guard: {reason}")
+                allow_new = False
 
-        from scripts import paper_trading_engine
-        paper_trading_engine.main(notifier=self._notifier)
+        paper_trading_engine.main(notifier=self._notifier, allow_new_positions=allow_new)
