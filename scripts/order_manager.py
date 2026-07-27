@@ -586,13 +586,19 @@ class OrderManager:
 
     def _plan_to_request(self, plan: dict[str, Any]) -> OrderRequest:
         """Convert a trade plan dict (from risk manager) to OrderRequest."""
+        qty = plan.get("quantity")
+        if qty is not None and qty > 0:
+            amount = qty
+        else:
+            usdt = plan.get("position_size_usdt", 0.0)
+            ep = plan.get("entry_price", 1.0)
+            amount = usdt / max(ep, 0.0001)
         return OrderRequest(
             trace_id=str(uuid.uuid4()),
             symbol=plan.get("symbol", ""),
             side="BUY",
             type="MARKET",
-            amount=plan.get("quantity", plan.get("position_size_usdt", 0.0))
-                   / max(plan.get("entry_price", 1.0), 0.0001),
+            amount=amount,
             price=plan.get("entry_price"),
             stop_loss=plan.get("stop_loss"),
             take_profit=plan.get("tp1"),

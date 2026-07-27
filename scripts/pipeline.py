@@ -402,7 +402,35 @@ class Pipeline:
 
     def _run_risk_di(self) -> None:
         from scripts import risk_manager
-        risk_manager.main()
+
+        if self.container is not None:
+            wallet = self.container.wallet
+            balance = wallet.balance
+            equity = wallet.equity
+            if balance <= 0:
+                balance = self.config.account_balance
+            if equity <= 0:
+                equity = self.config.account_balance
+        else:
+            balance, equity = risk_manager._resolve_account_state()
+
+        existing_exposure = max(0.0, equity - balance)
+        mm_config = risk_manager.MoneyManagementConfig(
+            mode=risk_manager.MoneyManagementMode(
+                risk_manager.MONEY_MANAGEMENT_MODE
+            ),
+        )
+        manager = risk_manager.RiskManager(
+            balance=balance,
+            equity=equity,
+            existing_exposure=existing_exposure,
+            mm_config=mm_config,
+        )
+        results = manager.run()
+
+        if results:
+            risk_manager.RiskReport.to_csv(results, "data/risk_results.csv")
+            risk_manager.RiskReport.to_json(results, "data/risk_results.json")
 
     @staticmethod
     def _run_trade() -> None:
@@ -411,10 +439,16 @@ class Pipeline:
 
     def _run_trade_di(self) -> None:
         from scripts import trade_executor
-        trade_executor.main()
-        # NOTE: Order execution happens in the Paper stage.
-        # The trade executor writes trade_plan.json; the paper engine
-        # reads it and opens positions via the execution engine.
+
+        equity = None
+        if self.container is not None:
+            equity = self.container.wallet.equity
+
+        executor = trade_executor.TradeExecutor(equity=equity)
+        plans = executor.run()
+
+        trade_executor.PlanExport.to_csv(plans, "data/trade_plan.csv")
+        trade_executor.PlanExport.to_json(plans, "data/trade_plan.json")
 
     @staticmethod
     def _run_position() -> None:
@@ -445,3 +479,53 @@ class Pipeline:
                 allow_new = False
 
         paper_trading_engine.main(notifier=self._notifier, allow_new_positions=allow_new)
+
+        # ── LIVE mode: submit real exchange orders ──────────────────
+        # After the paper engine validates and creates simulated
+        # positions, we must also execute real orders on the exchange.
+        # Only submit when new positions were allowed (safety guard OK).
+        if (
+            allow_new
+            and self.container is not None
+            and self.container.order.mode == "LIVE"
+        ):
+            self._execute_live_plans()
+
+    def _execute_live_plans(self) -> None:
+        """Read READY plans from trade_plan.json and submit real orders."""
+        import json, os  # noqa: PLC0415
+
+        path = "data/trade_plan.json"
+        if not os.path.exists(path):
+            return
+
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        plans = [p for p in data.get("plans", []) if p.get("status") == "READY"]
+        if not plans:
+            return
+
+        order_mgr = self.container.order
+        for plan in plans:
+            symbol = plan.get("symbol", "")
+            if not symbol:
+                continue
+
+            self.logger.info(
+                f"LIVE execution: submitting BUY for {symbol} "
+                f"${plan.get('position_size_usdt', 0):,.2f}"
+            )
+            try:
+                result = order_mgr.execute(plan)
+                status = result.get("status", "?") if isinstance(result, dict) else getattr(result, "status", "?")
+                self.logger.info(
+                    f"LIVE execution result for {symbol}: {status}"
+                )
+            except Exception as exc:
+                self.logger.error(
+                    f"LIVE execution failed for {symbol}: {exc}"
+                )
