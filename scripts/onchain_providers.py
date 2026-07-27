@@ -180,6 +180,7 @@ class EVMProvider:
         self._geckoterminal_network = defaults.get("geckoterminal_network", chain)
 
         self._w3: Any = None  # lazy — avoid importing web3 unless used
+        self._decimals_cache: dict[str, int] = {}
 
     @property
     def name(self) -> str:
@@ -201,6 +202,22 @@ class EVMProvider:
             return bool(self._client().is_connected())
         except Exception:
             return False
+
+    def get_token_decimals(self, token_address: str) -> int:
+        """ERC-20 ``decimals()``, cached — needed to convert a human
+        amount (or USD notional) into the token's smallest unit before
+        building a swap transaction. Never guess this value; a wrong
+        decimals count means a swap for the wrong amount, off by a
+        power of ten.
+        """
+        key = token_address.lower()
+        if key in self._decimals_cache:
+            return self._decimals_cache[key]
+        w3 = self._client()
+        token = w3.eth.contract(address=w3.to_checksum_address(token_address), abi=_ERC20_ABI)
+        decimals = int(token.functions.decimals().call())
+        self._decimals_cache[key] = decimals
+        return decimals
 
     # ------------------------------------------------------------------
     #  Balances
@@ -352,6 +369,49 @@ class EVMProvider:
             "block_number": receipt.blockNumber,
         }
 
+    def swap_exact_in(
+        self,
+        config: Any,
+        token_in: str,
+        token_out: str,
+        amount_in_human: float,
+        native_in: bool = False,
+    ) -> dict[str, Any]:
+        """Convenience wrapper over ``swap()``: takes a human-readable
+        amount (e.g. 25.0 USDC) instead of raw wei, fetches the correct
+        decimals itself, and derives ``min_amount_out`` from the current
+        quoted price and ``config.onchain_slippage_bps`` rather than
+        leaving slippage unprotected (0 minimum).
+        """
+        decimals_in = 18 if native_in else self.get_token_decimals(token_in)
+        amount_in_wei = int(round(amount_in_human * (10 ** decimals_in)))
+
+        # Slippage-protect using current DexScreener quotes as the
+        # expected rate. If a quote is unavailable, fall back to
+        # amountOutMin=0 (no protection) rather than blocking the swap —
+        # but this is exactly why testnet verification matters before
+        # relying on this in production.
+        min_amount_out_wei = 0
+        try:
+            price_in_address = self._wrapped_native if native_in else token_in
+            price_in_usd = float(self.get_ticker(price_in_address).get("price_usd") or 0)
+            price_out_usd = float(self.get_ticker(token_out).get("price_usd") or 0)
+            if price_in_usd > 0 and price_out_usd > 0:
+                usd_value_in = amount_in_human * price_in_usd
+                expected_out_human = usd_value_in / price_out_usd
+                decimals_out = self.get_token_decimals(token_out)
+                slippage = self._slippage_bps / 10_000
+                min_amount_out_wei = int(round(
+                    expected_out_human * (1 - slippage) * (10 ** decimals_out)
+                ))
+        except Exception:
+            pass  # keep min_amount_out_wei = 0 — see docstring
+
+        return self.swap(
+            config, token_in, token_out, amount_in_wei,
+            min_amount_out_wei=min_amount_out_wei, native_in=native_in,
+        )
+
     def _ensure_allowance(self, token_address: str, amount_wei: int) -> None:
         """Approve the router to spend ``token_address`` if the current
         allowance is insufficient (one-time per token, standard ERC-20 flow)."""
@@ -438,6 +498,19 @@ class SolanaProvider:
             return float(info["tokenAmount"]["uiAmount"] or 0.0)
         except Exception as exc:
             raise OnchainAuthError(f"Solana token balance fetch failed: {exc}") from exc
+
+    def get_token_decimals(self, mint_address: str) -> int:
+        """SPL token decimals, via ``getTokenSupply`` — cached per call
+        site (not memoized across calls; mints rarely change decimals
+        but this keeps the provider stateless/simple)."""
+        if mint_address == "So11111111111111111111111111111111111111112":
+            return 9  # wrapped SOL — fixed, matches native SOL's lamport precision
+        resp = requests.post(self._rpc_url, json={
+            "jsonrpc": "2.0", "id": 1, "method": "getTokenSupply",
+            "params": [mint_address],
+        }, timeout=10)
+        resp.raise_for_status()
+        return int(resp.json()["result"]["value"]["decimals"])
 
     # ------------------------------------------------------------------
     #  Market data
@@ -527,6 +600,23 @@ class SolanaProvider:
             raise OnchainAuthError(f"Solana swap send failed: {result['error']}")
 
         return {"tx_signature": result.get("result"), "status": "submitted"}
+
+    def swap_exact_in(
+        self,
+        config: Any,
+        input_mint: str,
+        output_mint: str,
+        amount_in_human: float,
+    ) -> dict[str, Any]:
+        """Convenience wrapper over ``swap()``: takes a human-readable
+        amount instead of raw lamports/smallest-units. Unlike the EVM
+        version, slippage protection doesn't need to be computed
+        manually here — Jupiter's quote already applies
+        ``self._slippage_bps`` server-side.
+        """
+        decimals_in = self.get_token_decimals(input_mint)
+        amount_lamports = int(round(amount_in_human * (10 ** decimals_in)))
+        return self.swap(config, input_mint, output_mint, amount_lamports)
 
 
 # ======================================================================

@@ -122,6 +122,7 @@ class ScannerData:
     atr_pct: float
     relative_volume: float
     trend_alignment: str
+    venue: str = "cex"
 
 
 @dataclass
@@ -161,6 +162,7 @@ class RiskResult:
     money_management_mode: str = MONEY_MANAGEMENT_MODE
     stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
+    venue: str = "cex"
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +413,7 @@ def _count_open_positions() -> int:
         with open(PAPER_STATE_PATH) as f:
             paper_state = json.load(f)
         for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+            if vp.get("status") == "OPEN":
                 count += 1
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -467,7 +469,7 @@ def _existing_open_exposure() -> float:
         with open(PAPER_STATE_PATH) as f:
             paper_state = json.load(f)
         for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+            if vp.get("status") == "OPEN":
                 total += _position_notional(vp)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -506,6 +508,7 @@ class DataLoader:
                 atr_pct=p.get("atr_pct", 0.0),
                 relative_volume=p.get("relative_volume", 1.0),
                 trend_alignment=p.get("trend_alignment", "MIXED"),
+                venue=p.get("venue", "cex"),
             )
         return result
 
@@ -791,6 +794,7 @@ class RiskManager:
                 money_management_mode=self.mm_config.mode.value,
                 stop_loss_pct=round(self.mm_config.stop_loss_pct * 100, 2),
                 take_profit_pct=round(self.mm_config.take_profit_pct * 100, 2),
+                venue=scanner.venue,
             ))
 
         self.results = results
@@ -882,7 +886,7 @@ class RiskReport:
             "risk_amount", "risk_percent",
             "reward_amount", "expected_rr",
             "approval", "rejection_reason",
-            "money_management_mode",
+            "money_management_mode", "venue",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)

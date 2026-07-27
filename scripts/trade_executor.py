@@ -73,6 +73,7 @@ class RiskApproval:
     expected_rr: float
     approval: str
     rejection_reason: str
+    venue: str = "cex"
 
 
 @dataclass
@@ -115,6 +116,7 @@ class TradeExecution:
     signal_time: str
     status: str
     rejection_reason: str
+    venue: str = "cex"
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +151,7 @@ class DataLoader:
                 expected_rr=r.get("expected_rr", 0.0),
                 approval=r.get("approval", ""),
                 rejection_reason=r.get("rejection_reason", ""),
+                venue=r.get("venue", "cex"),
             ))
         return results
 
@@ -188,34 +191,24 @@ def _count_open_positions() -> int:
     ``MAX_OPEN_POSITIONS`` was silently reset to 0 every run and could
     never account for positions still open from earlier cycles,
     letting real exposure grow past the configured cap.
-
-    Reads only from the file matching the current trading mode
-    (paper_state.json for PAPER, live_positions.json for LIVE) to
-    avoid double-counting stale data from the other mode.
     """
-    import os
-    from scripts.position_status import is_open  # noqa: PLC0415
-
     count = 0
-    paper_mode = os.getenv("PAPER_MODE", "true").lower() in ("true", "1", "yes")
+    try:
+        with open(PAPER_STATE_PATH) as f:
+            paper_state = json.load(f)
+        for vp in paper_state.get("positions", {}).values():
+            if vp.get("status") == "OPEN":
+                count += 1
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
-    if paper_mode:
-        try:
-            with open(PAPER_STATE_PATH) as f:
-                paper_state = json.load(f)
-            for vp in paper_state.get("positions", {}).values():
-                if is_open(vp.get("status")):
-                    count += 1
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-    else:
-        try:
-            with open(LIVE_POSITIONS_PATH) as f:
-                live_positions = json.load(f)
-            if isinstance(live_positions, dict):
-                count += len(live_positions)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+    try:
+        with open(LIVE_POSITIONS_PATH) as f:
+            live_positions = json.load(f)
+        if isinstance(live_positions, dict):
+            count += len(live_positions)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
     return count
 
@@ -503,6 +496,7 @@ class TradeExecutor:
                 signal_time=previous_signal or signal_ts,
                 status=status,
                 rejection_reason=reason,
+                venue=risk.venue,
             ))
 
         plans.sort(key=lambda p: p.probability, reverse=True)
@@ -607,7 +601,7 @@ class PlanExport:
             "stop_loss", "tp1", "tp2", "tp3",
             "risk_amount", "reward_amount", "risk_reward",
             "probability", "recommendation", "confidence",
-            "signal_time", "status", "rejection_reason",
+            "signal_time", "status", "rejection_reason", "venue",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
