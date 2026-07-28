@@ -553,7 +553,7 @@ check_exchange() {
     # ── Exchange name ──
     if [[ -n "$exchange" ]]; then
         case "$exchange" in
-            binance|bybit|okx|kucoin|coinbase|kraken|gate|huobi|bitget|mexc|phemex)
+            binance|bybit|okx|kucoin|coinbase|kraken|gate|huobi|bitget|mexc|phemex|tokocrypto|indodax)
                 pass "Exchange: ${exchange}"
                 ;;
             *)
