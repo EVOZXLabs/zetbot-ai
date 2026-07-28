@@ -665,6 +665,7 @@ class TestADXCorrectness:
 #  MarketData ADX integration
 # ---------------------------------------------------------------------------
 
+@pytest.mark.network
 class TestMarketDataADXIntegration:
     """Verify that MarketData.adx/plus_di/minus_di work after fetch_ohlcv."""
 
@@ -697,6 +698,7 @@ class TestMarketDataADXIntegration:
 #  MarketData integration
 # ---------------------------------------------------------------------------
 
+@pytest.mark.network
 class TestMarketDataEMA200Integration:
     """Verify that MarketData.ema200 works after fetch_ohlcv."""
 
@@ -717,6 +719,7 @@ class TestMarketDataEMA200Integration:
         assert 0.8 * latest <= ema_val <= 1.2 * latest
 
 
+@pytest.mark.network
 class TestMarketDataRSIIntegration:
     """Verify that MarketData.rsi works after fetch_ohlcv."""
 
@@ -753,6 +756,7 @@ class TestPerformance:
         elapsed = (time.perf_counter() - start) / 100
         assert elapsed < 0.1, f"Average EMA took {elapsed*1000:.1f}ms (limit 100ms)"
 
+    @pytest.mark.network
     def test_ema200_live_fetch_under_10s(self) -> None:
         from bot.data import MarketData
         md = MarketData(exchange_name="binance")
@@ -774,6 +778,7 @@ class TestPerformance:
         elapsed = (time.perf_counter() - start) / 100
         assert elapsed < 0.05, f"Average RSI took {elapsed*1000:.1f}ms (limit 50ms)"
 
+    @pytest.mark.network
     def test_rsi_live_fetch_under_10s(self) -> None:
         from bot.data import MarketData
         md = MarketData(exchange_name="binance")

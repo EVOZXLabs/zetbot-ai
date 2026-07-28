@@ -780,8 +780,10 @@ class TestFullLifecycle:
 #  MarketData integration (live fetch)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.network
 class TestMarketDataIntegration:
 
+    @pytest.mark.network
     def test_engine_accepts_no_df_fetches_live(self) -> None:
         """Verify run_once() works without pre-fetched df (live fetch)."""
         engine = PaperTradingEngine(initial_balance=10_000.0)
@@ -791,6 +793,7 @@ class TestMarketDataIntegration:
         assert isinstance(result["price"], float)
         assert result["price"] > 0
 
+    @pytest.mark.network
     def test_live_fetch_maintains_state(self) -> None:
         engine = PaperTradingEngine(initial_balance=10_000.0)
         result = engine.run_once()

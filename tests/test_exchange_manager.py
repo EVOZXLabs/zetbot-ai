@@ -3,6 +3,8 @@
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts.exchange_manager import ExchangeManager
 
 
@@ -73,10 +75,12 @@ class TestExchangeManagerGetProvider:
         assert p1 is p2  # same instance (lazy cached)
 
 
+@pytest.mark.network
 class TestExchangeManager:
     def setup_method(self) -> None:
         self.mgr = ExchangeManager(active="binance")
 
+    @pytest.mark.network
     def test_all_interface_methods_delegate(self) -> None:
         """All IExchangeManager methods should work without network (return defaults)."""
         assert isinstance(self.mgr.get_ticker("XXX/YYY"), dict)
@@ -88,12 +92,14 @@ class TestExchangeManager:
         assert isinstance(self.mgr.fetch_tickers(), dict)
         assert isinstance(self.mgr.has("fetchOHLCV"), bool)
 
+    @pytest.mark.network
     def test_list_connected(self) -> None:
         result = self.mgr.list_connected()
         assert isinstance(result, dict)
         for exchange in self.mgr.list_providers():
             assert exchange in result
 
+    @pytest.mark.network
     def test_health_check_via_delegate(self) -> None:
         # Should return a bool (True or False depending on network)
         result = self.mgr.health_check()

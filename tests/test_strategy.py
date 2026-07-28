@@ -336,6 +336,7 @@ class TestStrategyEdgeCases:
 #  MarketData integration
 # ---------------------------------------------------------------------------
 
+@pytest.mark.network
 class TestMarketDataStrategyIntegration:
 
     def test_strategy_after_fetch(self) -> None:
