@@ -138,10 +138,16 @@ class BaseProvider:
     """Base exchange provider with shared CCXT instance management.
 
     Subclasses set ``CCXT_NAME`` and optionally ``CCXT_KWARGS``.
+
+    ``RATE_LIMIT_MS`` — minimum milliseconds between consecutive
+    API calls for this exchange.  CCXT's ``enableRateLimit``
+    handles this automatically, but the value is also exposed
+    so callers (scanners, health checks) can estimate throughput.
     """
 
     CCXT_NAME: str = ""
     CCXT_KWARGS: dict[str, Any] = {}
+    RATE_LIMIT_MS: int = 1000  # default: 1 request/second
 
     def __init__(self, api_key: str = "", api_secret: str = "") -> None:
         self._instance: Any = None
@@ -168,6 +174,14 @@ class BaseProvider:
             kwargs.update(self.CCXT_KWARGS)
             self._instance = cls(kwargs)
         return self._instance
+
+    @property
+    def rate_limit_ms(self) -> int:
+        """Minimum milliseconds between consecutive API calls for
+        this exchange (exposed so callers can estimate throughput).
+        CCXT's ``enableRateLimit`` already enforces this, but the
+        value is also useful for external scheduling."""
+        return getattr(self, "RATE_LIMIT_MS", 1000)
 
     def has_credentials(self) -> bool:
         """True if this provider was constructed with API key + secret."""
@@ -285,7 +299,23 @@ class BaseProvider:
         self, symbols: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_tickers(symbols))
+            ex = self._get_exchange()
+            if symbols is not None:
+                return dict(ex.fetch_tickers(symbols))
+            if not ex.has.get("fetchTickers", False):
+                # Fall back to per-symbol ticker fetches for
+                # exchanges that don't support bulk ticker calls
+                # (e.g. Indodax).
+                result: dict[str, Any] = {}
+                for sym in ex.symbols:
+                    try:
+                        t = ex.fetch_ticker(sym)
+                        if t:
+                            result[sym] = t
+                    except Exception:
+                        continue
+                return result
+            return dict(ex.fetch_tickers())
         except Exception:
             return {}
 
@@ -330,6 +360,7 @@ class BaseProvider:
 class BinanceProvider(BaseProvider):
     CCXT_NAME = "binance"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 100  # ~1200 weight/minute
 
     def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
         # Binance's spot API expects newClientOrderId, not clientOrderId.
@@ -339,6 +370,7 @@ class BinanceProvider(BaseProvider):
 class BybitProvider(BaseProvider):
     CCXT_NAME = "bybit"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 100
 
 
 class TokocryptoProvider(BaseProvider):
@@ -351,6 +383,7 @@ class TokocryptoProvider(BaseProvider):
     """
     CCXT_NAME = "binance"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 100
 
     @property
     def name(self) -> str:
@@ -367,21 +400,25 @@ class TokocryptoProvider(BaseProvider):
 class OKXProvider(BaseProvider):
     CCXT_NAME = "okx"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 200  # ~20 requests/2 seconds
 
 
 class GateProvider(BaseProvider):
     CCXT_NAME = "gate"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 50  # ~300 requests/second
 
 
 class KucoinProvider(BaseProvider):
     CCXT_NAME = "kucoin"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 1000  # ~1800/minute
 
 
 class MEXCProvider(BaseProvider):
     CCXT_NAME = "mexc"
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
+    RATE_LIMIT_MS = 1000  # ~10 requests/second
 
 
 class IndodaxProvider(BaseProvider):
@@ -394,6 +431,7 @@ class IndodaxProvider(BaseProvider):
     See: https://github.com/btcid/indodax-official-api-docs
     """
     CCXT_NAME = "indodax"
+    RATE_LIMIT_MS = 200  # lower rate limits than major CEXs
 
 
 # ======================================================================

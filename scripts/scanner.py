@@ -32,10 +32,11 @@ from bot.indicators import IndicatorEngine
 #  Config
 # ---------------------------------------------------------------------------
 
+from scripts.app_config import load_config
+
 MIN_CANDLES = 250          # minimum candles required for analysis (must match fetch limit)
 OHLCV_LIMIT = MIN_CANDLES  # fetch this many candles (must match MIN_CANDLES)
 TIMEFRAME = "1h"
-EXCHANGE_NAME = "binance"
 TOP_N = 50
 THREADS = 8
 MIN_VOLUME_24H = 50_000  # skip pairs below $50K daily volume
@@ -330,24 +331,26 @@ def classify_signal(score: float) -> str:
 class PairAnalyzer:
     """Analyze a single trading pair end-to-end.
 
-    Uses a thread-local ccxt exchange to avoid creating a new
-    connection per call while keeping each thread independent.
+    Uses a thread-local ccxt exchange instance configured for the
+    target exchange, avoiding a new connection per call while
+    keeping each thread independent.
     """
 
     _thread_local: Any = None
 
     @classmethod
-    def _get_exchange(cls):
-        """Return a thread-local ccxt Binance instance."""
+    def _get_exchange(cls, exchange_name: str):
+        """Return a thread-local ccxt exchange instance for *exchange_name*."""
         import ccxt
+        from scripts.exchange_providers import get_provider_class
+        key = f"exchange_{exchange_name}"
         if cls._thread_local is None:
             cls._thread_local = threading.local()
-        if not hasattr(cls._thread_local, "exchange"):
-            cls._thread_local.exchange = ccxt.binance({
-                "enableRateLimit": True,
-                "timeout": 15000,
-            })
-        return cls._thread_local.exchange
+        if not hasattr(cls._thread_local, key):
+            provider_cls = get_provider_class(exchange_name)
+            provider = provider_cls()
+            cls._thread_local.__dict__[key] = provider._get_exchange()
+        return cls._thread_local.__dict__[key]
 
     @staticmethod
     def _from_ohlcv(pair: PairRaw, raw: list) -> PairAnalysis:
@@ -400,10 +403,12 @@ class PairAnalyzer:
         )
 
     @classmethod
-    def analyze(cls, pair: PairRaw) -> PairAnalysis:
-        """Fetch OHLCV from the CEX (ccxt), calculate indicators, return analysis."""
+    def analyze(cls, pair: PairRaw, exchange_name: str = "binance") -> PairAnalysis:
+        """Fetch OHLCV from the CEX (ccxt) for *exchange_name*,
+        calculate indicators, return analysis.
+        """
         try:
-            exchange = cls._get_exchange()
+            exchange = cls._get_exchange(exchange_name)
             raw = exchange.fetch_ohlcv(
                 symbol=pair.symbol,
                 timeframe=TIMEFRAME,
@@ -456,14 +461,19 @@ class PairAnalyzer:
 
 
 class MarketScanner:
-    """Orchestrate the multi-pair scan."""
+    """Orchestrate the multi-pair scan.
 
-    def __init__(self, threads: int = THREADS, config: Any = None) -> None:
-        self.md = MarketData(exchange_name=EXCHANGE_NAME)
+    *exchange_name* is read from ``AppConfig.exchange`` (the
+    ``EXCHANGE`` env var) and drives every data fetch — markets,
+    tickers, and OHLCV — so the scanner is fully multi-exchange.
+    """
+
+    def __init__(self, exchange_name: str = "binance", threads: int = THREADS, config: Any = None) -> None:
+        self.exchange_name = exchange_name.lower()
+        self.md = MarketData(exchange_name=self.exchange_name)
         self.threads = threads
         self.pair_raws: list[PairRaw] = []
         if config is None:
-            from scripts.app_config import load_config  # noqa: PLC0415
             config = load_config()
         self.config = config
 
@@ -503,8 +513,9 @@ class MarketScanner:
         total = len(pairs)
         log_interval = max(1, total // 20)
         completed = 0
+        exchange_name = self.exchange_name
         with ThreadPoolExecutor(max_workers=self.threads) as pool:
-            fut_map = {pool.submit(PairAnalyzer.analyze, p): p for p in pairs}
+            fut_map = {pool.submit(PairAnalyzer.analyze, p, exchange_name): p for p in pairs}
             for f in as_completed(fut_map):
                 results.append(f.result())
                 completed += 1
@@ -575,11 +586,12 @@ class MarketScanner:
     def run(self) -> tuple[list[PairAnalysis], dict[str, int]]:
         """Full scan pipeline. Returns (scored_pairs, stats dict)."""
         stats: dict[str, int] = {}
+        exchange_name = self.exchange_name
 
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — AUTO MARKET SCANNER")
         print(f"  {'=' * 78}")
-        print(f"  Exchange   : {EXCHANGE_NAME}")
+        print(f"  Exchange   : {exchange_name}")
         print(f"  Timeframe  : {TIMEFRAME}")
         print(f"  OHLCV limit: {OHLCV_LIMIT}")
         print(f"  Threads    : {self.threads}")
@@ -803,12 +815,12 @@ class ScannerReport:
         print(f"  CSV exported : {path}")
 
     @staticmethod
-    def to_json(scored: list[ScoredPair], path: str) -> None:
+    def to_json(scored: list[ScoredPair], path: str, exchange_name: str = "binance") -> None:
         """Write all results as JSON."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = {
             "generated": datetime.now(timezone.utc).isoformat(),
-            "exchange": EXCHANGE_NAME,
+            "exchange": exchange_name,
             "timeframe": TIMEFRAME,
             "total_pairs": len(scored),
             "pairs": [asdict(s) for s in scored],
@@ -818,13 +830,13 @@ class ScannerReport:
         print(f"  JSON export : {path}")
 
     @staticmethod
-    def to_watchlist(scored: list[ScoredPair], path: str, top_n: int = 10) -> None:
+    def to_watchlist(scored: list[ScoredPair], path: str, top_n: int = 10, exchange_name: str = "binance") -> None:
         """Write top-N watchlist as a simple text file."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
             f.write("ZETBOT AI — WATCHLIST\n")
             f.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n")
-            f.write(f"Exchange: {EXCHANGE_NAME}  Timeframe: {TIMEFRAME}\n")
+            f.write(f"Exchange: {exchange_name}  Timeframe: {TIMEFRAME}\n")
             f.write(f"{'=' * 50}\n\n")
             for s in scored[:top_n]:
                 f.write(
@@ -853,8 +865,13 @@ def _fmt_vol(vol: float) -> str:
 
 def main() -> None:
     t0 = time.time()
+    config = load_config()
+    exchange_name = getattr(config, "exchange", "binance")
 
-    scanner = MarketScanner(threads=THREADS)
+    scanner = MarketScanner(
+        exchange_name=exchange_name,
+        threads=getattr(config, "scanner_threads", THREADS),
+    )
     scored, stats = scanner.run()
     total = len(scored)
 
@@ -874,10 +891,10 @@ def main() -> None:
     report.to_csv(scored, csv_path)
 
     json_path = "data/scanner_results.json"
-    report.to_json(scored, json_path)
+    report.to_json(scored, json_path, exchange_name=exchange_name)
 
     watchlist_path = "data/watchlist.txt"
-    report.to_watchlist(scored, watchlist_path)
+    report.to_watchlist(scored, watchlist_path, exchange_name=exchange_name)
 
     print(f"\n  Completed at : {datetime.now(timezone.utc).isoformat()}")
     print(f"  Duration     : {elapsed:.1f}s")
