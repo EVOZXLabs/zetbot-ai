@@ -406,15 +406,13 @@ class Pipeline:
         if self.container is not None:
             wallet = self.container.wallet
             balance = wallet.balance
-            equity = wallet.equity
             if balance <= 0:
                 balance = self.config.account_balance
-            if equity <= 0:
-                equity = self.config.account_balance
         else:
-            balance, equity = risk_manager._resolve_account_state()
+            balance, _ = risk_manager._resolve_account_state()
 
-        existing_exposure = max(0.0, equity - balance)
+        existing_exposure = risk_manager._existing_open_exposure()
+        equity = balance + existing_exposure
         mm_config = risk_manager.MoneyManagementConfig(
             mode=risk_manager.MoneyManagementMode(
                 risk_manager.MONEY_MANAGEMENT_MODE
