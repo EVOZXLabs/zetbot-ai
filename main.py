@@ -615,8 +615,11 @@ def _monitor_positions(
     logger: Any,
     notifier: Any,
     center: Any,
+    container: Any = None,
 ) -> None:
-    """Fetch current prices for open positions, update PnL, detect closures."""
+    """Fetch current prices for open positions, update PnL, detect closures.
+    In LIVE mode, submits a market sell order when a closure is detected.
+    """
     # Only run if pipeline already ran (positions.json exists)
     if not os.path.exists("data/positions.json"):
         return
@@ -624,9 +627,11 @@ def _monitor_positions(
     try:
         import ccxt  # noqa: PLC0415
         from datetime import datetime, timezone  # noqa: PLC0415
+        from scripts.execution_engine import OrderRequest  # noqa: PLC0415
         from scripts.position_manager import (  # noqa: PLC0415
             PositionSimulator, TradePlan,
         )
+        from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
     except ImportError as exc:
         logger.debug(f"Monitor imports failed: {exc}")
         return
@@ -763,6 +768,44 @@ def _monitor_positions(
             _exit_reason_map,
     )
             pos["closure_notified"] = True
+
+            # LIVE mode: submit market sell order to the exchange
+            # (safety net even when auto_protect is enabled — protects
+            # against protection-creation failure or orphan positions)
+            if container is not None and hasattr(container, "order"):
+                mode = getattr(container.order, "mode", "PAPER")
+                if mode == "LIVE":
+                    live_enabled = getattr(container.order, "is_live_enabled", lambda: False)()
+                    if live_enabled:
+                        sell_qty = new_pos.remaining_qty or pos.get("remaining_qty", pos.get("quantity", 0))
+                        if sell_qty > 0:
+                            try:
+                                sell_req = OrderRequest(
+                                    symbol=sym,
+                                    side="SELL",
+                                    type="MARKET",
+                                    amount=sell_qty,
+                                    metadata={"source": "monitor", "bypass_risk": True},
+                                )
+                                sell_result = container.order.execute(sell_req)
+                                r_status = sell_result.status if hasattr(sell_result, "status") else getattr(sell_result, "status", "?")
+                                logger.info(
+                                    f"LIVE closure sell for {sym}: {r_status}"
+                                )
+                            except Exception as exc:
+                                logger.error(
+                                    f"LIVE closure sell failed for {sym}: {exc}"
+                                )
+
+                        # Cancel any existing protection orders
+                        try:
+                            pm = ProtectionManager(
+                                container.exchange,
+                                getattr(container, "_config", None),
+                            )
+                            pm.cancel_protection(sym, reason="monitor_closure")
+                        except Exception as exc:
+                            logger.debug(f"Cancel protection for {sym}: {exc}")
 
         if changed:
             try:
@@ -1161,7 +1204,7 @@ def main() -> None:
             _monitor_interval += 1
             if _monitor_interval >= 60:
                 _monitor_interval = 0
-                _monitor_positions(logger, _notifier, center)
+                _monitor_positions(logger, _notifier, center, container=container)
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():

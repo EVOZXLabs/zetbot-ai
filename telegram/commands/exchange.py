@@ -22,7 +22,7 @@ class ExchangeCommand(BaseCommand):
                 f"\U0001f4e1 *Active Exchange*\n"
                 f"Current: `{current}`\n"
                 f"\n"
-                f"Use `/exchange <name>` to switch or `/exchanges` to list all."
+                "Use /exchange <name> to switch or /exchanges to list all accessible exchanges."
             )
 
         name = parts[0].lower()

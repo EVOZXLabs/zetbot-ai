@@ -46,7 +46,7 @@ class WalletCommand(BaseCommand):
         else:
             pb = ctx.read_json("paper_balance.json")
             if not pb:
-                return "No wallet data yet. Run `/pipeline` first."
+                return "No wallet data yet. Run /pipeline first."
             cash = pb.get("final_balance", 0.0)
             total_balance = pb.get("final_equity", 0.0)
             realized = pb.get("realized_pnl", 0.0)

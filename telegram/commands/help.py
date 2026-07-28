@@ -2,10 +2,12 @@ from telegram.base_command import BaseCommand, CommandMeta
 from telegram.registry import CommandRegistry
 from telegram.ui import compact_header, build_message
 
-# Markdown (legacy) special characters — anything pulled from a command's
+# Markdown special characters — anything pulled from a command's
 # usage/description gets escaped before it's dropped into the message so
 # a stray "_" (e.g. inside a placeholder like "amount_usdt") can never
 # break formatting for the whole message.
+# Backticks around usage are intentionally omitted so Telegram auto-detects
+# commands and makes them tappable.
 _MD_SPECIAL = ("_", "*", "`", "[")
 
 
@@ -48,9 +50,9 @@ class HelpCommand(BaseCommand):
                     continue
                 if meta.permission == "admin" and not ctx.is_admin:
                     continue
-                usage = meta.usage or f"/{meta.name}"
+                usage = _esc(meta.usage or f"/{meta.name}")
                 desc = _esc(meta.description or "")
-                rows.append(f"`{usage}` — {desc}")
+                rows.append(f"{usage} — {desc}")
             if rows:
                 blocks.append(f"{icon} *{title}*\n" + "\n".join(rows))
 

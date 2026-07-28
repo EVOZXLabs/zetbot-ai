@@ -19,7 +19,7 @@ class MarketCommand(BaseCommand):
             with open("data/scanner_results.json") as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            return "No scanner data yet. Run `/pipeline` first."
+            return "No scanner data yet. Run /pipeline first."
 
         pairs = data.get("pairs", data.get("results", data.get("sorted", [])))
         if not isinstance(pairs, list) or not pairs:
