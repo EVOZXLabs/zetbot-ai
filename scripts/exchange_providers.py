@@ -384,6 +384,18 @@ class MEXCProvider(BaseProvider):
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
 
 
+class IndodaxProvider(BaseProvider):
+    """Indodax (Indonesia) — IDR-quoted spot pairs only (e.g. BTC/IDR).
+
+    Unlike Binance/Bybit/OKX etc., Indodax has no spot-vs-futures split,
+    so no ``defaultType`` option is needed. Not yet live-tested against
+    the real API in this codebase — verify with a read-only (view+trade,
+    NO withdrawal) API key on a small balance before trading real funds.
+    See: https://github.com/btcid/indodax-official-api-docs
+    """
+    CCXT_NAME = "indodax"
+
+
 # ======================================================================
 #  Provider registry (auto-discovered)
 # ======================================================================
@@ -396,6 +408,7 @@ _BUILTIN_PROVIDERS: list[type[BaseProvider]] = [
     GateProvider,
     KucoinProvider,
     MEXCProvider,
+    IndodaxProvider,
 ]
 
 
