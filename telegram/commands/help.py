@@ -48,9 +48,9 @@ class HelpCommand(BaseCommand):
                     continue
                 if meta.permission == "admin" and not ctx.is_admin:
                     continue
-                usage = meta.usage or f"/{meta.name}"
+                usage = _esc(meta.usage or f"/{meta.name}")
                 desc = _esc(meta.description or "")
-                rows.append(f"`{usage}` — {desc}")
+                rows.append(f"{usage} — {desc}")
             if rows:
                 blocks.append(f"{icon} *{title}*\n" + "\n".join(rows))
 
