@@ -3,6 +3,8 @@
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts.exchange_providers import (
     BaseProvider,
     BinanceProvider,
@@ -105,6 +107,7 @@ def test_all_providers_satisfy_protocol() -> None:
 # ======================================================================
 
 
+@pytest.mark.network
 class TestBaseProviderErrorHandling:
     """Without network, all API calls return empty defaults."""
 

@@ -522,17 +522,17 @@ class TestNewUX:
     def test_history_shows_trades(self) -> None:
         from telegram.commands.history import HistoryCommand
         result = _execute(HistoryCommand, _make_ctx())
-        assert "TRADE HISTORY" in result or "No completed trades" in result
+        assert "Trade History" in result or "No completed trades" in result
 
     def test_performance_shows_metrics(self) -> None:
         from telegram.commands.performance import PerformanceCommand
         result = _execute(PerformanceCommand, _make_ctx())
-        assert "PERFORMANCE" in result or "No completed trades" in result
+        assert "Performance" in result or "No completed trades" in result
 
     def test_market_shows_overview(self) -> None:
         from telegram.commands.market import MarketCommand
         result = _execute(MarketCommand, _make_ctx())
-        assert "MARKET OVERVIEW" in result or "No scanner data" in result
+        assert "Market Overview" in result or "No scanner data" in result
 
     def test_pair_shows_analysis(self) -> None:
         from telegram.commands.pair import PairCommand
@@ -571,7 +571,7 @@ class TestNewUX:
     def test_history_limit(self) -> None:
         from telegram.commands.history import HistoryCommand
         result = _execute(HistoryCommand, _make_ctx(), "3")
-        assert "TRADE HISTORY" in result or "No completed trades" in result
+        assert "Trade History" in result or "No completed trades" in result
 
     def test_performance_empty(self) -> None:
         from telegram.commands.performance import PerformanceCommand

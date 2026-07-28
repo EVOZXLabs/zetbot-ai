@@ -5,6 +5,8 @@ import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts.app_config import AppConfig
 from scripts.interfaces import (
     IConfigService,
@@ -155,22 +157,26 @@ class TestExchangeManager:
         c = _make_container()
         assert c.exchange.name == "binance"
 
+    @pytest.mark.network
     def test_exchange_health_check(self) -> None:
         c = _make_container()
         # Without network, health check should return False gracefully
         result = c.exchange.health_check()
         assert isinstance(result, bool)
 
+    @pytest.mark.network
     def test_get_ticker_handles_errors(self) -> None:
         c = _make_container()
         result = c.exchange.get_ticker("NONEXISTENT/XXX")
         assert isinstance(result, dict)
 
+    @pytest.mark.network
     def test_fetch_ohlcv_handles_errors(self) -> None:
         c = _make_container()
         result = c.exchange.fetch_ohlcv("NONEXISTENT/XXX")
         assert isinstance(result, list)
 
+    @pytest.mark.network
     def test_fetch_balance_handles_errors(self) -> None:
         c = _make_container()
         result = c.exchange.fetch_balance()
