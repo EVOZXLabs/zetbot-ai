@@ -209,6 +209,7 @@ class TestSidewaysDetection:
 #  MarketData integration
 # ---------------------------------------------------------------------------
 
+@pytest.mark.network
 class TestMarketDataStateIntegration:
     """Verify market_state() works after fetch_ohlcv."""
 

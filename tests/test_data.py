@@ -32,21 +32,25 @@ class TestLiveFetchOHLCV:
     def setup(self) -> None:
         self.md = MarketData(exchange_name="binance")
 
+    @pytest.mark.network
     def test_fetch_returns_dataframe(self) -> None:
         """fetch_ohlcv should return a pandas DataFrame."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=100)
         assert isinstance(df, pd.DataFrame)
 
+    @pytest.mark.network
     def test_fetch_expected_row_count(self) -> None:
         """DataFrame should contain the requested number of candles."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=100)
         assert len(df) == 100
 
+    @pytest.mark.network
     def test_fetch_expected_columns(self) -> None:
         """DataFrame should have exactly the standard 6 columns in order."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=10)
         assert list(df.columns) == NORMALIZED_COLUMNS
 
+    @pytest.mark.network
     def test_fetch_columns_have_correct_types(self) -> None:
         """Each column should have the expected pandas dtype."""
         timeframes = ["1h", "1d"]
@@ -66,6 +70,7 @@ class TestLiveFetchOHLCV:
                 f"volume must be float for {tf}"
             )
 
+    @pytest.mark.network
     def test_fetch_timestamps_are_utc(self) -> None:
         """Timestamps should be timezone-aware and UTC."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=10)
@@ -73,39 +78,46 @@ class TestLiveFetchOHLCV:
             assert ts.tz is not None, "Timestamp must be timezone-aware"
             assert str(ts.tz) == "UTC", "Timestamp must be in UTC"
 
+    @pytest.mark.network
     def test_fetch_timestamps_are_unique(self) -> None:
         """All timestamps should be unique (no duplicates)."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200)
         assert df["timestamp"].is_unique
 
+    @pytest.mark.network
     def test_fetch_prices_are_positive(self) -> None:
         """OHLC prices should be strictly positive."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=50)
         for col in ["open", "high", "low", "close"]:
             assert (df[col] > 0).all(), f"{col} must be > 0"
 
+    @pytest.mark.network
     def test_fetch_volume_is_non_negative(self) -> None:
         """Volume should be zero or positive."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=50)
         assert (df["volume"] >= 0).all(), "volume must be >= 0"
 
+    @pytest.mark.network
     def test_fetch_high_gte_low(self) -> None:
         """High should always be >= low for every candle."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200)
         assert (df["high"] >= df["low"]).all()
 
+    @pytest.mark.network
     def test_fetch_close_within_range(self) -> None:
         """Close should be between low and high for every candle."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200)
         assert (df["close"] >= df["low"]).all()
         assert (df["close"] <= df["high"]).all()
 
+    @pytest.mark.network
     def test_fetch_alternative_symbol(self) -> None:
         """Should work with ETH/USDT as well."""
         df = self.md.fetch_ohlcv(symbol="ETH/USDT", timeframe="1h", limit=50)
         assert len(df) == 50
         assert (df["close"] > 0).all()
 
+    @pytest.mark.network
     def test_fetch_bybit(self) -> None:
         """Should fetch from Bybit successfully."""
         md = MarketData(exchange_name="bybit")
@@ -113,6 +125,7 @@ class TestLiveFetchOHLCV:
         assert len(df) == 50
         assert list(df.columns) == NORMALIZED_COLUMNS
 
+    @pytest.mark.network
     def test_fetch_tokocrypto(self) -> None:
         """Should fetch from Tokocrypto successfully."""
         md = MarketData(exchange_name="tokocrypto")
@@ -120,16 +133,19 @@ class TestLiveFetchOHLCV:
         assert len(df) == 50
         assert list(df.columns) == NORMALIZED_COLUMNS
 
+    @pytest.mark.network
     def test_fetch_1m_timeframe(self) -> None:
         """Should fetch 1-minute candles."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1m", limit=60)
         assert len(df) == 60
 
+    @pytest.mark.network
     def test_fetch_1d_timeframe(self) -> None:
         """Should fetch daily candles."""
         df = self.md.fetch_ohlcv(symbol="BTC/USDT", timeframe="1d", limit=30)
         assert len(df) == 30
 
+    @pytest.mark.network
     def test_fetch_different_limits(self) -> None:
         """Should handle various limit values correctly."""
         for limit in [10, 50, 500]:

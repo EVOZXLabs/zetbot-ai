@@ -522,3 +522,56 @@ class TestAccountSnapshotDataclass:
         )
         assert s.position_value == 10_000.0
         assert s.exposure_pct == 50.0
+
+
+# ============================================================================
+#  UTC leak prevention — health command
+# ============================================================================
+
+class TestHealthNoUTC:
+    """Health command must never display 'UTC' in user-facing output."""
+
+    def test_file_timestamp_returns_iso(self) -> None:
+        """_file_timestamp() must return ISO string, not '%H:%M:%S UTC'."""
+        import time as _time
+        from scripts.health import _file_timestamp
+        # Use an existing file
+        ts, age = _file_timestamp("requirements.txt", _time.time())
+        assert ts != "N/A"
+        # Must be parseable by time_ago()
+        from telegram.formatter import time_ago
+        result = time_ago(ts)
+        # time_ago returns relative time ("Xs ago", "Xm ago", etc.)
+        # if it couldn't parse, it returns the raw string
+        assert result != ts, f"time_ago failed to parse: {ts}"
+        assert "UTC" not in result
+
+    def test_health_snapshot_no_utc(self) -> None:
+        """Health snapshot scanner_time must not contain 'UTC' string."""
+        import time as _time
+        from scripts.health import _file_timestamp
+        ts, _ = _file_timestamp("requirements.txt", _time.time())
+        assert "UTC" not in ts
+
+    def test_time_ago_never_outputs_utc(self) -> None:
+        """time_ago() output must never contain 'UTC'."""
+        from telegram.formatter import time_ago
+        # Test with various ISO timestamps
+        now_iso = "2026-07-19T10:00:00+00:00"
+        result = time_ago(now_iso)
+        assert "UTC" not in result
+
+        old_iso = "2026-01-01T00:00:00+00:00"
+        result = time_ago(old_iso)
+        assert "UTC" not in result
+
+    def test_wib_now_never_outputs_utc(self) -> None:
+        """wib_now() output must never contain 'UTC'."""
+        from telegram.ui import wib_now
+        assert "UTC" not in wib_now()
+
+    def test_wib_datetime_never_outputs_utc(self) -> None:
+        """wib_datetime() output must never contain 'UTC'."""
+        from telegram.ui import wib_datetime
+        assert "UTC" not in wib_datetime(0.0)
+        assert "UTC" not in wib_datetime(1_700_000_000.0)
