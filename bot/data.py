@@ -23,6 +23,7 @@ def _get_exchange_map():
         "binance": ccxt.binance,
         "bybit": ccxt.bybit,
         "tokocrypto": ccxt.binance,
+        "indodax": ccxt.indodax,
     }
 
 NORMALIZED_COLUMNS: list[str] = [
@@ -38,7 +39,7 @@ NORMALIZED_COLUMNS: list[str] = [
 class MarketData:
     """Fetch and validate OHLCV market data from supported exchanges.
 
-    Supports Binance, Bybit, and Tokocrypto spot markets.
+    Supports Binance, Bybit, Tokocrypto, and Indodax spot markets.
     Data is returned as a pandas DataFrame with normalized column names.
     """
 
@@ -52,7 +53,7 @@ class MarketData:
 
         Args:
             exchange_name: Exchange identifier. One of 'binance', 'bybit',
-                'tokocrypto'.
+                'tokocrypto', 'indodax'.
             api_key: API key for authenticated endpoints.
             secret: API secret for authenticated endpoints.
 
