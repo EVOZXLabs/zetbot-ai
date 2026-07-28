@@ -7,12 +7,15 @@ ExecutionEngine selects the correct executor based on trading mode.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+_log = logging.getLogger("ZetBot")
 
 from scripts.execution_engine import (
     AUDIT_PATH,
@@ -313,11 +316,17 @@ class OrderManager:
                     take_profit_price=request.take_profit,
                 )
             except (ProtectionError, MissingEntryPriceError):
-                # Already recorded with status ERROR/PARTIAL_ERROR inside
-                # create_protection() — nothing more to do here.
-                pass
-            except Exception:
-                pass  # never let a protection bug affect the entry order's own result
+                _log.warning(
+                    "Protection creation failed for %s — "
+                    "position is UNPROTECTED (%s)",
+                    symbol, request.side,
+                )
+            except Exception as exc:
+                _log.warning(
+                    "Protection creation failed for %s: %s — "
+                    "position is UNPROTECTED",
+                    symbol, exc,
+                )
 
         elif side == "SELL":
             try:

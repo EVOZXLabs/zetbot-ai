@@ -15,7 +15,7 @@ class SellCommand(BaseCommand):
         if not args.strip():
             return (
                 "\U0001f6ab *Sell*\n"
-                "Usage: `/sell BTC/USDT`\n"
+                "Usage: /sell <symbol>\n"
                 "Closes an open position via OrderManager."
             )
 

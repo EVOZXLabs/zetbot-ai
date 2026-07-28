@@ -15,7 +15,7 @@ class BuyCommand(BaseCommand):
         if not args.strip():
             return (
                 "\U0001f6ab *Buy*\n"
-                "Usage: `/buy BTC/USDT 100`\n"
+                "Usage: /buy <symbol> <amount>\n"
                 "Creates a BUY order via OrderManager."
             )
 
@@ -27,7 +27,7 @@ class BuyCommand(BaseCommand):
         try:
             amount_usdt = float(parts[1]) if len(parts) > 1 else 0.0
         except (ValueError, IndexError):
-            return "\u274c Invalid amount. Usage: `/buy BTC/USDT 100`"
+            return "\u274c Invalid amount. Usage: /buy <symbol> <amount>"
 
         if amount_usdt <= 0:
             return "\u274c Invalid amount."
