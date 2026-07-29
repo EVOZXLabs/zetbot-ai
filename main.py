@@ -1101,7 +1101,7 @@ def main() -> None:
         # initial_balance, invalid profit_factor, and repair in-place.
         try:
             from scripts.accounting_reconcile import reconcile
-            findings = reconcile(logger_obj=logger)
+            findings = reconcile(logger_obj=logger, account_balance=config.account_balance)
             if findings.get("repairs_applied", 0) > 0:
                 logger.info(
                     f"Accounting reconciliation applied "

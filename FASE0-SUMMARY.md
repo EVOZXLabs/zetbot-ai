@@ -133,6 +133,80 @@ key, konsisten dengan pola `@pytest.mark.network` yang sudah ada di
 
 ---
 
+## 5. (Tambahan) `/exchange` Telegram tidak benar-benar redirect scanner
+
+Ditemukan saat user menguji `/exchange indodax` lewat Telegram: pesan
+konfirmasi "Switched active exchange" muncul dan `/exchanges` menunjukkan
+Indodax aktif, tapi scanner tetap diam-diam scan exchange lama.
+
+**Akar masalah:** `ServiceContainer._ScannerAdapter` (dipakai `/pipeline`
+dan auto-pipeline) memanggil `scripts.scanner.main()` tanpa argumen —
+yang di dalamnya `MarketScanner()` selalu `load_config()` ulang dari
+`.env`. Sementara `ExchangeManager` (yang diubah `/exchange` command)
+cuma dipakai `OrderManager` untuk eksekusi order. Jadi switch exchange
+via Telegram cuma nyambung ke separuh sistem — scanner cari pair di
+exchange lama, order eksekusi diarahkan ke exchange baru. Untuk exchange
+dengan quote currency beda (Indodax = IDR), scanner malah selalu
+menghasilkan nol pair karena `QUOTE_CURRENCY` juga tidak ikut berubah.
+
+**Perbaikan:**
+- `scripts/scanner.py` — `main()` sekarang menerima `config` opsional,
+  diteruskan ke `MarketScanner`.
+- `scripts/service_container.py` — `_ScannerAdapter` dibekali
+  `ExchangeManager`, dan membangun `_ScannerConfigView` (config view yang
+  override `.exchange`/`.quote_currency` dari `ExchangeManager` yang
+  sedang aktif, field lain tetap ikut `AppConfig` dari `.env`).
+- `scripts/exchange_manager.py` — `ExchangeManager` sekarang punya state
+  `quote_currency` yang bisa diubah runtime (`set_quote_currency()`),
+  bukan cuma exchange name.
+- `telegram/commands/exchange.py` — `/exchange <name> [quote]` bisa set
+  quote currency sekalian dalam satu command (`/exchange indodax IDR`),
+  dan otomatis memperingatkan kalau quote belum disesuaikan untuk
+  exchange yang butuh quote non-USDT (saat ini: Indodax → IDR).
+- `telegram/commands/exchanges.py` — menampilkan quote currency aktif.
+- Test baru di `tests/test_service_container.py` (`TestScannerAdapter`)
+  memverifikasi scanner benar-benar menerima exchange & quote currency
+  yang aktif di `ExchangeManager`, termasuk setelah runtime switch.
+
+**Catatan:** switch lewat Telegram ini murni runtime (in-memory) — kalau
+bot di-restart, balik lagi ke `EXCHANGE`/`QUOTE_CURRENCY` di `.env`.
+Ini disengaja (bukan bug) supaya restart selalu kembali ke konfigurasi
+yang eksplisit tertulis di `.env`, bukan state tersembunyi dari sesi
+sebelumnya.
+
+---
+
+## 6. (Tambahan) Akun baru/reset menampilkan $0.00 + "-100% all-time"
+
+Ditemukan saat user pertama kali connect ke Indodax: `/status`/`/balance`
+menampilkan Total Balance $0.00, Cash $0.00, padahal `.env` sudah set
+`ACCOUNT_BALANCE=10000` (atau berapa pun). Ini muncul di sesi mana pun
+yang baru (uptime baru ~1-2 menit, belum sempat scan pertama) — bukan
+disebabkan oleh switch exchange.
+
+**Akar masalah:** `scripts/accounting_reconcile.py` — fungsi `reconcile()`
+yang jalan sekali di startup bot, kalau `paper_state.json` DAN
+`paper_balance.json` sama-sama belum ada (akun benar-benar baru, atau
+baru habis `reset_paper_state.py`), cuma `log.debug(...)` lalu skip —
+tidak pernah menulis saldo awal ke disk. Sementara itu Telegram
+(`_WalletAdapter`, `MetricsManager.account()`) membaca file itu
+langsung; kalau belum ada, `cash`/`equity` default ke `0.0`. Parahnya,
+persentase return-nya (`total_return_pct`) fallback ke asumsi baseline
+$10,000 (`resolve_initial_balance`), jadi `(0 - 10000) / 10000 * 100 =
+-100%` — kelihatan seperti rugi total padahal cuma belum ada data.
+
+**Perbaikan:** `reconcile()` sekarang menginisialisasi
+`paper_state.json` + `paper_balance.json` dengan `account_balance` yang
+dikonfigurasi (`.env` → `ACCOUNT_BALANCE`) begitu terdeteksi kedua file
+belum ada — bukan cuma skip. `main.py` diteruskan `config.account_balance`
+saat memanggil `reconcile()`. Hasilnya: `/status`/`/balance`/`/wallet`
+langsung menampilkan saldo yang benar sejak query pertama, `total_return_pct`
+= 0% (bukan -100%), tanpa perlu menunggu siklus pipeline pertama selesai.
+
+Test baru: `tests/test_accounting_fixes.py::TestStartupReconciliation::test_initializes_fresh_account_when_no_files_exist`
+
+---
+
 ## File yang diubah
 
 | File | Perubahan |
@@ -142,9 +216,21 @@ key, konsisten dengan pola `@pytest.mark.network` yang sudah ada di
 | `scripts/exchange_test.py` | Resolve exchange lewat registry provider, fix bug `has_spot` |
 | `scripts/diagnostics.py` | Resolve exchange lewat registry provider |
 | `README.md` | Update daftar Supported Exchanges & tabel env var |
+| `SPECIFICATION.md` | §7 Supported Exchanges diperluas ke 8 exchange |
+| `TODO_PRODUCTION.md` | Tambah section Multi-Exchange Support |
+| `.env.example` | `MAX_POSITIONS` default 2 → 1 (samakan dgn spec §49) |
+| `OPERATIONS.md` | Tabel `MAX_POSITIONS` default 3 → 1 |
+| `scripts/exchange_manager.py` | Tambah state `quote_currency` runtime |
+| `scripts/service_container.py` | `_ScannerAdapter` ikut `ExchangeManager` aktif |
+| `telegram/commands/exchange.py` | `/exchange <name> [quote]` + warning quote mismatch |
+| `telegram/commands/exchanges.py` | Tampilkan quote currency aktif |
 | `tests/test_data.py` | Perluas cakupan ke 8 exchange |
 | `tests/test_exchange_providers.py` | Tambah coverage Indodax + error-handling + precision helper |
 | `tests/test_scanner.py` | **Baru** — cakupan multi-exchange scanner |
+| `tests/test_service_container.py` | Tambah test `/exchange` ⇄ scanner sinkron |
+| `scripts/accounting_reconcile.py` | Inisialisasi saldo akun baru, bukan skip diam-diam |
+| `main.py` | Teruskan `account_balance` ke `reconcile()` |
+| `tests/test_accounting_fixes.py` | Update + tambah test akun baru |
 | `FASE0-SUMMARY.md` | **Baru** — dokumen ini |
 
 ## Yang sengaja TIDAK disentuh (di luar scope Fase 0)
