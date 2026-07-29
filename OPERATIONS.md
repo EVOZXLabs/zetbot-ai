@@ -232,7 +232,7 @@ All settings are stored in `.env`. Key settings:
 | `TELEGRAM_TOKEN` | — | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | — | Telegram chat ID |
 | `POSITION_SIZE` | `10` | Position size in USDT |
-| `MAX_POSITIONS` | `3` | Maximum open positions |
+| `MAX_POSITIONS` | `1` | Maximum open positions |
 | `TIMEFRAME` | `1h` | Trading timeframe |
 | `AUTO_PIPELINE` | `true` | Automatic pipeline execution |
 | `PIPELINE_INTERVAL` | `300` | Pipeline interval (seconds) |
