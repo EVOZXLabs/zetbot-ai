@@ -129,6 +129,7 @@ class Pipeline:
         self.results = []
         self.logger.pipeline_start()
         self._apply_config()
+        self._resync_live_positions()
 
         trace = DecisionTrace(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -220,6 +221,72 @@ class Pipeline:
         if size > 1024:
             return f"{size / 1024:.1f} KB"
         return f"{size} B"
+
+    def _resync_live_positions(self) -> None:
+        """Refresh ``data/live_positions.json`` from the real exchange
+        balance before this pipeline run starts.
+
+        Without this, the cache is only ever touched by
+        ``OrderManager`` right after the BOT's own BUY/SELL fills — a
+        position closed manually on the exchange (outside the bot)
+        never gets removed from the cache. That stale entry then keeps
+        counting against ``max_positions`` in ``risk_manager.py``
+        forever (via ``_count_open_positions()``, which reads this
+        same file), silently blocking every future BUY even though the
+        position is long gone. Doing a full resync here — once per
+        pipeline cycle, before Risk ever counts anything — is what
+        actually keeps the count honest.
+
+        PAPER mode: no-op (paper positions aren't exchange balances).
+        Any failure here is logged and swallowed — a resync problem
+        must never block the pipeline itself; the existing stage-level
+        guards already handle a temporarily-stale cache safely.
+        """
+        try:
+            paper_mode = bool(getattr(self.config, "paper_mode", True))
+        except Exception:
+            paper_mode = True
+        if paper_mode:
+            return
+
+        try:
+            if self.container is not None:
+                exchange = self.container.exchange
+                quote = getattr(self.container.config, "quote_currency", "USDT")
+            else:
+                from scripts.exchange_manager import ExchangeManager  # noqa: PLC0415
+
+                exchange = ExchangeManager(
+                    active=getattr(self.config, "exchange", "binance"),
+                    api_key=getattr(self.config, "api_key", ""),
+                    api_secret=getattr(self.config, "api_secret", ""),
+                )
+                quote = getattr(self.config, "quote_currency", "USDT")
+
+            from scripts.live_position_sync import (  # noqa: PLC0415
+                LivePositionSync,
+                load_live_positions,
+                merge_live_positions,
+            )
+
+            syncer = LivePositionSync(exchange, quote_currency=quote)
+            fresh = syncer.sync_all_positions()
+
+            # Union of what's cached now + what came back fresh — so a
+            # position that fell out of the balance response entirely
+            # (fully sold, zero balance no longer even listed) still
+            # gets purged, not just ones that came back with dust.
+            previously_cached = set(load_live_positions().keys())
+            fresh_symbols = {p["symbol"] for p in fresh}
+            synced_symbols = list(previously_cached | fresh_symbols)
+
+            merge_live_positions(fresh, synced_symbols=synced_symbols)
+            self.logger.info(
+                f"Live position resync: {len(fresh)} open position(s) confirmed "
+                "against exchange balance."
+            )
+        except Exception as exc:
+            self.logger.info(f"Live position resync failed (non-fatal): {exc}")
 
     def _apply_config(self) -> None:
         """Override each module's module-level constants from AppConfig."""
