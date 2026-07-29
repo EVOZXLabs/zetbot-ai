@@ -38,12 +38,6 @@ from bot.indicators import IndicatorEngine
 MIN_CANDLES = 250          # minimum candles required for analysis (must match fetch limit)
 OHLCV_LIMIT = MIN_CANDLES  # fetch this many candles (must match MIN_CANDLES)
 TIMEFRAME = "1h"
-# Fallback only — used when no AppConfig is available (e.g. this module
-# imported directly without a config). MarketScanner otherwise resolves
-# the real exchange from AppConfig.exchange (the EXCHANGE env var), so a
-# single scanner run always follows whatever exchange the user configured
-# instead of always hitting Binance.
-EXCHANGE_NAME = "binance"
 TOP_N = 50
 THREADS = 8
 MIN_VOLUME_24H = 50_000  # skip pairs below $50K daily volume
@@ -345,7 +339,7 @@ class PairAnalyzer:
     _thread_local: Any = None
 
     @classmethod
-    def _get_exchange(cls, exchange_name: str = EXCHANGE_NAME):
+    def _get_exchange(cls, exchange_name: str):
         """Return a thread-local ccxt instance for *exchange_name*.
 
         Cached per thread AND per exchange name (a dict on the
@@ -432,7 +426,7 @@ class PairAnalyzer:
         )
 
     @classmethod
-    def analyze(cls, pair: PairRaw, exchange_name: str = EXCHANGE_NAME) -> PairAnalysis:
+    def analyze(cls, pair: PairRaw, exchange_name: str) -> PairAnalysis:
         """Fetch OHLCV from the CEX (ccxt), calculate indicators, return analysis."""
         try:
             exchange = cls._get_exchange(exchange_name)
@@ -495,13 +489,13 @@ class MarketScanner:
             from scripts.app_config import load_config  # noqa: PLC0415
             config = load_config()
         self.config = config
-        # Resolve from AppConfig (EXCHANGE / QUOTE_CURRENCY in .env) with
-        # the module constant only as a last-resort fallback — this is
-        # what lets /scan and /pipeline run against whichever exchange
-        # the user configured instead of always hitting Binance.
-        self.exchange_name: str = (
-            getattr(config, "exchange", "") or EXCHANGE_NAME
-        ).lower()
+        exchange_raw = getattr(config, "exchange", "")
+        if not exchange_raw:
+            raise ValueError(
+                "MarketScanner: no exchange configured. Set EXCHANGE in .env "
+                "or pass a config with a non-empty .exchange attribute."
+            )
+        self.exchange_name: str = exchange_raw.lower()
         self.quote_currency: str = (
             getattr(config, "quote_currency", "") or "USDT"
         ).upper()
@@ -851,7 +845,7 @@ class ScannerReport:
 
     @staticmethod
     def to_json(scored: list[ScoredPair], path: str,
-                exchange_name: str = EXCHANGE_NAME) -> None:
+                exchange_name: str) -> None:
         """Write all results as JSON."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = {
@@ -866,8 +860,8 @@ class ScannerReport:
         print(f"  JSON export : {path}")
 
     @staticmethod
-    def to_watchlist(scored: list[ScoredPair], path: str, top_n: int = 10,
-                      exchange_name: str = EXCHANGE_NAME) -> None:
+    def to_watchlist(scored: list[ScoredPair], path: str,
+                      exchange_name: str, top_n: int = 10) -> None:
         """Write top-N watchlist as a simple text file."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
@@ -900,7 +894,7 @@ def _fmt_vol(vol: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main(config: Any = None) -> None:
+def main(config: Any) -> None:
     t0 = time.time()
 
     scanner = MarketScanner(threads=THREADS, config=config)
@@ -926,7 +920,7 @@ def main(config: Any = None) -> None:
     report.to_json(scored, json_path, exchange_name=scanner.exchange_name)
 
     watchlist_path = "data/watchlist.txt"
-    report.to_watchlist(scored, watchlist_path, exchange_name=scanner.exchange_name)
+    report.to_watchlist(scored, watchlist_path, scanner.exchange_name)
 
     print(f"\n  Completed at : {datetime.now(timezone.utc).isoformat()}")
     print(f"  Duration     : {elapsed:.1f}s")
@@ -935,4 +929,5 @@ def main(config: Any = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.app_config import load_config  # noqa: PLC0415
+    main(config=load_config())

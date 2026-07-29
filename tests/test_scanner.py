@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.scanner import EXCHANGE_NAME, MarketScanner, PairAnalyzer, PairRaw
+from scripts.scanner import MarketScanner, PairAnalyzer, PairRaw
 
 
 def _fake_config(exchange: str = "", quote_currency: str = "") -> SimpleNamespace:
@@ -48,11 +48,12 @@ class TestMarketScannerExchangeResolution:
             assert scanner.exchange_name == name
 
     @patch("scripts.scanner.MarketData")
-    def test_falls_back_to_default_when_config_has_no_exchange(
+    def test_raises_when_config_has_no_exchange(
         self, mock_md: Any,
     ) -> None:
-        scanner = MarketScanner(config=_fake_config(exchange=""))
-        assert scanner.exchange_name == EXCHANGE_NAME
+        import pytest
+        with pytest.raises(ValueError, match="no exchange configured"):
+            MarketScanner(config=_fake_config(exchange=""))
 
     @patch("scripts.scanner.MarketData")
     def test_exchange_name_is_lowercased(self, mock_md: Any) -> None:

@@ -368,10 +368,9 @@ class Pipeline:
     #  When ``self.container`` is set, services are used instead.
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _run_scanner() -> None:
+    def _run_scanner(self) -> None:
         from scripts import scanner
-        scanner.main()
+        scanner.main(config=self.config)
         _touch_file("data/scanner_results.json")
 
     def _run_scanner_di(self) -> None:

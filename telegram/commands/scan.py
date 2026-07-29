@@ -20,7 +20,7 @@ class ScanCommand(BaseCommand):
             ctx.services.scanner.run()
         else:
             from scripts import scanner  # noqa: PLC0415
-            scanner.main()
+            scanner.main(config=ctx.config)
 
         elapsed = time.time() - t0
 
