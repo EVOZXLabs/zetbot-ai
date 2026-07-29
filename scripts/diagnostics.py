@@ -110,10 +110,16 @@ def _check_exchange(res: DiagnosticResult) -> None:
         config = load_config()
         res.add("Exchange", "Configured", "PASS", config.exchange)
 
+        from scripts.exchange_providers import get_provider_class
         import ccxt
-        exchange_class = getattr(ccxt, config.exchange, None)
-        if exchange_class is None:
+        try:
+            ccxt_name = get_provider_class(config.exchange)().ccxt_name
+        except KeyError:
             res.add("Exchange", "Available", "FAIL", f"Unknown exchange: {config.exchange}")
+            return
+        exchange_class = getattr(ccxt, ccxt_name, None)
+        if exchange_class is None:
+            res.add("Exchange", "Available", "FAIL", f"CCXT has no exchange: {ccxt_name}")
             return
         res.add("Exchange", "Available", "PASS")
         exchange = exchange_class({"timeout": 5000})

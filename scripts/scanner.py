@@ -1,8 +1,11 @@
 """
 Auto Market Scanner for ZetBot AI
 
-Scans all USDT Spot trading pairs from Binance, calculates technical
-indicators, scores each pair, and ranks by trading opportunity.
+Scans all Spot trading pairs (quoted in the configured quote currency,
+default USDT) from the configured exchange — any of Binance, Bybit,
+Tokocrypto, OKX, Gate, Kucoin, MEXC, or Indodax via EXCHANGE in .env —
+calculates technical indicators, scores each pair, and ranks by
+trading opportunity.
 
 Usage::
 
@@ -32,11 +35,15 @@ from bot.indicators import IndicatorEngine
 #  Config
 # ---------------------------------------------------------------------------
 
-from scripts.app_config import load_config
-
 MIN_CANDLES = 250          # minimum candles required for analysis (must match fetch limit)
 OHLCV_LIMIT = MIN_CANDLES  # fetch this many candles (must match MIN_CANDLES)
 TIMEFRAME = "1h"
+# Fallback only — used when no AppConfig is available (e.g. this module
+# imported directly without a config). MarketScanner otherwise resolves
+# the real exchange from AppConfig.exchange (the EXCHANGE env var), so a
+# single scanner run always follows whatever exchange the user configured
+# instead of always hitting Binance.
+EXCHANGE_NAME = "binance"
 TOP_N = 50
 THREADS = 8
 MIN_VOLUME_24H = 50_000  # skip pairs below $50K daily volume
@@ -331,26 +338,48 @@ def classify_signal(score: float) -> str:
 class PairAnalyzer:
     """Analyze a single trading pair end-to-end.
 
-    Uses a thread-local ccxt exchange instance configured for the
-    target exchange, avoiding a new connection per call while
-    keeping each thread independent.
+    Uses a thread-local ccxt exchange to avoid creating a new
+    connection per call while keeping each thread independent.
     """
 
     _thread_local: Any = None
 
     @classmethod
-    def _get_exchange(cls, exchange_name: str):
-        """Return a thread-local ccxt exchange instance for *exchange_name*."""
+    def _get_exchange(cls, exchange_name: str = EXCHANGE_NAME):
+        """Return a thread-local ccxt instance for *exchange_name*.
+
+        Cached per thread AND per exchange name (a dict on the
+        thread-local, not a single slot) so that the same worker thread
+        can safely be reused across scans of different exchanges (e.g.
+        tests, or the pipeline running twice with a different EXCHANGE
+        env value) without leaking a stale connection.
+
+        Resolves the exchange via ``scripts.exchange_providers`` — the
+        same registry used everywhere else — so aliases like
+        'tokocrypto' (which rides on Binance's ccxt class) are handled
+        consistently instead of a second hardcoded mapping here.
+        """
         import ccxt
         from scripts.exchange_providers import get_provider_class
-        key = f"exchange_{exchange_name}"
+
         if cls._thread_local is None:
             cls._thread_local = threading.local()
-        if not hasattr(cls._thread_local, key):
-            provider_cls = get_provider_class(exchange_name)
-            provider = provider_cls()
-            cls._thread_local.__dict__[key] = provider._get_exchange()
-        return cls._thread_local.__dict__[key]
+        if not hasattr(cls._thread_local, "exchanges"):
+            cls._thread_local.exchanges = {}
+        cache = cls._thread_local.exchanges
+
+        if exchange_name not in cache:
+            ccxt_name = get_provider_class(exchange_name)().ccxt_name
+            exchange_cls = getattr(ccxt, ccxt_name, None)
+            if exchange_cls is None:
+                raise ValueError(
+                    f"CCXT has no exchange '{ccxt_name}' (for '{exchange_name}')"
+                )
+            cache[exchange_name] = exchange_cls({
+                "enableRateLimit": True,
+                "timeout": 15000,
+            })
+        return cache[exchange_name]
 
     @staticmethod
     def _from_ohlcv(pair: PairRaw, raw: list) -> PairAnalysis:
@@ -403,10 +432,8 @@ class PairAnalyzer:
         )
 
     @classmethod
-    def analyze(cls, pair: PairRaw, exchange_name: str = "binance") -> PairAnalysis:
-        """Fetch OHLCV from the CEX (ccxt) for *exchange_name*,
-        calculate indicators, return analysis.
-        """
+    def analyze(cls, pair: PairRaw, exchange_name: str = EXCHANGE_NAME) -> PairAnalysis:
+        """Fetch OHLCV from the CEX (ccxt), calculate indicators, return analysis."""
         try:
             exchange = cls._get_exchange(exchange_name)
             raw = exchange.fetch_ohlcv(
@@ -425,7 +452,7 @@ class PairAnalyzer:
                 volume_ma20=0, highest_high_20=0, lowest_low_20=0,
                 atr_pct=0, relative_volume=0,
                 trend_alignment="", candle_count=0,
-                status="error", error=str(e),
+                status="error", error=f"[{exchange_name}] {e}",
                 venue=pair.venue,
             )
 
@@ -461,30 +488,36 @@ class PairAnalyzer:
 
 
 class MarketScanner:
-    """Orchestrate the multi-pair scan.
+    """Orchestrate the multi-pair scan."""
 
-    *exchange_name* is read from ``AppConfig.exchange`` (the
-    ``EXCHANGE`` env var) and drives every data fetch — markets,
-    tickers, and OHLCV — so the scanner is fully multi-exchange.
-    """
-
-    def __init__(self, exchange_name: str = "binance", threads: int = THREADS, config: Any = None) -> None:
-        self.exchange_name = exchange_name.lower()
+    def __init__(self, threads: int = THREADS, config: Any = None) -> None:
+        if config is None:
+            from scripts.app_config import load_config  # noqa: PLC0415
+            config = load_config()
+        self.config = config
+        # Resolve from AppConfig (EXCHANGE / QUOTE_CURRENCY in .env) with
+        # the module constant only as a last-resort fallback — this is
+        # what lets /scan and /pipeline run against whichever exchange
+        # the user configured instead of always hitting Binance.
+        self.exchange_name: str = (
+            getattr(config, "exchange", "") or EXCHANGE_NAME
+        ).lower()
+        self.quote_currency: str = (
+            getattr(config, "quote_currency", "") or "USDT"
+        ).upper()
         self.md = MarketData(exchange_name=self.exchange_name)
         self.threads = threads
         self.pair_raws: list[PairRaw] = []
-        if config is None:
-            config = load_config()
-        self.config = config
 
     def fetch_markets(self) -> list[PairRaw]:
-        """Fetch and filter all Spot USDT markets from Binance."""
+        """Fetch and filter all Spot markets quoted in ``self.quote_currency``
+        from the configured exchange (``self.exchange_name``)."""
         raw_markets = self.md.exchange.fetch_markets()
         pairs: list[PairRaw] = []
         for m in raw_markets:
             if m.get("spot") is not True:
                 continue
-            if m.get("quote") != "USDT":
+            if m.get("quote") != self.quote_currency:
                 continue
             if m.get("active") is not True:
                 continue
@@ -513,9 +546,11 @@ class MarketScanner:
         total = len(pairs)
         log_interval = max(1, total // 20)
         completed = 0
-        exchange_name = self.exchange_name
         with ThreadPoolExecutor(max_workers=self.threads) as pool:
-            fut_map = {pool.submit(PairAnalyzer.analyze, p, exchange_name): p for p in pairs}
+            fut_map = {
+                pool.submit(PairAnalyzer.analyze, p, self.exchange_name): p
+                for p in pairs
+            }
             for f in as_completed(fut_map):
                 results.append(f.result())
                 completed += 1
@@ -586,12 +621,12 @@ class MarketScanner:
     def run(self) -> tuple[list[PairAnalysis], dict[str, int]]:
         """Full scan pipeline. Returns (scored_pairs, stats dict)."""
         stats: dict[str, int] = {}
-        exchange_name = self.exchange_name
 
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — AUTO MARKET SCANNER")
         print(f"  {'=' * 78}")
-        print(f"  Exchange   : {exchange_name}")
+        print(f"  Exchange   : {self.exchange_name}")
+        print(f"  Quote      : {self.quote_currency}")
         print(f"  Timeframe  : {TIMEFRAME}")
         print(f"  OHLCV limit: {OHLCV_LIMIT}")
         print(f"  Threads    : {self.threads}")
@@ -605,7 +640,7 @@ class MarketScanner:
         stats["total_markets"] = len(all_raw)
         raw_pairs = self.fetch_markets()
         stats["usdt_pairs"] = len(raw_pairs)
-        print(f"{len(raw_pairs)} USDT pairs")
+        print(f"{len(raw_pairs)} {self.quote_currency} pairs")
 
         # 2. Tickers
         print("  [2/4] Fetching tickers … ", end="", flush=True)
@@ -815,7 +850,8 @@ class ScannerReport:
         print(f"  CSV exported : {path}")
 
     @staticmethod
-    def to_json(scored: list[ScoredPair], path: str, exchange_name: str = "binance") -> None:
+    def to_json(scored: list[ScoredPair], path: str,
+                exchange_name: str = EXCHANGE_NAME) -> None:
         """Write all results as JSON."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = {
@@ -830,7 +866,8 @@ class ScannerReport:
         print(f"  JSON export : {path}")
 
     @staticmethod
-    def to_watchlist(scored: list[ScoredPair], path: str, top_n: int = 10, exchange_name: str = "binance") -> None:
+    def to_watchlist(scored: list[ScoredPair], path: str, top_n: int = 10,
+                      exchange_name: str = EXCHANGE_NAME) -> None:
         """Write top-N watchlist as a simple text file."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
@@ -865,13 +902,8 @@ def _fmt_vol(vol: float) -> str:
 
 def main() -> None:
     t0 = time.time()
-    config = load_config()
-    exchange_name = getattr(config, "exchange", "binance")
 
-    scanner = MarketScanner(
-        exchange_name=exchange_name,
-        threads=getattr(config, "scanner_threads", THREADS),
-    )
+    scanner = MarketScanner(threads=THREADS)
     scored, stats = scanner.run()
     total = len(scored)
 
@@ -891,10 +923,10 @@ def main() -> None:
     report.to_csv(scored, csv_path)
 
     json_path = "data/scanner_results.json"
-    report.to_json(scored, json_path, exchange_name=exchange_name)
+    report.to_json(scored, json_path, exchange_name=scanner.exchange_name)
 
     watchlist_path = "data/watchlist.txt"
-    report.to_watchlist(scored, watchlist_path, exchange_name=exchange_name)
+    report.to_watchlist(scored, watchlist_path, exchange_name=scanner.exchange_name)
 
     print(f"\n  Completed at : {datetime.now(timezone.utc).isoformat()}")
     print(f"  Duration     : {elapsed:.1f}s")
