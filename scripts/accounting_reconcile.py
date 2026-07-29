@@ -54,7 +54,10 @@ def _write_json(path: str, data: dict[str, Any]) -> None:
         json.dump(data, f, indent=2, default=str)
 
 
-def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
+def reconcile(
+    logger_obj: logging.Logger | None = None,
+    account_balance: float = 10_000.0,
+) -> dict[str, Any]:
     """Run all reconciliation checks and repairs.
 
     Returns a dict of findings for testing / logging::
@@ -72,6 +75,7 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
         "stale_equity": False,
         "profit_factor_fixed": False,
         "three_writer_drift": False,
+        "fresh_account_initialized": False,
         "repairs_applied": 0,
     }
 
@@ -80,7 +84,41 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
     pos_data = _read_json(_POSITIONS_PATH)
 
     if not state and not pb:
-        log.debug("[RECONCILE] No accounting files found — skipping")
+        # Brand-new account (first run) or right after
+        # scripts/reset_paper_state.py — neither accounting file
+        # exists yet. Previously this was just skipped, which left
+        # /status, /balance and /wallet showing $0.00 and a
+        # nonsensical "-100% all-time" (since the initial_balance
+        # fallback used for the % calc is 10,000 while cash/equity
+        # default to 0 when the file is missing) until the bot's
+        # first full pipeline cycle happened to write these files.
+        # Fund the account immediately instead, so Telegram always
+        # shows accurate numbers from the very first query.
+        log.info(
+            f"[RECONCILE] No accounting files found — initializing "
+            f"fresh account with balance={account_balance:.2f}"
+        )
+        fresh_state = {"initial_balance": account_balance, "balance": account_balance}
+        fresh_pb = {
+            "initial_balance": account_balance,
+            "final_balance": account_balance,
+            "final_equity": account_balance,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+            "total_return_pct": 0.0,
+            "win_rate": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "profit_factor": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+        }
+        _write_json(_STATE_PATH, fresh_state)
+        _write_json(_BALANCE_PATH, fresh_pb)
+        findings["fresh_account_initialized"] = True
+        findings["repairs_applied"] += 1
         return findings
 
     # ------------------------------------------------------------------
@@ -131,65 +169,49 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
     for sym, buy_order in open_by_orders.items():
         pos = pos_by_symbol.get(sym)
         if pos is None or not is_open(pos.get("status")):
-            remaining = (
-                pos.get("remaining_qty", pos.get("quantity", 0.0))
-                if pos else 0.0
+            # Orders say OPEN but positions.json says CLOSED/missing
+            log.warning(
+                f"[RECONCILE] Three-writer drift: {sym} has FILLED BUY "
+                f"(order={buy_order.get('id', '?')}) but positions.json "
+                f"shows status={pos.get('status') if pos else 'MISSING'}"
             )
-            # Only repair positions that still have remaining_qty > 0 —
-            # those are genuinely open but wrongly marked CLOSED.
-            # Positions with remaining_qty == 0 and status CLOSED were
-            # legitimately closed by the paper engine; re-opening them
-            # here would inflate equity with phantom positions.
-            if remaining > 0:
-                log.warning(
-                    f"[RECONCILE] Three-writer drift: {sym} has FILLED BUY "
-                    f"(order={buy_order.get('id', '?')}) but positions.json "
-                    f"shows status={pos.get('status') if pos else 'MISSING'} "
-                    f"remaining_qty={remaining} — repairing"
-                )
-                findings["three_writer_drift"] = True
-                findings["repairs_applied"] += 1
+            findings["three_writer_drift"] = True
+            findings["repairs_applied"] += 1
 
-                if pos is None:
-                    repaired_pos = {
-                        "symbol": sym,
-                        "order_id": buy_order.get("id", ""),
-                        "quantity": buy_order.get("quantity", 0.0),
-                        "remaining_qty": buy_order.get("filled_quantity", 0.0),
-                        "entry_price": buy_order.get("fill_price", 0.0),
-                        "current_price": buy_order.get("fill_price", 0.0),
-                        "unrealized_pnl": 0.0,
-                        "realized_pnl": 0.0,
-                        "total_pnl": 0.0,
-                        "cost_basis": buy_order.get("total_cost", 0.0),
-                        "status": "OPEN",
-                        "opened_at": buy_order.get("filled_at", ""),
-                        "tp1": 0.0,
-                        "tp2": 0.0,
-                        "tp3": 0.0,
-                        "stop_loss": 0.0,
-                        "position_size_usdt": 0.0,
-                    }
-                    pos_list.append(repaired_pos)
-                else:
-                    pos["status"] = "OPEN"
-                    pos["current_price"] = buy_order.get(
-                        "fill_price", pos.get("entry_price", 0.0),
-                    )
-                    pos["remaining_qty"] = buy_order.get(
-                        "filled_quantity", remaining,
-                    )
-                    pos["unrealized_pnl"] = 0.0
-                    pos["realized_pnl"] = 0.0
-                    pos["total_pnl"] = 0.0
+            # Repair positions.json: re-create the position from order data
+            if pos is None:
+                # Build a minimal position record from the order
+                repaired_pos = {
+                    "symbol": sym,
+                    "order_id": buy_order.get("id", ""),
+                    "quantity": buy_order.get("quantity", 0.0),
+                    "remaining_qty": buy_order.get("filled_quantity", 0.0),
+                    "entry_price": buy_order.get("fill_price", 0.0),
+                    "current_price": buy_order.get("fill_price", 0.0),
+                    "unrealized_pnl": 0.0,
+                    "realized_pnl": 0.0,
+                    "total_pnl": 0.0,
+                    "cost_basis": buy_order.get("total_cost", 0.0),
+                    "status": "OPEN",
+                    "opened_at": buy_order.get("filled_at", ""),
+                    "tp1": 0.0,
+                    "tp2": 0.0,
+                    "tp3": 0.0,
+                    "stop_loss": 0.0,
+                    "position_size_usdt": 0.0,
+                }
+                pos_list.append(repaired_pos)
             else:
-                log.warning(
-                    f"[RECONCILE] Three-writer drift (no-op): {sym} "
-                    f"has FILLED BUY (order={buy_order.get('id', '?')}) "
-                    f"but positions.json shows status={pos.get('status') if pos else 'MISSING'} "
-                    f"remaining_qty=0 — position was legitimately closed, "
-                    f"skipping repair"
-                )
+                # Repair: restore position data from the order (price,
+                # quantity, and status) so the canonical accounting
+                # function (which reads positions.json) computes
+                # correct equity.
+                pos["status"] = "OPEN"
+                pos["current_price"] = buy_order.get("fill_price", pos.get("entry_price", 0.0))
+                pos["remaining_qty"] = buy_order.get("filled_quantity", pos.get("quantity", 0.0))
+                pos["unrealized_pnl"] = 0.0
+                pos["realized_pnl"] = 0.0
+                pos["total_pnl"] = 0.0
 
     if open_by_orders:
         log.info(
