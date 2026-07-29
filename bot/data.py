@@ -43,8 +43,9 @@ NORMALIZED_COLUMNS: list[str] = [
 class MarketData:
     """Fetch and validate OHLCV market data from supported exchanges.
 
-    Supports Binance, Bybit, Tokocrypto, OKX, Gate, Kucoin, MEXC, and Indodax spot markets.
-    Data is returned as a pandas DataFrame with normalized column names.
+    Supports Binance, Bybit, Tokocrypto, OKX, Gate, Kucoin, MEXC, and
+    Indodax spot markets. Data is returned as a pandas DataFrame with
+    normalized column names.
     """
 
     def __init__(
@@ -57,7 +58,7 @@ class MarketData:
 
         Args:
             exchange_name: Exchange identifier. One of 'binance', 'bybit',
-                'tokocrypto', 'indodax'.
+                'tokocrypto', 'okx', 'gate', 'kucoin', 'mexc', 'indodax'.
             api_key: API key for authenticated endpoints.
             secret: API secret for authenticated endpoints.
 
