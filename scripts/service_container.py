@@ -78,6 +78,7 @@ class ServiceContainer:
             active=self._config_service.exchange,
             api_key=self._config_service.api_key,
             api_secret=self._config_service.api_secret,
+            quote_currency=self._config_service.quote_currency,
         )
         # Wallet must exist before Metrics: in LIVE mode, MetricsManager
         # needs the wallet to fetch the REAL exchange balance instead of
@@ -105,7 +106,7 @@ class ServiceContainer:
             atr_spike_multiplier=self._config_service.atr_spike_multiplier,
         )
         self._safeguard.set_account_balance(self._config_service.account_balance)
-        self._scanner = _ScannerAdapter(self._config_service)
+        self._scanner = _ScannerAdapter(self._config_service, self._exchange)
         self._strategy = _StrategyAdapter()
         self._risk = _RiskAdapter(self._config_service)
         self._order = OrderManager(
@@ -447,16 +448,41 @@ class _LiveWalletAdapter:
         return dict(self._snapshot())
 
 
+class _ScannerConfigView:
+    """Config view for the scanner that overrides ``.exchange`` with
+    whatever is currently active on the ``ExchangeManager`` — everything
+    else (quote_currency, thresholds, etc.) passes through unchanged.
+
+    This is what makes the Telegram ``/exchange`` command actually
+    redirect scanning, not just order execution: without this, the
+    scanner always re-read ``EXCHANGE`` from ``.env`` at bootstrap and
+    never saw a runtime switch.
+    """
+
+    def __init__(self, config: IConfigService, exchange_manager: ExchangeManager) -> None:
+        self._config = config
+        self._exchange_manager = exchange_manager
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "exchange":
+            return self._exchange_manager.name
+        if name == "quote_currency":
+            return self._exchange_manager.quote_currency
+        return getattr(self._config, name)
+
+
 class _ScannerAdapter:
     """Wraps scripts.scanner as IScanner."""
 
-    def __init__(self, config: IConfigService) -> None:
+    def __init__(self, config: IConfigService, exchange_manager: ExchangeManager) -> None:
         self._config = config
+        self._exchange_manager = exchange_manager
 
     def run(self) -> dict[str, Any]:
         from scripts import scanner  # noqa: PLC0415
+        scanner_config = _ScannerConfigView(self._config, self._exchange_manager)
         try:
-            scanner.main()
+            scanner.main(config=scanner_config)
         except RuntimeError as exc:
             # "cannot schedule new futures after interpreter shutdown"
             # happens when shutdown is requested while scanner threads

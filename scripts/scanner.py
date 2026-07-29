@@ -900,10 +900,10 @@ def _fmt_vol(vol: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main(config: Any = None) -> None:
     t0 = time.time()
 
-    scanner = MarketScanner(threads=THREADS)
+    scanner = MarketScanner(threads=THREADS, config=config)
     scored, stats = scanner.run()
     total = len(scored)
 
