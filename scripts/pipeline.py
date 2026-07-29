@@ -422,6 +422,9 @@ class Pipeline:
             balance=balance,
             equity=equity,
             existing_exposure=existing_exposure,
+            risk_per_trade=self.config.max_risk_per_trade_pct,
+            max_daily_loss=self.config.max_daily_loss_pct,
+            max_positions=self.config.max_positions,
             mm_config=mm_config,
         )
         results = manager.run()
@@ -467,6 +470,11 @@ class Pipeline:
     def _run_paper_di(self) -> None:
         from scripts import paper_trading_engine
 
+        is_live = (
+            self.container is not None
+            and self.container.order.mode == "LIVE"
+        )
+
         # Check safety guards — always run reconciliation (TP/SL, PnL),
         # but only allow new positions when the guard passes.
         allow_new = True
@@ -476,17 +484,19 @@ class Pipeline:
                 self.logger.info(f"Pipeline paper new-order guard: {reason}")
                 allow_new = False
 
-        paper_trading_engine.main(notifier=self._notifier, allow_new_positions=allow_new)
+        # In LIVE mode the paper engine runs for position tracking and
+        # reconciliation only — never creates phantom paper positions.
+        # Real positions are tracked on the exchange, not in the paper wallet.
+        paper_allow_new = allow_new and not is_live
+        paper_trading_engine.main(
+            notifier=self._notifier,
+            allow_new_positions=paper_allow_new,
+        )
 
         # ── LIVE mode: submit real exchange orders ──────────────────
-        # After the paper engine validates and creates simulated
-        # positions, we must also execute real orders on the exchange.
-        # Only submit when new positions were allowed (safety guard OK).
-        if (
-            allow_new
-            and self.container is not None
-            and self.container.order.mode == "LIVE"
-        ):
+        # Independent of the paper engine wallet. Real orders go through
+        # OrderManager which has its own safeguard check inside execute().
+        if is_live and self.container.order.is_live_enabled():
             self._execute_live_plans()
 
     def _execute_live_plans(self) -> None:

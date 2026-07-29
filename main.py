@@ -769,43 +769,44 @@ def _monitor_positions(
     )
             pos["closure_notified"] = True
 
-            # LIVE mode: submit market sell order to the exchange
-            # (safety net even when auto_protect is enabled — protects
-            # against protection-creation failure or orphan positions)
+            # LIVE mode: first cancel protection orders, then submit
+            # a market sell.  Cancelling BEFORE the sell prevents a
+            # double-fill race where both the protection's stop-loss
+            # order and our market sell fill simultaneously, creating
+            # an unintended short position.
             if container is not None and hasattr(container, "order"):
                 mode = getattr(container.order, "mode", "PAPER")
-                if mode == "LIVE":
-                    live_enabled = getattr(container.order, "is_live_enabled", lambda: False)()
-                    if live_enabled:
-                        sell_qty = new_pos.remaining_qty or pos.get("remaining_qty", pos.get("quantity", 0))
-                        if sell_qty > 0:
-                            try:
-                                sell_req = OrderRequest(
-                                    symbol=sym,
-                                    side="SELL",
-                                    type="MARKET",
-                                    amount=sell_qty,
-                                    metadata={"source": "monitor", "bypass_risk": True},
-                                )
-                                sell_result = container.order.execute(sell_req)
-                                r_status = sell_result.status if hasattr(sell_result, "status") else getattr(sell_result, "status", "?")
-                                logger.info(
-                                    f"LIVE closure sell for {sym}: {r_status}"
-                                )
-                            except Exception as exc:
-                                logger.error(
-                                    f"LIVE closure sell failed for {sym}: {exc}"
-                                )
+                if mode == "LIVE" and container.order.is_live_enabled():
+                    # Cancel existing protection orders first
+                    try:
+                        pm = ProtectionManager(
+                            container.exchange,
+                            getattr(container, "_config", None),
+                        )
+                        pm.cancel_protection(sym, reason="monitor_closure")
+                    except Exception as exc:
+                        logger.debug(f"Cancel protection for {sym}: {exc}")
 
-                        # Cancel any existing protection orders
+                    # Then submit a market sell as the safety net
+                    sell_qty = new_pos.remaining_qty or pos.get("remaining_qty", pos.get("quantity", 0))
+                    if sell_qty > 0:
                         try:
-                            pm = ProtectionManager(
-                                container.exchange,
-                                getattr(container, "_config", None),
+                            sell_req = OrderRequest(
+                                symbol=sym,
+                                side="SELL",
+                                type="MARKET",
+                                amount=sell_qty,
+                                metadata={"source": "monitor", "bypass_risk": True},
                             )
-                            pm.cancel_protection(sym, reason="monitor_closure")
+                            sell_result = container.order.execute(sell_req)
+                            r_status = sell_result.status if hasattr(sell_result, "status") else getattr(sell_result, "status", "?")
+                            logger.info(
+                                f"LIVE closure sell for {sym}: {r_status}"
+                            )
                         except Exception as exc:
-                            logger.debug(f"Cancel protection for {sym}: {exc}")
+                            logger.error(
+                                f"LIVE closure sell failed for {sym}: {exc}"
+                            )
 
         if changed:
             try:
