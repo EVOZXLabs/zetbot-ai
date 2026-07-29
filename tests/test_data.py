@@ -8,7 +8,9 @@ import pytest
 
 from bot.data import NORMALIZED_COLUMNS, MarketData
 
-SUPPORTED_EXCHANGES = ("binance", "bybit", "tokocrypto")
+SUPPORTED_EXCHANGES = (
+    "binance", "bybit", "tokocrypto", "okx", "gate", "kucoin", "mexc", "indodax",
+)
 
 
 def test_invalid_exchange_raises_error() -> None:

@@ -332,6 +332,43 @@ class TestScannerAdapter:
             if existed:
                 os.rename("data/scanner_results.json.bak", "data/scanner_results.json")
 
+    @patch("scripts.scanner.main")
+    def test_run_passes_active_exchange_to_scanner(self, mock_main: Any) -> None:
+        """Regression guard: the Telegram `/exchange` command switches
+        ExchangeManager's active exchange at runtime — the scanner MUST
+        see that switch instead of always re-reading `.env`'s original
+        EXCHANGE, or a switch to e.g. Indodax would silently keep
+        scanning Binance."""
+        c = _make_container()
+        c.exchange.set_active("okx")
+        c.scanner.run()
+
+        assert mock_main.call_count == 1
+        passed_config = mock_main.call_args.kwargs["config"]
+        assert passed_config.exchange == "okx"
+
+    @patch("scripts.scanner.main")
+    def test_run_passes_active_quote_currency_to_scanner(self, mock_main: Any) -> None:
+        c = _make_container()
+        c.exchange.set_active("indodax")
+        c.exchange.set_quote_currency("IDR")
+        c.scanner.run()
+
+        passed_config = mock_main.call_args.kwargs["config"]
+        assert passed_config.exchange == "indodax"
+        assert passed_config.quote_currency == "IDR"
+
+    @patch("scripts.scanner.main")
+    def test_run_config_falls_through_for_other_fields(self, mock_main: Any) -> None:
+        """Fields other than exchange/quote_currency must still come
+        from the real AppConfig, not be silently dropped."""
+        c = _make_container()
+        c.scanner.run()
+
+        passed_config = mock_main.call_args.kwargs["config"]
+        assert passed_config.timeframe == "1h"
+        assert passed_config.scanner_threads == 5
+
 
 class TestStrategyAdapter:
     """IStrategyManager adapter."""

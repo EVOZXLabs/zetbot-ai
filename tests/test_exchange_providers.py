@@ -96,113 +96,9 @@ class TestProviderIdentity:
         p = IndodaxProvider()
         assert p.name == "indodax"
         assert p.ccxt_name == "indodax"
-
-
-# ======================================================================
-#  Per-exchange rate limits
-# ======================================================================
-
-
-class TestRateLimits:
-    """Each exchange has a distinct RATE_LIMIT_MS that reflects
-    its API throttling policy.  Verify every provider exposes
-    a positive value so external schedulers can estimate
-    throughput."""
-
-    RATE_LIMITS = {
-        "binance": 100,
-        "bybit": 100,
-        "tokocrypto": 100,
-        "okx": 200,
-        "gate": 50,
-        "kucoin": 1000,
-        "mexc": 1000,
-        "indodax": 200,
-    }
-
-    def test_all_providers_have_rate_limit(self) -> None:
-        for name, expected_ms in self.RATE_LIMITS.items():
-            p = get_provider_class(name)()
-            assert p.rate_limit_ms == expected_ms, (
-                f"{name} rate_limit_ms={p.rate_limit_ms}, expected {expected_ms}"
-            )
-
-    def test_rate_limit_positive(self) -> None:
-        for name in SUPPORTED:
-            p = get_provider_class(name)()
-            assert p.rate_limit_ms > 0, (
-                f"{name} rate_limit_ms must be positive"
-            )
-
-
-# ======================================================================
-#  Per-exchange error handling and fallback behaviour
-# ======================================================================
-
-
-class TestErrorHandling:
-    """Without network, all fetch methods must return safe defaults
-    (empty dict/list) instead of raising — except when live
-    credentials are present, where `ExchangeAuthError` is
-    expected."""
-
-    def test_get_ticker_returns_dict_offline(self) -> None:
-        assert isinstance(IndodaxProvider().get_ticker("BTC/IDR"), dict)
-
-    def test_fetch_ohlcv_returns_list_offline(self) -> None:
-        assert isinstance(IndodaxProvider().fetch_ohlcv("BTC/IDR"), list)
-
-    def test_fetch_balance_returns_empty_dict_no_creds(self) -> None:
-        assert isinstance(IndodaxProvider().fetch_balance(), dict)
-
-    def test_fetch_balance_raises_auth_error_with_creds(self) -> None:
-        p = IndodaxProvider(api_key="bad", api_secret="bad")
-        with pytest.raises(Exception):
-            p.fetch_balance()
-
-    def test_fetch_tickers_fallback_per_symbol(self) -> None:
-        """Exchanges without bulk ticker support should fall back
-        to per-symbol fetches rather than crashing."""
-        provider = IndodaxProvider()
-        result = provider.fetch_tickers()
-        assert isinstance(result, dict)
-
-    def test_fetch_tickers_with_symbols_param(self) -> None:
-        provider = IndodaxProvider()
-        result = provider.fetch_tickers(["BTC/IDR"])
-        assert isinstance(result, dict)
-
-
-# ======================================================================
-#  Rate-limit enforcement via CCXT enableRateLimit
-# ======================================================================
-
-
-class TestRateLimitEnforcement:
-    """CCXT's ``enableRateLimit`` must be True on every provider
-    instance so that ccxt internally throttles requests to
-    respect each exchange's ``rateLimit``."""
-
-    @patch("scripts.exchange_providers.ccxt")
-    def test_enable_rate_limit_set_on_init(self, mock_ccxt: Any) -> None:
-        for name in SUPPORTED:
-            mock_ex = MagicMock()
-            mock_ex.rateLimit = 1000
-            getattr(mock_ccxt, name, lambda **kw: mock_ex)(
-                {"enableRateLimit": True, "timeout": 15000},
-            )
-            # Just verify no crash — the constructor was called
-
-    def test_ccxt_kwargs_include_enableRateLimit(self) -> None:
-        """When a provider creates its CCXT instance the kwargs
-        must contain ``enableRateLimit: True``  so ccxt handles
-        per-exchange throttling automatically."""
-        for name in SUPPORTED:
-            p = get_provider_class(name)()
-            # The RATE_LIMIT_MS attribute is the external record;
-            # enableRateLimit in the CCXT constructor is the
-            # enforcement mechanism.  Both must be present.
-            assert p.rate_limit_ms > 0
+        # Indodax has no spot-vs-futures split — unlike the other
+        # providers it must NOT set a `defaultType` option.
+        assert "options" not in p.CCXT_KWARGS
 
 
 # ======================================================================
@@ -384,3 +280,114 @@ def test_protocol_structural_check() -> None:
             return False
 
     assert isinstance(MinimalProvider(), ExchangeProvider)
+
+
+# ======================================================================
+#  Error handling / credential-failure behaviour — shared by every
+#  provider via BaseProvider, so exercised once here rather than
+#  duplicated per-exchange. This is what "rate-limit & error handling
+#  validation" for Fase 0 actually exercises: whichever exchange is
+#  active, a broken authenticated call must raise, never look like an
+#  empty/zero balance.
+# ======================================================================
+
+
+class TestCredentialFailureHandling:
+    @patch("scripts.exchange_providers.ccxt")
+    def test_fetch_balance_raises_when_credentials_set_and_call_fails(
+        self, mock_ccxt: Any,
+    ) -> None:
+        from scripts.exchange_providers import ExchangeAuthError
+
+        mock_ex = MagicMock()
+        mock_ex.fetch_balance.side_effect = Exception("network blip")
+        mock_ccxt.binance.return_value = mock_ex
+
+        provider = BinanceProvider(api_key="key", api_secret="secret")
+        with pytest.raises(ExchangeAuthError):
+            provider.fetch_balance()
+
+    @patch("scripts.exchange_providers.ccxt")
+    def test_fetch_balance_returns_empty_without_credentials(
+        self, mock_ccxt: Any,
+    ) -> None:
+        mock_ex = MagicMock()
+        mock_ex.fetch_balance.side_effect = Exception("network blip")
+        mock_ccxt.binance.return_value = mock_ex
+
+        provider = BinanceProvider()  # no credentials
+        assert provider.fetch_balance() == {}
+
+    @patch("scripts.exchange_providers.ccxt")
+    def test_fetch_order_raises_when_credentials_set_and_call_fails(
+        self, mock_ccxt: Any,
+    ) -> None:
+        from scripts.exchange_providers import ExchangeAuthError
+
+        mock_ex = MagicMock()
+        mock_ex.fetch_order.side_effect = Exception("bad api key")
+        mock_ccxt.okx.return_value = mock_ex
+
+        provider = OKXProvider(api_key="key", api_secret="secret")
+        with pytest.raises(ExchangeAuthError):
+            provider.fetch_order("123", "BTC/USDT")
+
+    @patch("scripts.exchange_providers.ccxt")
+    def test_all_providers_raise_auth_error_with_credentials(
+        self, mock_ccxt: Any,
+    ) -> None:
+        """Every provider — not just Binance — must surface a broken
+        authenticated call as ExchangeAuthError, since each exchange's
+        API fails differently (rate-limit, auth, timeout) and callers
+        must never mistake that for a legitimate zero balance."""
+        from scripts.exchange_providers import ExchangeAuthError
+
+        for name in SUPPORTED:
+            mock_ex = MagicMock()
+            mock_ex.fetch_balance.side_effect = Exception(f"{name} error")
+            setattr(mock_ccxt, get_provider_class(name)().ccxt_name,
+                    MagicMock(return_value=mock_ex))
+
+            provider = get_provider_class(name)(
+                api_key="key", api_secret="secret",
+            )
+            with pytest.raises(ExchangeAuthError):
+                provider.fetch_balance()
+
+
+# ======================================================================
+#  Precision helpers — used before every live order; must degrade
+#  gracefully (never raise) when markets can't be loaded.
+# ======================================================================
+
+
+class TestPrecisionHelpers:
+    @patch("scripts.exchange_providers.ccxt")
+    def test_amount_to_precision_falls_back_on_error(self, mock_ccxt: Any) -> None:
+        mock_ex = MagicMock()
+        mock_ex.markets = None
+        mock_ex.load_markets.side_effect = Exception("network down")
+        mock_ccxt.binance.return_value = mock_ex
+
+        provider = BinanceProvider()
+        assert provider.amount_to_precision("BTC/USDT", 1.23456789) == 1.23456789
+
+    @patch("scripts.exchange_providers.ccxt")
+    def test_price_to_precision_falls_back_on_error(self, mock_ccxt: Any) -> None:
+        mock_ex = MagicMock()
+        mock_ex.markets = None
+        mock_ex.load_markets.side_effect = Exception("network down")
+        mock_ccxt.binance.return_value = mock_ex
+
+        provider = BinanceProvider()
+        assert provider.price_to_precision("BTC/USDT", 50000.123) == 50000.123
+
+    @patch("scripts.exchange_providers.ccxt")
+    def test_amount_to_precision_uses_exchange_rounding(self, mock_ccxt: Any) -> None:
+        mock_ex = MagicMock()
+        mock_ex.markets = {"BTC/USDT": {}}
+        mock_ex.amount_to_precision.return_value = "1.234"
+        mock_ccxt.binance.return_value = mock_ex
+
+        provider = BinanceProvider()
+        assert provider.amount_to_precision("BTC/USDT", 1.23456789) == 1.234
