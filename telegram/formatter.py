@@ -18,11 +18,13 @@ def link(text: str, url: str) -> str:
     return f"[{text}]({url})"
 
 
-def fmt_balance(value: float) -> str:
-    return f"${value:,.2f}"
+def fmt_balance(value: float, currency: str = "USDT") -> str:
+    return f"{value:,.2f} {currency}"
 
 
-def fmt_pnl(value: float) -> str:
+def fmt_pnl(value: float, currency: str = "") -> str:
+    if currency:
+        return f"{value:+,.2f} {currency}"
     return f"{value:+,.2f}"
 
 
@@ -114,14 +116,14 @@ def fmt_holding(seconds: float) -> str:
     return f"{days}d" if hours == 0 else f"{days}d {hours:02d}h"
 
 
-def fmt_compact_number(value: float) -> str:
+def fmt_compact_number(value: float, currency: str = "USDT") -> str:
     if abs(value) >= 1_000_000_000:
-        return f"${value / 1_000_000_000:.2f}B"
+        return f"{value / 1_000_000_000:.2f}B {currency}"
     if abs(value) >= 1_000_000:
-        return f"${value / 1_000_000:.2f}M"
+        return f"{value / 1_000_000:.2f}M {currency}"
     if abs(value) >= 1_000:
-        return f"${value / 1_000:.2f}K"
-    return f"${value:.2f}"
+        return f"{value / 1_000:.2f}K {currency}"
+    return f"{value:.2f} {currency}"
 
 
 def fmt_pf(value: float) -> str:

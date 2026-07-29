@@ -1,6 +1,7 @@
 import os
 
 from telegram.base_command import BaseCommand, CommandMeta
+from telegram.formatter import fmt_balance, fmt_pnl
 from telegram.ui import (
     compact_header, wib_now, progress_bar, exposure_bar,
     detail_block, build_message,
@@ -109,15 +110,17 @@ class StatusCommand(BaseCommand):
         trading_label = "Paused" if paused else "Active"
         today_emoji = "🟢" if today_pnl >= 0 else "🔴"
 
+        quote = getattr(ctx.services.config, "quote_currency", "USDT") if ctx.services else "USDT"
+
         # One glance answers "is it working and how's it doing" — the
         # rest (exposure %, raw health score, pipeline state) is
         # secondary and lives in the collapsible breakdown below.
         return build_message(
             compact_header(),
             f"🟢 *ONLINE* — trading {trading_label}\n"
-            f"Total Balance ${eq:,.2f} · Cash ${bal:,.2f}",
+            f"Total Balance {fmt_balance(eq, quote)} · Cash {fmt_balance(bal, quote)}",
             f"Positions: {pos_label}\n"
-            f"Today {today_emoji} ${today_pnl:+,.2f} · Next scan {next_scan_str}",
+            f"Today {today_emoji} {fmt_pnl(today_pnl, quote)} · Next scan {next_scan_str}",
             detail_block(
                 [
                     f"Pipeline    {pipeline_status}",

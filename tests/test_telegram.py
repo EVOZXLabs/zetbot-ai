@@ -459,7 +459,7 @@ class TestTradeNotificationRegression:
         text = mock_send.call_args[0][0]
         assert "+150.00" in text
         assert "+2.00%" in text
-        assert "$+150" in text
+        assert "USDT" in text
 
     def test_losing_trade_shows_negative_pnl(self) -> None:
         _enable_telegram()

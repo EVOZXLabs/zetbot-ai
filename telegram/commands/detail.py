@@ -154,7 +154,8 @@ class DetailCommand(BaseCommand):
 
         # Volume
         if volume:
-            blocks.append(f"📊 24h Volume\n${volume:,.0f}")
+            quote = symbol.split("/")[1] if "/" in symbol else "USDT"
+            blocks.append(f"📊 24h Volume\n{volume:,.0f} {quote}")
 
         blocks.append(f"🕐 {wib_now()}")
 

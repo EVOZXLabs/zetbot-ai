@@ -1,4 +1,5 @@
 from telegram.base_command import BaseCommand, CommandMeta
+from telegram.formatter import fmt_balance, fmt_pnl
 from telegram.ui import (
     compact_header, pnl_emoji, exposure_bar, progress_bar,
     detail_block, note, build_message,
@@ -94,13 +95,14 @@ class WalletCommand(BaseCommand):
         if isinstance(d, str):
             return d  # "no data yet" message
 
+        quote = getattr(ctx.services.config, "quote_currency", "USDT") if ctx.services else "USDT"
         today_emoji = "🟢" if d["today_pnl"] >= 0 else "🔴"
 
         blocks = [
             compact_header(),
-            f"👛 *Wallet* — ${d['total_balance']:,.2f}\n"
-            f"Today {today_emoji} ${d['today_pnl']:+,.2f} · "
-            f"{pnl_emoji(d['net_pnl'])} {d['net_pnl']:+,.2f} "
+            f"👛 *Wallet* — {fmt_balance(d['total_balance'], quote)}\n"
+            f"Today {today_emoji} {fmt_pnl(d['today_pnl'], quote)} · "
+            f"{pnl_emoji(d['net_pnl'])} {fmt_pnl(d['net_pnl'], quote)} "
             f"({d['total_return_pct']:+.2f}%) all-time",
             f"In open trades {exposure_bar(d['in_positions_pct'])}\n"
             f"Win rate {progress_bar(d['win_rate'], 100, 10)} "
@@ -112,11 +114,11 @@ class WalletCommand(BaseCommand):
             blocks.append(
                 detail_block(
                     [
-                        f"Cash (idle)      ${d['cash']:,.2f}",
-                        f"Open trades      ${d['pos_value']:,.2f}",
-                        f"Closed P&L       {d['realized']:+,.2f}",
-                        f"Open P&L         {d['unrealized']:+,.2f}",
-                        f"Total Balance    ${d['total_balance']:,.2f}",
+                        f"Cash (idle)      {fmt_balance(d['cash'], quote)}",
+                        f"Open trades      {fmt_balance(d['pos_value'], quote)}",
+                        f"Closed P&L       {fmt_pnl(d['realized'], quote)}",
+                        f"Open P&L         {fmt_pnl(d['unrealized'], quote)}",
+                        f"Total Balance    {fmt_balance(d['total_balance'], quote)}",
                         f"In open trades   {d['in_positions_pct']:.1f}%",
                     ],
                     label="Full breakdown",

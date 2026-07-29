@@ -52,7 +52,7 @@ MAX_OPEN_POSITIONS = MM_MAX_OPEN_POSITIONS            # default mode: RISK_PERCE
 MONEY_MANAGEMENT_MODE = MM_DEFAULT_MODE.value
 MIN_RR = 1.5                        # minimum acceptable risk-reward
 MAX_RR = 5.0                        # cap to avoid unrealistic targets
-MIN_POSITION_SIZE_USD = 10.0        # smallest trade value — reflects real
+MIN_POSITION_SIZE_USDT = 10.0       # smallest trade value — reflects real
                                      # exchange minimum notional, not an
                                      # arbitrary cutoff. Accounts too small
                                      # to clear this at the configured
@@ -314,7 +314,7 @@ class TradeValidator:
         self,
         min_rr: float = MIN_RR,
         max_rr: float = MAX_RR,
-        min_pos_usd: float = MIN_POSITION_SIZE_USD,
+        min_pos_usd: float = MIN_POSITION_SIZE_USDT,
         max_atr: float = MAX_ATR_PCT,
         min_vol: float = MIN_VOLUME_24H,
         min_prob: float = MIN_PROBABILITY,
@@ -354,7 +354,7 @@ class TradeValidator:
         # 3. Volume
         if scanner.volume_24h < self.min_vol:
             reasons.append(
-                f"Volume ${scanner.volume_24h:,.0f} < ${self.min_vol:,.0f}"
+                f"Volume {scanner.volume_24h:,.0f} USDT < {self.min_vol:,.0f} USDT"
             )
 
         # 4. ATR volatility
@@ -370,7 +370,7 @@ class TradeValidator:
         # 6. Position size
         if position_value < self.min_pos_usd:
             reasons.append(
-                f"Position ${position_value:,.0f} < ${self.min_pos_usd:,.0f}"
+                f"Position {position_value:,.0f} USDT < {self.min_pos_usd:,.0f} USDT"
             )
 
         # 7. Max open positions
@@ -639,20 +639,20 @@ class RiskManager:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PROFESSIONAL RISK MANAGER")
         print(f"  {'=' * 78}")
-        print(f"  Balance          : ${self.balance:>8,.2f}")
+        print(f"  Balance          : {self.balance:>8,.2f} USDT")
         print(f"  Money Mgmt mode  : {MONEY_MANAGEMENT_MODE}")
         print(f"  Risk/trade       : {self.risk_per_trade:>5.1f}%  "
-              f"(${self.balance * self.risk_per_trade / 100:>7,.2f})")
+              f"({self.balance * self.risk_per_trade / 100:>7,.2f} USDT)")
         pct_denom = self.balance if self.balance else self.equity
         print(f"  Max daily loss   : "
               f"{self.max_daily_loss_amt / pct_denom * 100 if pct_denom else 0.0:>5.1f}%  "
-              f"(${self.max_daily_loss_amt:>7,.2f})")
+              f"({self.max_daily_loss_amt:>7,.2f} USDT)")
         print(f"  Max positions    : {self.max_positions}")
-        print(f"  Equity           : ${self.equity:>8,.2f}")
-        print(f"  Existing exposure: ${self._existing_exposure:>8,.2f}  "
+        print(f"  Equity           : {self.equity:>8,.2f} USDT")
+        print(f"  Existing exposure: {self._existing_exposure:>8,.2f} USDT  "
               f"({self._existing_exposure / self.equity * 100.0 if self.equity else 0.0:>5.1f}%)")
         print(f"  Max exposure cap : {self.max_position_size_pct * 100:>5.1f}%  "
-              f"(${self.equity * self.max_position_size_pct:>7,.2f})")
+              f"({self.equity * self.max_position_size_pct:>7,.2f} USDT)")
         print(f"  Min R:R          : {MIN_RR}")
         print(f"  Min probability  : {MIN_PROBABILITY:.0f}%")
         print()
@@ -769,7 +769,7 @@ class RiskManager:
                 self._used_capital += pos_value
                 print(f"    APPROVED {dec.symbol:>12s}  "
                       f"R:R {rr_for_validation:.2f}  "
-                      f"${pos_value:>7,.2f}")
+                      f"{pos_value:>7,.2f} USDT")
             else:
                 print(f"    {approval:>8s} {dec.symbol:>12s}  {reason}")
 
@@ -831,11 +831,11 @@ class RiskManager:
 
             print(f"  Approved Trade Summary:")
             print(f"    Avg R:R          : {avg_rr:.2f}")
-            print(f"    Avg Position     : ${avg_pos:>8,.2f}")
-            print(f"    Largest Position : ${largest:>8,.2f}")
-            print(f"    Smallest Position: ${smallest:>8,.2f}")
-            print(f"    Total Capital    : ${total_capital:>9,.2f}")
-            print(f"    Total Risk       : ${total_risk:>9,.2f}")
+            print(f"    Avg Position     : {avg_pos:>8,.2f} USDT")
+            print(f"    Largest Position : {largest:>8,.2f} USDT")
+            print(f"    Smallest Position: {smallest:>8,.2f} USDT")
+            print(f"    Total Capital    : {total_capital:>9,.2f} USDT")
+            print(f"    Total Risk       : {total_risk:>9,.2f} USDT")
             print()
 
         print(f"  Execution time   : {elapsed:.2f}s")
@@ -855,7 +855,7 @@ class RiskManager:
 
             approved.sort(key=lambda r: r.probability, reverse=True)
             for i, r in enumerate(approved[:10], 1):
-                size_str = f"${r.position_value:,.0f}"
+                size_str = f"{r.position_value:,.0f} USDT"
                 print(
                     f"  {i:3d} {r.symbol:>12s} {r.probability:6.1f} "
                     f"{size_str:>10s} {r.entry_price:>10.4f} "

@@ -453,7 +453,7 @@ class PaperTradingEngine:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PAPER TRADING ENGINE")
         print(f"  {'=' * 78}")
-        print(f"  Initial Balance : ${INITIAL_BALANCE:>8,.2f}")
+        print(f"  Initial Balance : {INITIAL_BALANCE:>8,.2f} USDT")
         print(f"  Taker Fee       : {TAKER_FEE * 100:.2f}%")
         print(f"  Slippage        : {SLIPPAGE_BPS} bps")
         print()
@@ -608,7 +608,7 @@ class PaperTradingEngine:
 
             qty = math.floor(max_affordable * 10000) / 10000
             print(f"    SCALED {symbol}: {plan_qty:.2f} -> {qty:.2f} units "
-                  f"(free=${self.wallet.free_balance:,.2f})")
+                  f"(free={self.wallet.free_balance:,.2f} USDT)")
         else:
             qty = plan_qty
 
@@ -892,11 +892,11 @@ class PaperTradingEngine:
         print(f"  {'=' * 78}")
         print(f"  PAPER TRADING ENGINE — RESULTS")
         print(f"  {'=' * 78}")
-        print(f"  USDT Balance     : ${m.get('final_balance', 0):>8,.2f}")
-        print(f"  Equity           : ${m.get('final_equity', 0):>8,.2f}")
-        print(f"  Realized PnL     : ${m.get('realized_pnl', 0):>+8,.2f}")
-        print(f"  Unrealized PnL   : ${m.get('unrealized_pnl', 0):>+8,.2f}")
-        print(f"  Net PnL          : ${m.get('net_pnl', 0):>+8,.2f}")
+        print(f"  USDT Balance     : {m.get('final_balance', 0):>8,.2f} USDT")
+        print(f"  Equity           : {m.get('final_equity', 0):>8,.2f} USDT")
+        print(f"  Realized PnL     : {m.get('realized_pnl', 0):>+8,.2f} USDT")
+        print(f"  Unrealized PnL   : {m.get('unrealized_pnl', 0):>+8,.2f} USDT")
+        print(f"  Net PnL          : {m.get('net_pnl', 0):>+8,.2f} USDT")
         print(f"  Return           : {m.get('total_return_pct', 0):>+7.2f}%")
         print(f"  Open Positions   : {open_pos}")
         print(f"  Closed Positions : {closed_pos}")
@@ -905,7 +905,7 @@ class PaperTradingEngine:
             print(f"  Cancelled Orders : {len(cancelled)}")
         print(f"  Win Rate         : {m.get('win_rate', 0):.1f}%")
         print(f"  Profit Factor    : {_fmt_pf(m.get('profit_factor', 0))}")
-        print(f"  Max Drawdown     : ${m.get('max_drawdown', 0):>8,.2f} "
+        print(f"  Max Drawdown     : {m.get('max_drawdown', 0):>8,.2f} USDT "
               f"({m.get('max_drawdown_pct', 0):.2f}%)")
         print(f"  Execution Time   : {elapsed:.2f}s")
         print(f"  {'=' * 78}")
@@ -927,7 +927,7 @@ class PaperTradingEngine:
 
             hdr = (
         f"  {'#':>4s} {'Pair':>12s} {'Side':>5s} "
-        f"{'PnL $':>10s} {'PnL%':>7s} "
+        f"{'PnL':>10s} {'PnL%':>7s} "
         f"{'Entry':>10s} {'Exit':>10s} {'Fees':>7s}"
         )
 

@@ -222,7 +222,8 @@ class Notifier:
 
         Returns True on success, False otherwise.
         """
-        logger.info("[TG] Sending notification: POSITION_CLOSED %s (PnL: $%.2f)", symbol, pnl)
+        quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
+        logger.info("[TG] Sending notification: POSITION_CLOSED %s (PnL: %.2f USDT)", symbol, pnl)
         try:
             from telegram.ui import (
                 compact_header, wib_now, pnl_emoji,
@@ -257,8 +258,8 @@ class Notifier:
             text = build_message(
                 compact_header(),
                 f"{result_emoji} *POSITION CLOSED — {title}*\n"
-                f"{pnl_label} ${abs(pnl):,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
-                f"🧠 AI Insight: {insight}\nBalance now ${balance:,.2f}",
+                f"{pnl_label} {abs(pnl):,.2f} {quote} ({roi_pct:+.2f}%) · Held {holding_str}",
+                f"🧠 AI Insight: {insight}\nBalance now {balance:,.2f} {quote}",
                 detail_block(
                     [
                         f"Entry  {fp(entry_price)}",
@@ -288,6 +289,7 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, detail_block, build_message
             from telegram.formatter import fmt_price as fp, fmt_holding
 
+            quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
             if holding_time is None:
                 holding_time = timedelta()
             holding_str = fmt_holding(holding_time.total_seconds())
@@ -295,7 +297,7 @@ class Notifier:
             text = build_message(
                 compact_header(),
                 f"🎯 *TAKE PROFIT HIT — {symbol}*\n"
-                f"Profit ${profit:+,.2f} · Held {holding_str}",
+                f"Profit {profit:+,.2f} {quote} · Held {holding_str}",
                 detail_block(
                     [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],
                     label="Trade details",
@@ -322,6 +324,7 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, detail_block, build_message
             from telegram.formatter import fmt_price as fp, fmt_holding
 
+            quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
             if holding_time is None:
                 holding_time = timedelta()
             holding_str = fmt_holding(holding_time.total_seconds())
@@ -329,7 +332,7 @@ class Notifier:
             text = build_message(
                 compact_header(),
                 f"🛑 *STOP LOSS HIT — {symbol}*\n"
-                f"Loss ${loss:+,.2f} · Held {holding_str}",
+                f"Loss {loss:+,.2f} {quote} · Held {holding_str}",
                 detail_block(
                     [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],
                     label="Trade details",
@@ -380,7 +383,7 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, build_message
 
             where = " • ".join(p for p in (symbol, exchange, timeframe) if p)
-            bal_line = f"\nTotal ${equity:,.2f} · Cash ${balance:,.2f}" if equity > 0 else ""
+            bal_line = f"\nTotal {equity:,.2f} USDT · Cash {balance:,.2f} USDT" if equity > 0 else ""
             text = build_message(
                 compact_header(),
                 "🟢 *BOT STARTED*" + (f"\n{where}" if where else "") + bal_line,
@@ -402,11 +405,11 @@ class Notifier:
         try:
             from telegram.ui import compact_header, build_message
 
-            equity_line = f" · Total ${equity:,.2f}" if equity > 0 else ""
+            equity_line = f" · Total {equity:,.2f} USDT" if equity > 0 else ""
             text = build_message(
                 compact_header(),
                 f"🔴 *BOT STOPPED*\n"
-                f"{cycles} cycles run · Cash ${balance:,.2f}{equity_line}",
+                f"{cycles} cycles run · Cash {balance:,.2f} USDT{equity_line}",
             )
             return self._send(text)
         except Exception as exc:
@@ -458,7 +461,7 @@ class Notifier:
                 text = build_message(
                     compact_header(),
                     "📅 *DAILY SUMMARY*\nNo trades completed today.",
-                    f"Balance ${balance:,.2f}",
+                    f"Balance {balance:,.2f} USDT",
                     wib_now().replace("\n", ", "),
                 )
             else:
@@ -472,10 +475,10 @@ class Notifier:
                 text = build_message(
                     compact_header(),
                     f"📅 *DAILY SUMMARY* — {total} trades\n"
-                    f"{pnl_emoji(total_pnl)} PnL ${total_pnl:+,.2f} · "
+                    f"{pnl_emoji(total_pnl)} PnL {total_pnl:+,.2f} USDT · "
                     f"{win_count}W/{loss_count}L",
                     f"Win rate {confidence_bar(win_rate)}\n"
-                    f"Balance ${balance:,.2f} · Profit factor {fmt_pf(pf)}",
+                    f"Balance {balance:,.2f} USDT · Profit factor {fmt_pf(pf)}",
                     wib_now().replace("\n", ", "),
                 )
             return self._send(text)
@@ -497,7 +500,7 @@ class Notifier:
             text = build_message(
                 compact_header(),
                 f"♻️ *STATE RESTORED*\n"
-                f"Balance ${balance:,.2f} · Open position: {pos_str}\n"
+                f"Balance {balance:,.2f} USDT · Open position: {pos_str}\n"
                 f"Past trades: {trades}",
                 wib_now().replace("\n", ", "),
             )

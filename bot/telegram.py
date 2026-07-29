@@ -130,7 +130,7 @@ class TelegramNotifier:
         text = build_message(
             compact_header(),
             f"🔴 *BOT STOPPED*\n"
-            f"{cycles} cycles run · Balance ${balance:,.2f}",
+            f"{cycles} cycles run · Balance {balance:,.2f} USDT",
         )
         self._send(text)
 
@@ -213,11 +213,12 @@ class TelegramNotifier:
         )
         title = symbol or "Position"
 
+        quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
         text = build_message(
             compact_header(),
             f"{pnl_emoji(pnl_usd)} *POSITION CLOSED — {title}*\n"
-            f"Profit ${pnl_usd:+,.2f} ({roi_pct:+.2f}%) · Held {holding_str}",
-            f"🧠 AI Insight: {insight}\nBalance now ${balance:,.2f}",
+            f"Profit {pnl_usd:+,.2f} {quote} ({roi_pct:+.2f}%) · Held {holding_str}",
+            f"🧠 AI Insight: {insight}\nBalance now {balance:,.2f} {quote}",
             detail_block(
                 [
                     f"Entry  {fp(entry_price)}",
@@ -241,7 +242,7 @@ class TelegramNotifier:
         text = build_message(
             compact_header(),
             f"♻️ *STATE RESTORED*\n"
-            f"Balance ${balance:,.2f} · Open position: {pos_str}\n"
+            f"Balance {balance:,.2f} USDT · Open position: {pos_str}\n"
             f"Past trades: {trades}",
             wib_now().replace("\n", ", "),
         )
@@ -271,7 +272,7 @@ class TelegramNotifier:
             text = build_message(
                 compact_header(),
                 "📅 *DAILY SUMMARY*\nNo trades completed today.",
-                f"Balance ${balance:,.2f}",
+                f"Balance {balance:,.2f} USDT",
                 wib_now().replace("\n", ", "),
             )
         else:
@@ -285,10 +286,10 @@ class TelegramNotifier:
             text = build_message(
                 compact_header(),
                 f"📅 *DAILY SUMMARY* — {total} trades\n"
-                f"{pnl_emoji(total_pnl)} PnL ${total_pnl:+,.2f} · "
+                f"{pnl_emoji(total_pnl)} PnL {total_pnl:+,.2f} USDT · "
                 f"{win_count}W/{loss_count}L",
                 f"Win rate {confidence_bar(win_rate)}\n"
-                f"Balance ${balance:,.2f} · Profit factor {fmt_pf(pf)}",
+                f"Balance {balance:,.2f} USDT · Profit factor {fmt_pf(pf)}",
                 wib_now().replace("\n", ", "),
             )
         self._send(text)

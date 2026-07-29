@@ -200,7 +200,7 @@ class TestNotificationMethods:
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
         assert "POSITION CLOSED" in text
-        assert "Profit $150.00" in text
+        assert "Profit 150.00 USDT" in text
         assert "4h" in text
 
     def test_notify_position_closed_loss(self) -> None:
@@ -215,7 +215,7 @@ class TestNotificationMethods:
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
         assert "POSITION CLOSED" in text
-        assert "Loss $200.00" in text
+        assert "Loss 200.00 USDT" in text
         assert "Stop Loss" in text
 
     def test_notify_take_profit(self) -> None:

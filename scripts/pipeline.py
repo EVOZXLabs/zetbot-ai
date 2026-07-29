@@ -351,7 +351,7 @@ class Pipeline:
                     status = o.get("status", "UNKNOWN")
                     side = o.get("side", "N/A")
                     fill = o.get("fill_price", o.get("entry_price", 0))
-                    action = f"{side} {status} @ ${fill}" if status == "FILLED" else f"{side} {status}"
+                    action = f"{side} {status} @ {fill} USDT" if status == "FILLED" else f"{side} {status}"
                     trace.add(
                         "Paper", trace.top_candidate, status, action,
                         {k: o[k] for k in (
@@ -516,7 +516,7 @@ class Pipeline:
 
             self.logger.info(
                 f"LIVE execution: submitting BUY for {symbol} "
-                f"${plan.get('position_size_usdt', 0):,.2f}"
+                f"{plan.get('position_size_usdt', 0):,.2f} USDT"
             )
             try:
                 result = order_mgr.execute(plan)

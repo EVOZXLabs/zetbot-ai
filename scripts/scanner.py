@@ -646,7 +646,7 @@ class MarketScanner:
         # Filter by minimum volume
         liquid_pairs = [p for p in valid_pairs if p.volume_24h >= MIN_VOLUME_24H]
         stats["low_volume"] = len(valid_pairs) - len(liquid_pairs)
-        print(f"        Low vol : {stats['low_volume']} (< ${MIN_VOLUME_24H:,.0f}/d)")
+        print(f"        Low vol : {stats['low_volume']} (< {MIN_VOLUME_24H:,.0f} USDT/d)")
 
         # 3. OHLCV & indicators
         print(f"  [3/4] Analyzing {len(liquid_pairs)} pairs "
@@ -872,7 +872,7 @@ class ScannerReport:
             for s in scored[:top_n]:
                 f.write(
                     f"{s.rank:3d}. {s.symbol:>10s}  "
-                    f"${s.price:<10.4f}  Score: {s.overall:<5.1f}  "
+                    f"{s.price:<10.4f}  Score: {s.overall:<5.1f}  "
                     f"Signal: {s.signal}\n"
                 )
         print(f"  Watchlist   : {path}")
@@ -881,12 +881,12 @@ class ScannerReport:
 def _fmt_vol(vol: float) -> str:
     """Format a volume figure for human display."""
     if vol >= 1_000_000_000:
-        return f"${vol / 1_000_000_000:.2f}B"
+        return f"{vol / 1_000_000_000:.2f}B USDT"
     if vol >= 1_000_000:
-        return f"${vol / 1_000_000:.1f}M"
+        return f"{vol / 1_000_000:.1f}M USDT"
     if vol >= 1_000:
-        return f"${vol / 1_000:.1f}K"
-    return f"${vol:.0f}"
+        return f"{vol / 1_000:.1f}K USDT"
+    return f"{vol:.0f} USDT"
 
 
 # ---------------------------------------------------------------------------

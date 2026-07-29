@@ -482,8 +482,8 @@ class PositionManager:
             )
             total_value = sum(p.position_size_usdt for p in active)
             print(f"  Active Position Summary (n={len(active)}):")
-            print(f"    Total Value       : ${total_value:>8,.2f}")
-            print(f"    Total Floating PnL: ${total_fl:>+8,.2f}")
+            print(f"    Total Value       : {total_value:>8,.2f} USDT")
+            print(f"    Total Floating PnL: {total_fl:>+8,.2f} USDT")
             print(f"    Average Holding   : {avg_hold:.1f}h")
             print()
 
@@ -497,14 +497,14 @@ class PositionManager:
             print(f"  ACTIVE POSITIONS:")
             hdr = (
                 f"  {'#':>3s} {'Pair':>12s} {'Status':>10s} "
-                f"{'PnL $':>10s} {'PnL%':>7s} {'Entry':>10s} "
+                f"{'PnL':>10s} {'PnL%':>7s} {'Entry':>10s} "
                 f"{'Price':>10s} {'Stop':>10s} {'Hld':>4s}"
             )
             print(hdr)
             print(f"  {'-' * (len(hdr) - 2)}")
 
             for i, p in enumerate(active, 1):
-                pnl_str = f"${p.floating_pnl:+,.2f}"
+                pnl_str = f"{p.floating_pnl:+,.2f} USDT"
                 print(
                     f"  {i:3d} {p.symbol:>12s} {p.status:>10s} "
                     f"{pnl_str:>10s} {p.floating_pnl_pct:>+7.2f} "
@@ -520,14 +520,14 @@ class PositionManager:
             print(f"  CLOSED POSITIONS:")
             hdr = (
                 f"  {'#':>3s} {'Pair':>12s} {'Status':>10s} "
-                f"{'PnL $':>10s} {'Entry':>10s} {'Exit':>10s} "
+                f"{'PnL':>10s} {'Entry':>10s} {'Exit':>10s} "
                 f"{'Hld':>4s}"
             )
             print(hdr)
             print(f"  {'-' * (len(hdr) - 2)}")
 
             for i, p in enumerate(done, 1):
-                pnl_str = f"${p.total_pnl:+,.2f}"
+                pnl_str = f"{p.total_pnl:+,.2f} USDT"
                 exit_method = p.status
                 print(
                     f"  {i:3d} {p.symbol:>12s} {exit_method:>10s} "

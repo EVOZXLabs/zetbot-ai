@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_holding, fmt_price, fmt_pct
+from telegram.formatter import fmt_holding, fmt_price, fmt_pct, fmt_pnl
 from telegram.ui import (
     compact_header, wib_now, pnl_emoji, progress_bar,
     ai_insight, build_message,
@@ -151,8 +151,9 @@ class PositionsCommand(BaseCommand):
                 bar = progress_bar(pct_to_tp, 100, 10)
                 progress_line = f"Entry → TP1  {bar} {pct_to_tp:.0f}%\n"
 
+            quote = symbol.split("/")[1] if "/" in symbol else "USDT"
             card = (
-                f"{emoji} *{symbol}*  ${pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
+                f"{emoji} *{symbol}*  {fmt_pnl(pnl, quote)} ({pnl_pct:+.2f}%)\n"
                 f"{progress_line}"
                 f"🕒 Held {holding_str}"
             )

@@ -34,7 +34,7 @@ PAPER_STATE_PATH = "data/paper_state.json"
 LIVE_POSITIONS_PATH = "data/live_positions.json"
 
 # Simulated exchange requirements (Binance spot defaults)
-EXCHANGE_MIN_NOTIONAL = 10.0        # $10 minimum order value
+EXCHANGE_MIN_NOTIONAL = 10.0        # 10 USDT minimum order value
 EXCHANGE_MIN_QTY_DEFAULT = 0.00001  # default min quantity step
 
 # NOTE: max_positions and max_daily_loss are equity-relative by default
@@ -291,8 +291,8 @@ class ExecutionValidator:
             if risk.entry_price > 0 else 0.0
         if risk.position_value < self.min_notional:
             reasons.append(
-                f"Position ${risk.position_value:.2f} "
-                f"< ${self.min_notional:.0f} min notional"
+                f"Position {risk.position_value:.2f} USDT "
+                f"< {self.min_notional:.0f} USDT min notional"
             )
 
         # 5. Duplicate symbol
@@ -394,9 +394,9 @@ class TradeExecutor:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PROFESSIONAL TRADE EXECUTOR")
         print(f"  {'=' * 78}")
-        print(f"  Equity           : ${self.equity:>8,.2f}")
+        print(f"  Equity           : {self.equity:>8,.2f} USDT")
         print(f"  Max positions    : {self.validator.max_positions}")
-        print(f"  Max daily loss   : ${self.validator.max_daily_loss:>8,.2f}  "
+        print(f"  Max daily loss   : {self.validator.max_daily_loss:>8,.2f} USDT  "
               f"({MAX_DAILY_LOSS_PCT:.1f}% of equity)")
         print()
 
@@ -473,7 +473,7 @@ class TradeExecutor:
                 print(f"    READY   {risk.symbol:>12s}  "
                       f"conf={confidence:.1f}  "
                       f"R:R {risk.expected_rr:.2f}  "
-                      f"${risk.position_value:>7,.2f}")
+                      f"{risk.position_value:>7,.2f} USDT")
             else:
                 print(f"    {status:>8s} {risk.symbol:>12s}  {reason}")
 
@@ -537,11 +537,11 @@ class TradeExecutor:
 
             print(f"  Ready Trade Summary:")
             print(f"    Avg R:R            : {avg_rr:.2f}")
-            print(f"    Avg Position       : ${avg_pos:>8,.2f}")
-            print(f"    Largest Position   : ${largest:>8,.2f}")
-            print(f"    Smallest Position  : ${smallest:>8,.2f}")
-            print(f"    Total Risk         : ${total_risk:>8,.2f}")
-            print(f"    Total Expected Rwd : ${total_reward:>8,.2f}")
+            print(f"    Avg Position       : {avg_pos:>8,.2f} USDT")
+            print(f"    Largest Position   : {largest:>8,.2f} USDT")
+            print(f"    Smallest Position  : {smallest:>8,.2f} USDT")
+            print(f"    Total Risk         : {total_risk:>8,.2f} USDT")
+            print(f"    Total Expected Rwd : {total_reward:>8,.2f} USDT")
             print()
 
         print(f"  Execution time : {elapsed:.2f}s")
@@ -562,7 +562,7 @@ class TradeExecutor:
             ready.sort(key=lambda p: p.confidence, reverse=True)
             for i, p in enumerate(ready, 1):
                 qty_str = _fmt_qty(p.quantity)
-                size_str = f"${p.position_size_usdt:,.0f}"
+                size_str = f"{p.position_size_usdt:,.0f} USDT"
                 print(
                     f"  {i:3d} {p.symbol:>12s} {p.confidence:6.1f} "
                     f"{size_str:>10s} {qty_str:>12s} "

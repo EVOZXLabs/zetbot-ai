@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_price, fmt_holding, time_ago
+from telegram.formatter import fmt_price, fmt_holding, time_ago, fmt_pnl
 from telegram.ui import compact_header, pnl_emoji, build_message
 
 
@@ -70,8 +70,9 @@ class HistoryCommand(BaseCommand):
                 except (ValueError, TypeError):
                     pass
 
+            quote = symbol.split("/")[1] if "/" in symbol else "USDT"
             block = (
-                f"{pnl_emoji(pnl)} *{symbol}*  ${pnl:+,.2f}\n"
+                f"{pnl_emoji(pnl)} *{symbol}*  {fmt_pnl(pnl, quote)}\n"
                 f"💰 {fmt_price(entry)} → 🚪 {fmt_price(exit_p)}"
                 f"{f'  ·  🕒 {hold}' if hold else ''}\n"
                 f"📋 {reason}"

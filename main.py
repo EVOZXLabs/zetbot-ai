@@ -161,12 +161,12 @@ def _build_summary(
     losses = paper_balance.get("losing_trades", 0)
     lines.append(f"Today's trades      : {total_trades}  (W:{wins} L:{losses})")
     lines.append(f"Win rate            : {win_rate:.1f}%")
-    lines.append(f"Realized PnL        : ${realized:>+10,.2f}")
-    lines.append(f"Unrealized PnL      : ${unrealized:>+10,.2f}")
-    lines.append(f"Net PnL             : ${net_pnl:>+10,.2f}")
-    lines.append(f"USDT balance        : ${balance:>10,.2f}")
-    lines.append(f"Equity              : ${equity:>10,.2f}")
-    lines.append(f"Cash                : ${balance:>10,.2f}")
+    lines.append(f"Realized PnL        : {realized:>+10,.2f} USDT")
+    lines.append(f"Unrealized PnL      : {unrealized:>+10,.2f} USDT")
+    lines.append(f"Net PnL             : {net_pnl:>+10,.2f} USDT")
+    lines.append(f"USDT balance        : {balance:>10,.2f} USDT")
+    lines.append(f"Equity              : {equity:>10,.2f} USDT")
+    lines.append(f"Cash                : {balance:>10,.2f} USDT")
 
     # Stage execution times
     lines.append("")
@@ -293,7 +293,7 @@ def _notify_closure(
             exit_reason = "Strategy Exit"
     logger.info(
         f"Position {symbol}: {new_pos.status} "
-        f"(PnL: ${new_pos.total_pnl:+.2f}, {exit_reason})"
+        f"(PnL: {new_pos.total_pnl:+.2f} USDT, {exit_reason})"
     )
 
     # Update paper balance & orders to reflect the closure
@@ -802,7 +802,7 @@ def main() -> None:
     logger.info(f"Python : {sys.version.split()[0]}")
     logger.info(f"Exchange : {config.exchange}")
     logger.info(f"Timeframe: {config.timeframe}")
-    logger.info(f"Balance  : ${config.account_balance:>8,.2f}")
+    logger.info(f"Balance  : {config.account_balance:>8,.2f} USDT")
     logger.info(f"Mode     : {'PAPER' if config.paper_mode else 'LIVE'}")
 
     # ------------------------------------------------------------------

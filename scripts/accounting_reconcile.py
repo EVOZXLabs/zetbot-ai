@@ -268,7 +268,7 @@ def reconcile(
             log.warning(
                 f"[RECONCILE] Stale equity detected: file={file_equity} "
                 f"but {len(open_positions)} open position(s) with "
-                f"unrealized=${snapshot.unrealized_pnl:+.2f} — repairing"
+                f"unrealized={snapshot.unrealized_pnl:+.2f} USDT — repairing"
             )
 
         # Write computed values from canonical snapshot — only count
@@ -306,8 +306,8 @@ def reconcile(
             _write_json(_BALANCE_PATH, pb)
             log.info(
                 f"[RECONCILE] Accounting reconciled: "
-                f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
-                f"unrealized=${snapshot.unrealized_pnl:+.2f} "
+                f"balance={cash:,.2f} USDT equity={snapshot.equity:,.2f} USDT "
+                f"unrealized={snapshot.unrealized_pnl:+.2f} USDT "
                 f"return={snapshot.total_return_pct:+.2f}% "
                 f"({len(open_positions)} open, "
                 f"{findings['repairs_applied']} repair(s))"
@@ -315,7 +315,7 @@ def reconcile(
         else:
             log.debug(
                 f"[RECONCILE] All clean — "
-                f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
+                f"balance={cash:,.2f} USDT equity={snapshot.equity:,.2f} USDT "
                 f"({len(open_positions)} open)"
             )
 
