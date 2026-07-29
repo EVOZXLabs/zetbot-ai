@@ -9,6 +9,11 @@ Supported Exchanges:
 - Binance
 - Bybit
 - Tokocrypto
+- OKX
+- Gate
+- Kucoin
+- MEXC
+- Indodax (IDR-quoted pairs — set `QUOTE_CURRENCY=IDR`)
 
 ---
 
@@ -212,6 +217,13 @@ The setup checker validates:
 - Runtime directories
 - Git status
 
+To test connectivity against whichever exchange is set in `.env`
+(`EXCHANGE=...`) specifically:
+
+```bash
+python main.py --test-exchange
+```
+
 ---
 
 ## Start ZetBot AI
@@ -317,7 +329,8 @@ All settings are managed through `.env`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXCHANGE` | binance | Exchange provider |
+| `EXCHANGE` | binance | Exchange provider (binance, bybit, tokocrypto, okx, gate, kucoin, mexc, indodax) |
+| `QUOTE_CURRENCY` | USDT | Quote currency to scan/trade against (e.g. IDR for Indodax) |
 | `TIMEFRAME` | 1h | Trading timeframe |
 | `PAPER_MODE` | true | Enable paper trading |
 | `ACCOUNT_BALANCE` | 10000 | Starting paper balance |
@@ -368,6 +381,7 @@ Validation includes:
 - Position synchronization
 - Service container testing
 - Production regression testing
+- Multi-exchange provider & scanner coverage (`tests/test_exchange_providers.py`, `tests/test_scanner.py`, `tests/test_data.py`)
 
 ---
 
@@ -405,6 +419,15 @@ Blockchain trading features will be introduced after the core centralized exchan
 # Version
 
 ```
+v0.5.1
+
+Multi-Exchange Scanner Fix (Fase 0 — Web3/DEX Roadmap)
+Previously the scanner always scanned Binance/USDT regardless of the
+EXCHANGE/QUOTE_CURRENCY settings in .env. Scanner, MarketData, and the
+exchange diagnostics tools now correctly follow the configured exchange
+and quote currency across all 8 supported exchanges. See
+FASE0-SUMMARY.md for details.
+
 v0.5.0
 
 Decision Trace & Paper Trading Stability Update

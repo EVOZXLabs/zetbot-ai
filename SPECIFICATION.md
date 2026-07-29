@@ -158,12 +158,23 @@ Initial Exchanges
 - Bybit Spot
 - Tokocrypto Spot
 
+Expanded Exchanges (Fase 0 — Web3/DEX Roadmap)
+
+- OKX Spot
+- Gate Spot
+- Kucoin Spot
+- MEXC Spot
+- Indodax Spot (IDR-quoted — requires `QUOTE_CURRENCY=IDR`)
+
 Architecture Requirements
 
 - Exchange-independent.
 - Implemented through CCXT.
 - Easy addition of future exchanges.
 - No exchange-specific business logic inside strategy modules.
+- Quote currency is configuration-driven (`QUOTE_CURRENCY`), not
+  assumed to always be USDT — required for IDR-quoted exchanges such
+  as Indodax.
 
 ---
 
