@@ -113,6 +113,31 @@ def _closed_pos(symbol: str = "BTCUSDT", entry: float = 100_000.0,
     }
 
 
+def _drifted_pos(symbol: str = "BTCUSDT", entry: float = 50_000.0,
+                 remaining: float = 0.02) -> dict[str, Any]:
+    """Position with remaining_qty > 0 but wrongly marked CLOSED.
+
+    This is the genuine three-writer drift case: the position still
+    has exposure but positions.json says CLOSED because a different
+    writer (e.g. the monitor) updated status before the paper engine
+    could sync the SELL order record.
+    """
+    return {
+        "symbol": symbol,
+        "entry_price": entry,
+        "current_price": entry,
+        "quantity": remaining,
+        "remaining_qty": remaining,
+        "unrealized_pnl": 0.0,
+        "realized_pnl": 0.0,
+        "total_pnl": 0.0,
+        "cost_basis": entry * remaining,
+        "position_size_usdt": 0.0,
+        "status": "CLOSED",
+        "closure_notified": False,
+    }
+
+
 def _mgr(tmp_path: Any) -> MetricsManager:
     return MetricsManager(data_dir=str(tmp_path))
 
@@ -565,12 +590,13 @@ class TestThreeWriterDrift:
         })
 
     def test_reconcile_detects_drift(self, tmp_path: Any, monkeypatch: Any) -> None:
-        """FILLED BUY with no SELL but positions.json says CLOSED → drift detected."""
+        """FILLED BUY with no SELL and positions.json shows CLOSED
+        with remaining_qty > 0 → genuine three-writer drift."""
         import scripts.accounting_reconcile as rec_mod
 
         _write_pb(tmp_path, initial=10_000, balance=2_000, equity=2_000)
         _write_positions(tmp_path, [
-            _closed_pos("BTCUSDT", entry=50_000),
+            _drifted_pos("BTCUSDT", entry=50_000, remaining=0.02),
         ])
         self._write_orders(tmp_path, [
             {
@@ -590,13 +616,15 @@ class TestThreeWriterDrift:
         assert findings["three_writer_drift"] is True
         assert findings["repairs_applied"] >= 1
 
-    def test_reconcile_repair_sets_position_open(self, tmp_path: Any, monkeypatch: Any) -> None:
-        """After repair, positions.json marks the position OPEN."""
+    def test_reconcile_no_repair_for_legitimately_closed(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """FILLED BUY with no SELL but positions.json shows CLOSED
+        with remaining_qty == 0 → position was legitimately closed,
+        no repair should happen."""
         import scripts.accounting_reconcile as rec_mod
 
         _write_pb(tmp_path, initial=10_000, balance=2_000, equity=2_000)
         _write_positions(tmp_path, [
-            _closed_pos("BTCUSDT", entry=50_000),
+            _closed_pos("BTCUSDT", entry=50_000, pnl=500),
         ])
         self._write_orders(tmp_path, [
             {
@@ -612,12 +640,8 @@ class TestThreeWriterDrift:
         monkeypatch.setattr(rec_mod, "_POSITIONS_PATH", str(tmp_path / "positions.json"))
         monkeypatch.setattr(rec_mod, "_ORDERS_PATH", str(tmp_path / "paper_orders.json"))
 
-        rec_mod.reconcile()
-
-        pos_data = json.loads((tmp_path / "positions.json").read_text())
-        btc = [p for p in pos_data["positions"] if p["symbol"] == "BTCUSDT"]
-        assert len(btc) == 1
-        assert btc[0]["status"] == "OPEN"
+        findings = rec_mod.reconcile()
+        assert findings.get("three_writer_drift") is False
 
     def test_reconcile_no_drift_when_orders_match(self, tmp_path: Any, monkeypatch: Any) -> None:
         """No drift when BUY + SELL exist or positions already OPEN."""
@@ -677,12 +701,13 @@ class TestThreeWriterDrift:
         assert findings.get("three_writer_drift") is False
 
     def test_equity_uses_repaired_positions(self, tmp_path: Any, monkeypatch: Any) -> None:
-        """After three-writer repair, equity includes the repaired open position."""
+        """After three-writer repair (position has remaining_qty > 0),
+        equity includes the repaired open position market value."""
         import scripts.accounting_reconcile as rec_mod
 
         _write_pb(tmp_path, initial=10_000, balance=2_000, equity=2_000)
         _write_positions(tmp_path, [
-            _closed_pos("BTCUSDT", entry=50_000),
+            _drifted_pos("BTCUSDT", entry=50_000, remaining=0.02),
         ])
         self._write_orders(tmp_path, [
             {
@@ -702,7 +727,7 @@ class TestThreeWriterDrift:
 
         pb = json.loads((tmp_path / "paper_balance.json").read_text())
         assert pb["unrealized_pnl"] == 0.0
-        # Equity = cash + position_value + unrealized = 2000 + 1000 + 0 = 3000
+        # Equity = cash (2000) + position_value (1000) = 3000
         assert pb["final_equity"] > pb["final_balance"]
 
 
