@@ -15,7 +15,7 @@ class SellCommand(BaseCommand):
         if not args.strip():
             return (
                 "\U0001f6ab *Sell*\n"
-                "Usage: `/sell BTC/USDT`\n"
+                "Usage: /sell <symbol>\n"
                 "Closes an open position via OrderManager."
             )
 
@@ -38,11 +38,13 @@ class SellCommand(BaseCommand):
             return f"\u274c Position {symbol} has no remaining quantity."
 
         from scripts.execution_engine import OrderRequest  # noqa: PLC0415
+        price = position.get("current_price") or position.get("entry_price") or 0.0
         request = OrderRequest(
             symbol=symbol,
             side="SELL",
             type="MARKET",
             amount=quantity,
+            price=price if price > 0 else None,
             metadata={"source": "telegram", "bypass_risk": True},
         )
 

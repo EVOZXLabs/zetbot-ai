@@ -30,6 +30,7 @@ class ExchangeCommand(BaseCommand):
                 f"\n"
                 f"Use `/exchange <name> [quote]` to switch or "
                 f"`/exchanges` to list all."
+                "Use /exchange <name> to switch or /exchanges to list all accessible exchanges."
             )
 
         name = parts[0].lower()

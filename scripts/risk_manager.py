@@ -919,23 +919,10 @@ PAPER_BALANCE_PATH = "data/paper_balance.json"
 def _resolve_account_state() -> tuple[float, float]:
     """Return (balance, equity) for the risk-management run.
 
-    Bug this fixes
-    ──────────────
-    ``main()`` used to build a bare ``RiskManager()``, which defaults
-    ``balance`` to the module-level ``ACCOUNT_BALANCE`` constant
-    (``10_000.0``) on *every* pipeline cycle — regardless of how much
-    cash had actually already been spent on open positions. Real free
-    cash shrinks as positions are opened, but the risk manager kept
-    "seeing" a full, un-spent $10,000 forever, so it kept approving
-    new positions on top of ones already open. Over a few cycles this
-    silently pushed total exposure toward 100% of equity even with
-    MAX_POSITION_SIZE_PCT correctly configured at 60%.
-
-    Fix: read the *current* cash and equity from
-    ``data/paper_balance.json`` — the same canonical file (updated via
-    ``MetricsManager.compute_snapshot``) that Telegram's /wallet,
-    /balance and /status already read. This guarantees the risk
-    engine and Telegram always agree on the same equity figure.
+    Equity is NOT read from paper_balance.json's ``final_equity``
+    because that field can become stale (when pipeline runs with no
+    READY plans the paper engine exits early without updating it).
+    Instead equity is always recomputed from live open positions.
 
     Falls back to ``ACCOUNT_BALANCE`` (cash == equity, no positions
     open yet) when the file doesn't exist yet, e.g. first-ever run.
@@ -947,7 +934,8 @@ def _resolve_account_state() -> tuple[float, float]:
         return ACCOUNT_BALANCE, ACCOUNT_BALANCE
 
     balance = pb.get("final_balance", ACCOUNT_BALANCE)
-    equity = pb.get("final_equity", balance)
+    existing_exposure = _existing_open_exposure()
+    equity = balance + existing_exposure
     return balance, equity
 
 

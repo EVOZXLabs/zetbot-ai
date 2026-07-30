@@ -468,8 +468,15 @@ class PaperTradingEngine:
 
         if not plans:
             self._save_state()
+            # Still compute metrics from existing positions so that
+            # paper_balance.json is always kept up-to-date.
+            self.metrics = MetricsCalculator.compute(
+                self.orders, self.equity_history, self.wallet.initial,
+                unrealized_pnl=self._total_unrealized_pnl(),
+            )
+            self._print_summary(0.0)
             print("  No READY plans.  Exiting.")
-            return {}
+            return self.metrics
 
         # Guard: skip new order execution if safety limits blocked it,
         # but still reconcile existing positions (TP/SL, PnL).
@@ -1184,6 +1191,11 @@ class PaperExport:
 def main(notifier: Any = None, allow_new_positions: bool = True) -> None:
     engine = PaperTradingEngine(notifier=notifier)
     metrics = engine.run(allow_new_positions=allow_new_positions)
+
+    # Always persist, even when no new plans were processed.
+    # Without this, paper_balance.json's equity can become stale
+    # and block all future positions via the risk manager's exposure cap.
+    PaperExport.balance_json(metrics, engine.equity_history, "data/paper_balance.json")
 
     if not metrics:
         return

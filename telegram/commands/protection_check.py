@@ -1,9 +1,12 @@
 """Manual trigger for protection-order reconciliation.
 
 ProtectionManager.reconcile_all() (the bot's own "OCO" logic — cancel
-the sibling leg once one side fills) is NOT wired into any background
-scheduler by this codebase yet. Until that's done, this command is the
-way to force a reconciliation pass on demand.
+the sibling leg once one side fills) IS wired into a background
+scheduler — see ``scripts/protection_scheduler.py``, started from
+``main.py`` whenever the engine is in LIVE mode, polling every
+``config.protection_reconcile_interval_seconds`` (default 8s). This
+command exists for an on-demand/manual pass (e.g. right after
+suspecting a fill), it is not the only way reconciliation runs.
 """
 
 from telegram.base_command import BaseCommand, CommandMeta

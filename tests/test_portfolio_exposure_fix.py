@@ -67,6 +67,51 @@ def _write_paper_balance(**overrides) -> None:
         json.dump(data, f)
 
 
+def _write_paper_state(exposure_value: float = 4_000.0) -> None:
+    """Write data/paper_state.json with a mock open position.
+    
+    `_resolve_account_state()` computes equity as ``balance + existing_exposure``
+    where existing_exposure is read from paper_state.json. Without this file,
+    existing_exposure is 0 and equity == balance instead of
+    balance + position_value.
+    """
+    entry_price = 100.0
+    qty = exposure_value / entry_price
+    state = {
+        "version": 1,
+        "balance": 6_000.0,
+        "initial_balance": 10_000.0,
+        "margin_used": 0.0,
+        "orders": [],
+        "positions": {
+            "BTCUSDT": {
+                "symbol": "BTCUSDT",
+                "order_id": "test-order",
+                "quantity": qty,
+                "remaining_qty": qty,
+                "entry_price": entry_price,
+                "current_price": entry_price,
+                "unrealized_pnl": 0.0,
+                "realized_pnl": 0.0,
+                "total_pnl": 0.0,
+                "cost_basis": exposure_value,
+                "status": "OPEN",
+                "tp1": 110.0,
+                "tp2": 120.0,
+                "tp3": 130.0,
+                "stop_loss": 95.0,
+                "opened_at": "2026-07-01T00:00:00",
+                "signal_time": "",
+                "closure_notified": False,
+                "position_size_usdt": exposure_value,
+            }
+        },
+        "equity_history": [],
+    }
+    with open("data/paper_state.json", "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+
 # ===========================================================================
 #  1 & 2 — portfolio-wide cap math ($10,000 equity / 60 % cap example)
 # ===========================================================================
@@ -148,6 +193,10 @@ class TestRestartDoesNotChangeExposure:
         monkeypatch.chdir(tmp_path)
         os.makedirs("data", exist_ok=True)
         _write_paper_balance(final_balance=6_000.0, final_equity=10_000.0)
+        # _resolve_account_state() now recomputes equity as
+        # balance + existing_exposure. Create paper_state.json so that
+        # existing_exposure > 0 and equity > balance.
+        _write_paper_state(exposure_value=4_000.0)
 
         balance, equity = risk_manager._resolve_account_state()
 
@@ -161,6 +210,7 @@ class TestRestartDoesNotChangeExposure:
         monkeypatch.chdir(tmp_path)
         os.makedirs("data", exist_ok=True)
         _write_paper_balance(final_balance=6_000.0, final_equity=10_000.0)
+        _write_paper_state(exposure_value=4_000.0)
 
         def exposure_pct_from_disk() -> float:
             balance, equity = risk_manager._resolve_account_state()
@@ -189,6 +239,9 @@ class TestTelegramEngineEquityConsistency:
         monkeypatch.chdir(tmp_path)
         os.makedirs("data", exist_ok=True)
         _write_paper_balance(final_balance=6_000.0, final_equity=10_000.0)
+        # MetricsManager reads from positions.json; _resolve_account_state()
+        # reads from paper_state.json. Both must agree on the exposure.
+        _write_paper_state(exposure_value=4_000.0)
 
         with open("data/positions.json", "w") as f:
             json.dump({"positions": [{
@@ -197,6 +250,9 @@ class TestTelegramEngineEquityConsistency:
                 "quantity": 40.0,
                 "current_price": 100.0,
                 "unrealized_pnl": 0.0,
+                "remaining_qty": 40.0,
+                "cost_basis": 4000.0,
+                "position_size_usdt": 4000.0,
             }]}, f)
 
         telegram_snapshot = MetricsManager(data_dir="data").account()

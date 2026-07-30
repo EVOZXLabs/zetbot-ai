@@ -615,18 +615,22 @@ def _monitor_positions(
     logger: Any,
     notifier: Any,
     center: Any,
+    container: Any = None,
 ) -> None:
-    """Fetch current prices for open positions, update PnL, detect closures."""
-    # Only run if pipeline already ran (positions.json exists)
+    """Fetch current prices for open positions, update PnL, detect closures.
+    Uses unified ExecutionPipeline for TP/SL logic (same for paper and live).
+    """
     if not os.path.exists("data/positions.json"):
         return
 
     try:
-        import ccxt  # noqa: PLC0415
-        from datetime import datetime, timezone  # noqa: PLC0415
-        from scripts.position_manager import (  # noqa: PLC0415
-            PositionSimulator, TradePlan,
+        from scripts.execution_provider import (
+            PaperExecutionProvider,
+            LiveExecutionProvider,
+            create_execution_provider,
         )
+        from scripts.execution_pipeline import ExecutionPipeline
+        from scripts.protection_manager import ProtectionManager
     except ImportError as exc:
         logger.debug(f"Monitor imports failed: {exc}")
         return
@@ -639,24 +643,11 @@ def _monitor_positions(
         return
 
     positions = data.get("positions", [])
-    active = [
-        p for p in positions
-        if is_open(p.get("status"))
-    ]
+    active = [p for p in positions if is_open(p.get("status"))]
     if not active:
         return
 
-    # Load scanner prices for ATR/trend
-    scanner_prices: dict[str, dict] = {}
-    try:
-        with open("data/scanner_results.json") as f:
-            scan = json.load(f)
-        for p in scan.get("pairs", []):
-            scanner_prices[p["symbol"]] = p
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-
-    # Load trade plans
+    # Load trade plans for reference prices
     plans_by_symbol: dict[str, dict] = {}
     try:
         with open("data/trade_plan.json") as f:
@@ -666,9 +657,10 @@ def _monitor_positions(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    # Fetch tickers for active symbols
+    # Fetch current prices
     symbols = [p["symbol"] for p in active if "symbol" in p]
     try:
+        import ccxt
         exchange = ccxt.binance({
             "enableRateLimit": True,
             "options": {"defaultType": "spot"},
@@ -679,7 +671,21 @@ def _monitor_positions(
         logger.debug(f"Monitor ticker fetch failed: {exc}")
         return
 
-    now = datetime.now(timezone.utc)
+    # Get the right provider
+    is_live = (
+        container is not None
+        and hasattr(container, "order")
+        and getattr(container.order, "mode", "PAPER") == "LIVE"
+    )
+    if is_live:
+        provider = LiveExecutionProvider(
+            container.exchange,
+            getattr(container, "_config", None),
+        )
+    else:
+        provider = PaperExecutionProvider()
+
+    pipeline = ExecutionPipeline(provider)
     changed = False
 
     for pos in positions:
@@ -690,86 +696,85 @@ def _monitor_positions(
         ticker = tickers.get(sym)
         if ticker is None:
             continue
-        current_price = ticker.get("last")
-        if current_price is None or current_price <= 0:
+        current_price = float(ticker.get("last", 0) or 0)
+        if current_price <= 0:
             continue
 
-        scan_data = scanner_prices.get(sym, {})
-        atr_pct = scan_data.get("atr_pct", 0.0)
-        trend = scan_data.get("trend_alignment", "MIXED")
         plan_data = plans_by_symbol.get(sym, {})
+        old_status = pos.get("status")
 
-        try:
-            plan = TradePlan(
-                symbol=sym,
-                entry_price=plan_data.get("entry_price", pos.get("entry_price", 0.0)),
-                position_size_usdt=plan_data.get("position_size_usdt", pos.get("position_size_usdt", 0.0)),
-                quantity=plan_data.get("quantity", pos.get("quantity", 0.0)),
-                stop_loss=plan_data.get("stop_loss", pos.get("stop_loss", 0.0)),
-                tp1=plan_data.get("tp1", pos.get("tp1", 0.0)),
-                tp2=plan_data.get("tp2", pos.get("tp2", 0.0)),
-                tp3=plan_data.get("tp3", pos.get("tp3", 0.0)),
-                risk_amount=plan_data.get("risk_amount", 0.0),
-                reward_amount=plan_data.get("reward_amount", 0.0),
-                risk_reward=plan_data.get("risk_reward", 0.0),
-                probability=plan_data.get("probability", 0.0),
-                recommendation=plan_data.get("recommendation", ""),
-                confidence=plan_data.get("confidence", 0.0),
-                signal_time=pos.get("signal_time") or pos.get("opened_at", ""),
-                status="",
-                rejection_reason="",
-            )
-        except Exception as exc:
-            logger.debug(f"Monitor plan creation failed for {sym}: {exc}")
+        # Use unified reconciliation (shared TP/SL logic)
+        reconciled = pipeline.reconcile_position(
+            sym, current_price, pos, plan=plan_data,
+        )
+
+        if reconciled is None:
             continue
 
-        old_status = pos.get("status")
-        new_pos = PositionSimulator.simulate(plan, current_price, atr_pct, trend, now)
-
-        # Update position data
-        pos["current_price"] = round(current_price, 8)
-        pos["status"] = new_pos.status
-        pos["floating_pnl"] = new_pos.floating_pnl
-        pos["floating_pnl_pct"] = new_pos.floating_pnl_pct
-        pos["holding_hours"] = new_pos.holding_hours
-        pos["holding_candles"] = new_pos.holding_candles
-        pos["tp1_hit"] = new_pos.tp1_hit
-        pos["tp2_hit"] = new_pos.tp2_hit
-        pos["tp3_hit"] = new_pos.tp3_hit
-        pos["breakeven_active"] = new_pos.breakeven_active
-        pos["trailing_active"] = new_pos.trailing_active
-        pos["current_stop"] = round(new_pos.current_stop, 8)
-        pos["remaining_pct"] = new_pos.remaining_pct
-        pos["remaining_qty"] = new_pos.remaining_qty
-        pos["realized_pnl"] = new_pos.realized_pnl
-        pos["total_pnl"] = new_pos.total_pnl
-        pos["highest_price"] = new_pos.highest_price
-        pos["lowest_price"] = new_pos.lowest_price
+        # Update position state
+        for key in (
+            "current_price", "status", "floating_pnl", "floating_pnl_pct",
+            "tp1_hit", "tp2_hit", "tp3_hit", "remaining_qty",
+            "realized_pnl", "total_pnl", "unrealized_pnl",
+        ):
+            if key in reconciled:
+                pos[key] = reconciled[key]
 
         changed = True
 
-        # Detect status change → notify closure once
+        # Detect closure → notify + cancel live protection
+        new_status = reconciled.get("status")
         if (
-             old_status != new_pos.status
-    and new_pos.status in CLOSED_STATUSES
-    and not pos.get("closure_notified", False)
-    ):
-            _notify_closure(
-                logger,
-                notifier,
-                sym,
-                new_pos,
-                current_price,
-            _exit_reason_map,
-    )
+            old_status != new_status
+            and new_status in CLOSED_STATUSES
+            and not pos.get("closure_notified", False)
+        ):
+            from datetime import datetime
+            exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
+            logger.info(
+                f"Position {sym}: {old_status} → {new_status} "
+                f"(PnL: ${reconciled.get('total_pnl', 0):+.2f}, {exit_reason})"
+            )
+
+            pnl, new_balance = _update_paper_on_closure(
+                logger, sym, reconciled, current_price, exit_reason,
+            )
+
+            try:
+                from datetime import timedelta
+                holding_secs = float(reconciled.get("holding_hours", 0) * 3600)
+                notifier.notify_position_closed(
+                    symbol=sym,
+                    entry_price=reconciled.get("entry_price", 0),
+                    exit_price=current_price,
+                    pnl=pnl,
+                    pnl_pct=reconciled.get("floating_pnl_pct", 0),
+                    balance=new_balance,
+                    exit_reason=exit_reason,
+                    holding_time=timedelta(seconds=holding_secs),
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to send close notification for {sym}: {exc}")
+
             pos["closure_notified"] = True
 
-        if changed:
-            try:
-                with open("data/positions.json", "w") as f:
-                    json.dump({"positions": positions}, f, indent=2)
-            except OSError as exc:
-                logger.error(f"Failed to write positions.json: {exc}")
+            # Cancel live protection if position closed
+            if is_live:
+                try:
+                    pm = ProtectionManager(
+                        container.exchange,
+                        getattr(container, "_config", None),
+                    )
+                    pm.cancel_protection(sym, reason="monitor_closure")
+                except Exception as exc:
+                    logger.debug(f"Cancel protection for {sym}: {exc}")
+
+    if changed:
+        try:
+            with open("data/positions.json", "w") as f:
+                json.dump(data, f, indent=2, default=str)
+        except OSError as exc:
+            logger.error(f"Failed to write positions.json: {exc}")
 
 
 def main() -> None:
@@ -1204,7 +1209,7 @@ def main() -> None:
             _monitor_interval += 1
             if _monitor_interval >= 60:
                 _monitor_interval = 0
-                _monitor_positions(logger, _notifier, center)
+                _monitor_positions(logger, _notifier, center, container=container)
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():

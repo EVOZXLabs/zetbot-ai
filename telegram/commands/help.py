@@ -2,10 +2,12 @@ from telegram.base_command import BaseCommand, CommandMeta
 from telegram.registry import CommandRegistry
 from telegram.ui import compact_header, build_message
 
-# Markdown (legacy) special characters — anything pulled from a command's
+# Markdown special characters — anything pulled from a command's
 # usage/description gets escaped before it's dropped into the message so
 # a stray "_" (e.g. inside a placeholder like "amount_usdt") can never
 # break formatting for the whole message.
+# Backticks around usage are intentionally omitted so Telegram auto-detects
+# commands and makes them tappable.
 _MD_SPECIAL = ("_", "*", "`", "[")
 
 

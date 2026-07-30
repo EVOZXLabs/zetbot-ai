@@ -20,8 +20,8 @@ class DetailCommand(BaseCommand):
         if not symbol:
             return build_message(
                 compact_header(),
-                "Usage: `/detail <SYMBOL>`\n"
-                "Example: `/detail BTC/USDT`",
+                "Usage: /detail <SYMBOL>\n"
+                "Example: /detail BTC/USDT",
             )
 
         scanner = ctx.read_json("scanner_results.json")

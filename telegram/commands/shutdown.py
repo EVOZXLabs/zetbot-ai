@@ -29,7 +29,7 @@ class ShutdownCommand(BaseCommand):
             self._pending[key] = now
             return (
                 "\u26a0\ufe0f *Shutdown Confirmation*\n"
-                "Are you sure? Send `/shutdown` again within 60 seconds "
+                "Are you sure? Send /shutdown again within 60 seconds "
                 "to confirm and shut down the bot."
             )
 

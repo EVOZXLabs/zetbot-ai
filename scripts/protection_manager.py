@@ -26,10 +26,11 @@ Here, ``ProtectionManager`` submits the stop-loss and take-profit as
 TWO ORDINARY, INDEPENDENT sell orders via the same ``create_order()``
 path already used (and tested) elsewhere in this codebase, and is
 itself responsible for cancelling the sibling order once one leg
-fills — see ``reconcile_protection()``. This must be polled
-periodically (e.g. wired into the existing scheduler, or triggered via
-a manual command) — it is NOT automatically looping in the background
-from this module alone.
+fills — see ``reconcile_protection()``. This class does NOT loop
+itself — polling is done by ``scripts/protection_scheduler.py``
+(started automatically from ``main.py`` in LIVE mode, every
+``config.protection_reconcile_interval_seconds``), with
+``/protectioncheck`` available as an additional on-demand trigger.
 
 KNOWN GAP: if price moves through both the stop and target levels
 before the next reconciliation poll runs, both legs could theoretically
