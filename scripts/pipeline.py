@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 from scripts.app_config import AppConfig
 from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
+from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
 
 
 STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
