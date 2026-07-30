@@ -535,72 +535,238 @@ class Pipeline:
         paper_trading_engine.main()
 
     def _run_paper_di(self) -> None:
-        from scripts import paper_trading_engine
+        """Unified execution stage for both PAPER and LIVE modes.
+
+        Uses ExecutionPipeline for shared business logic.
+        The ExecutionProvider implementation (Paper vs Live) is the
+        only difference — everything else is identical.
+        """
+        from scripts.execution_provider import (
+            PaperExecutionProvider,
+            LiveExecutionProvider,
+            create_execution_provider,
+        )
+        from scripts.execution_pipeline import ExecutionPipeline
 
         is_live = (
             self.container is not None
             and self.container.order.mode == "LIVE"
         )
 
-        # Check safety guards — always run reconciliation (TP/SL, PnL),
-        # but only allow new positions when the guard passes.
         allow_new = True
         if self.container is not None:
             ok, reason = self.container.safeguard.can_open_new_position()
             if not ok:
-                self.logger.info(f"Pipeline paper new-order guard: {reason}")
+                self.logger.info(f"Pipeline new-order guard: {reason}")
                 allow_new = False
 
-        # In LIVE mode the paper engine runs for position tracking and
-        # reconciliation only — never creates phantom paper positions.
-        # Real positions are tracked on the exchange, not in the paper wallet.
-        paper_allow_new = allow_new and not is_live
-        paper_trading_engine.main(
-            notifier=self._notifier,
-            allow_new_positions=paper_allow_new,
+        # Create the right provider for the mode
+        mode = "LIVE" if is_live else "PAPER"
+        if is_live:
+            provider = LiveExecutionProvider(
+                self.container.exchange,
+                self.config,
+            )
+        else:
+            provider = PaperExecutionProvider()
+
+        pipeline = ExecutionPipeline(
+            provider,
+            quote_currency=getattr(self.config, "quote_currency", "USDT"),
         )
 
-        # ── LIVE mode: submit real exchange orders ──────────────────
-        # Independent of the paper engine wallet. Real orders go through
-        # OrderManager which has its own safeguard check inside execute().
-        if is_live and self.container.order.is_live_enabled():
-            self._execute_live_plans()
-
-    def _execute_live_plans(self) -> None:
-        """Read READY plans from trade_plan.json and submit real orders."""
+        # Read READY plans
         import json, os  # noqa: PLC0415
 
-        path = "data/trade_plan.json"
-        if not os.path.exists(path):
+        plan_path = "data/trade_plan.json"
+        ready_plans: list[dict[str, Any]] = []
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path) as f:
+                    plan_data = json.load(f)
+                ready_plans = [
+                    p for p in plan_data.get("plans", [])
+                    if p.get("status") == "READY"
+                ]
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # --- Unified BUY execution (paper or live) ---
+        if allow_new:
+            for plan in ready_plans:
+                symbol = plan.get("symbol", "")
+                if not symbol:
+                    continue
+
+                self.logger.info(
+                    f"{mode} execution: submitting BUY for {symbol} "
+                    f"${plan.get('position_size_usdt', 0):,.2f}"
+                )
+                try:
+                    result = pipeline.execute_plan(plan)
+                    if result is not None:
+                        status = result.status
+                        self.logger.info(
+                            f"{mode} execution result for {symbol}: {status}"
+                        )
+                except Exception as exc:
+                    self.logger.error(
+                        f"{mode} execution failed for {symbol}: {exc}"
+                    )
+
+        # --- Unified TP/SL reconciliation (paper or live) ---
+        self._reconcile_positions(pipeline, provider, is_live)
+
+        # --- Persist paper state (for Telegram / reporting) ---
+        if not is_live:
+            self._persist_paper_state(provider)
+
+    def _reconcile_positions(
+        self,
+        pipeline: Any,
+        provider: Any,
+        is_live: bool,
+    ) -> None:
+        """Reconcile all open positions — shared TP/SL logic for both modes."""
+        import json, os  # noqa: PLC0415
+
+        pos_path = "data/positions.json"
+        if not os.path.exists(pos_path):
             return
 
         try:
-            with open(path) as f:
-                data = json.load(f)
+            with open(pos_path) as f:
+                pos_data = json.load(f)
         except (json.JSONDecodeError, OSError):
             return
 
-        plans = [p for p in data.get("plans", []) if p.get("status") == "READY"]
-        if not plans:
+        positions = pos_data.get("positions", [])
+        if not positions:
             return
 
-        order_mgr = self.container.order
-        for plan in plans:
-            symbol = plan.get("symbol", "")
-            if not symbol:
+        # Load plans for TP/SL reference prices
+        plan_path = "data/trade_plan.json"
+        plans_by_symbol: dict[str, dict] = {}
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path) as f:
+                    plan_data = json.load(f)
+                for p in plan_data.get("plans", []):
+                    plans_by_symbol[p["symbol"]] = p
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Fetch current prices for open positions
+        open_positions = [p for p in positions if p.get("status") in (
+            "OPEN", "PARTIAL", "BREAKEVEN", "TRAILING",
+        )]
+
+        if not open_positions:
+            return
+
+        # Fetch prices from exchange
+        try:
+            import ccxt
+            exchange = ccxt.binance({
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+                "timeout": 15000,
+            })
+            symbols = [p["symbol"] for p in open_positions if "symbol" in p]
+            tickers = exchange.fetch_tickers(symbols) if symbols else {}
+        except Exception as exc:
+            self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
+            return
+
+        # For LIVE mode: cancel protection orders BEFORE reconciliation
+        # so the sibling order doesn't double-fill with our market sell.
+        if is_live:
+            for pos in positions:
+                sym = pos.get("symbol", "")
+                if pos.get("status") not in OPEN_STATUSES:
+                    continue
+                self._cancel_live_protection(sym)
+
+        updated_positions = []
+        for pos in positions:
+            sym = pos.get("symbol", "")
+            if pos.get("status") not in OPEN_STATUSES:
+                updated_positions.append(pos)
                 continue
 
-            self.logger.info(
-                f"LIVE execution: submitting BUY for {symbol} "
-                f"${plan.get('position_size_usdt', 0):,.2f}"
+            ticker = tickers.get(sym) if sym in tickers else None
+            current_price = None
+            if ticker is not None:
+                current_price = float(ticker.get("last", 0) or 0)
+
+            if current_price is None or current_price <= 0:
+                updated_positions.append(pos)
+                continue
+
+            plan = plans_by_symbol.get(sym, {})
+            reconciled = pipeline.reconcile_position(
+                sym, current_price, pos, plan=plan,
             )
+            if reconciled is not None:
+                updated_positions.append(reconciled)
+                old_status = pos.get("status")
+                new_status = reconciled.get("status")
+                if old_status != new_status and new_status in CLOSED_STATUSES:
+                    self.logger.info(
+                        f"Position {sym}: {old_status} → {new_status} "
+                        f"(PnL: ${reconciled.get('total_pnl', 0):+.2f})"
+                    )
+            else:
+                updated_positions.append(pos)
+
+        # Write updated positions
+        pos_data["positions"] = updated_positions
+        pos_data["active_count"] = sum(
+            1 for p in updated_positions if p.get("status") in OPEN_STATUSES
+        )
+        pos_data["closed_count"] = sum(
+            1 for p in updated_positions if p.get("status") in CLOSED_STATUSES
+        )
+        try:
+            os.makedirs("data", exist_ok=True)
+            with open(pos_path, "w") as f:
+                json.dump(pos_data, f, indent=2, default=str)
+        except OSError as exc:
+            self.logger.error(f"Failed to write positions.json: {exc}")
+
+    def _cancel_live_protection(self, symbol: str) -> None:
+        """Cancel live protection orders for a position that just closed."""
+        try:
+            from scripts.protection_manager import ProtectionManager
+            pm = ProtectionManager(
+                self.container.exchange,
+                getattr(self.container, "_config", None),
+            )
+            pm.cancel_protection(symbol, reason="pipeline_reconciliation")
+        except Exception as exc:
+            self.logger.debug(f"Cancel protection for {symbol}: {exc}")
+
+    def _persist_paper_state(self, provider: Any) -> None:
+        """Persist paper provider state to balance/orders JSON files."""
+        import json  # noqa: PLC0415
+
+        balance = provider.get_balance()
+        bal_path = "data/paper_balance.json"
+        try:
+            with open(bal_path) as f:
+                pb = json.load(f)
+            pb["final_balance"] = round(balance, 2)
+            pb["final_equity"] = round(balance, 2)
+            with open(bal_path, "w") as f:
+                json.dump(pb, f, indent=2)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pb = {
+                "initial_balance": 10000.0,
+                "final_balance": round(balance, 2),
+                "final_equity": round(balance, 2),
+            }
             try:
-                result = order_mgr.execute(plan)
-                status = result.get("status", "?") if isinstance(result, dict) else getattr(result, "status", "?")
-                self.logger.info(
-                    f"LIVE execution result for {symbol}: {status}"
-                )
-            except Exception as exc:
-                self.logger.error(
-                    f"LIVE execution failed for {symbol}: {exc}"
-                )
+                with open(bal_path, "w") as f:
+                    json.dump(pb, f, indent=2)
+            except OSError:
+                pass
