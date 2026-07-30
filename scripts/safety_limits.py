@@ -60,7 +60,7 @@ class SafeGuard:
         self._exchange_failure_window = exchange_failure_window
         self._exchange_max_failures = exchange_max_failures
         self._atr_spike_multiplier = atr_spike_multiplier
-        self._account_balance: float = 10000.0
+        self._account_balance: float = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 
     def set_account_balance(self, balance: float) -> None:
         self._account_balance = balance

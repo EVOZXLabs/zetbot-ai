@@ -878,8 +878,8 @@ def _sync_paper_files(
             pb = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pb = {
-            "final_balance": 10000.0,
-            "final_equity": 10000.0,
+            "final_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+            "final_equity": float(os.getenv("ACCOUNT_BALANCE", "10000")),
             "total_trades": 0,
             "winning_trades": 0,
             "losing_trades": 0,
@@ -890,10 +890,10 @@ def _sync_paper_files(
         }
 
     if side == "BUY":
-        pb["final_balance"] = round(pb.get("final_balance", 10000.0) - cost, 2)
+        pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) - cost, 2)
     elif side == "SELL":
         proceeds = amount * price - fee
-        pb["final_balance"] = round(pb.get("final_balance", 10000.0) + proceeds, 2)
+        pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) + proceeds, 2)
         pb["total_trades"] = pb.get("total_trades", 0) + 1
         if pnl > 0:
             pb["winning_trades"] = pb.get("winning_trades", 0) + 1
@@ -921,7 +921,7 @@ def _sync_paper_files(
     snapshot = MetricsManager.compute_snapshot(
         cash=pb.get("final_balance", 0.0),
         realized_pnl=pb.get("realized_pnl", 0.0),
-        initial_balance=pb.get("initial_balance", 10_000.0),
+        initial_balance=pb.get("initial_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))),
         open_positions=open_positions,
         total_trades=pb.get("total_trades", 0),
         winning_trades=pb.get("winning_trades", 0),

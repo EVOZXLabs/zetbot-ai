@@ -233,7 +233,7 @@ class ExecutionProvider(ABC):
 # ======================================================================
 
 
-PAPER_INITIAL_BALANCE = 10_000.0
+PAPER_INITIAL_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 PAPER_TAKER_FEE = 0.001
 PAPER_SLIPPAGE_BPS = 3
 PAPER_STATE_PATH = "data/paper_state.json"

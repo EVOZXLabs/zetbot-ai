@@ -761,7 +761,7 @@ class Pipeline:
                 json.dump(pb, f, indent=2)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pb = {
-                "initial_balance": 10000.0,
+                "initial_balance": self.config.account_balance,
                 "final_balance": round(balance, 2),
                 "final_equity": round(balance, 2),
             }

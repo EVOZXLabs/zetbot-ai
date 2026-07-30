@@ -31,7 +31,7 @@ TRADE_PLAN_PATH = "data/trade_plan.json"
 POSITIONS_PATH = "data/positions.json"
 STATE_PATH = "data/paper_state.json"
 
-INITIAL_BALANCE = 10_000.0
+INITIAL_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 TAKER_FEE = 0.001           # 0.1 %
 MAKER_FEE = 0.00075         # 0.075 %
 SLIPPAGE_BPS = 3            # 3 bps market-order slippage
@@ -300,8 +300,10 @@ class MetricsCalculator:
 class PaperTradingEngine:
     """Orchestrate paper trading simulation."""
 
-    def __init__(self, notifier: Any = None) -> None:
-        self.wallet = VirtualWallet(INITIAL_BALANCE)
+    def __init__(self, notifier: Any = None, initial_balance: float | None = None) -> None:
+        self.wallet = VirtualWallet(
+            initial_balance if initial_balance is not None else INITIAL_BALANCE
+        )
         self.orders: list[Order] = []
         self.positions: dict[str, VirtualPosition] = {}
         self.equity_history: list[EquitySnapshot] = []
@@ -453,7 +455,7 @@ class PaperTradingEngine:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PAPER TRADING ENGINE")
         print(f"  {'=' * 78}")
-        print(f"  Initial Balance : {INITIAL_BALANCE:>8,.2f} USDT")
+        print(f"  Initial Balance : {self.wallet.initial:>8,.2f} USDT")
         print(f"  Taker Fee       : {TAKER_FEE * 100:.2f}%")
         print(f"  Slippage        : {SLIPPAGE_BPS} bps")
         print()
@@ -1140,7 +1142,7 @@ class PaperExport:
         snapshot = MetricsManager.compute_snapshot(
             cash=data.get("final_balance", 0.0),
             realized_pnl=data.get("realized_pnl", 0.0),
-            initial_balance=data.get("initial_balance", 10_000.0),
+            initial_balance=data.get("initial_balance", INITIAL_BALANCE),
             open_positions=open_positions,
             total_trades=data.get("total_trades", 0),
             winning_trades=data.get("winning_trades", 0),
@@ -1188,8 +1190,8 @@ class PaperExport:
 # -------------------------------------------------------------------
 
 
-def main(notifier: Any = None, allow_new_positions: bool = True) -> None:
-    engine = PaperTradingEngine(notifier=notifier)
+def main(notifier: Any = None, allow_new_positions: bool = True, account_balance: float | None = None) -> None:
+    engine = PaperTradingEngine(notifier=notifier, initial_balance=account_balance)
     metrics = engine.run(allow_new_positions=allow_new_positions)
 
     # Always persist, even when no new plans were processed.

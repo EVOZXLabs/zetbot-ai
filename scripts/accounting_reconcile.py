@@ -124,8 +124,8 @@ def reconcile(
     # ------------------------------------------------------------------
     #  1. Detect mismatched initial_balance
     # ------------------------------------------------------------------
-    state_initial = state.get("initial_balance", 10_000.0)
-    pb_initial = pb.get("initial_balance", 10_000.0)
+    state_initial = state.get("initial_balance", account_balance)
+    pb_initial = pb.get("initial_balance", account_balance)
 
     if state and pb and state_initial != pb_initial:
         findings["initial_balance_mismatch"] = True

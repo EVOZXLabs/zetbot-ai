@@ -354,9 +354,9 @@ def _update_paper_on_closure(
             pb = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pb = {
-            "initial_balance": 10000.0,
-            "final_balance": 10000.0,
-            "final_equity": 10000.0,
+            "initial_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+            "final_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+            "final_equity": float(os.getenv("ACCOUNT_BALANCE", "10000")),
             "total_trades": 0,
             "winning_trades": 0,
             "losing_trades": 0,
@@ -366,7 +366,7 @@ def _update_paper_on_closure(
             "net_pnl": 0.0,
         }
 
-    pb["final_balance"] = round(pb.get("final_balance", 10000.0) + total_proceeds, 2)
+    pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) + total_proceeds, 2)
     pb["total_trades"] = pb.get("total_trades", 0) + 1
     if pnl > 0:
         pb["winning_trades"] = pb.get("winning_trades", 0) + 1
@@ -391,7 +391,7 @@ def _update_paper_on_closure(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    initial = pb.get("initial_balance", 10_000.0)
+    initial = pb.get("initial_balance", float(os.getenv("ACCOUNT_BALANCE", "10000")))
     snapshot = MetricsManager.compute_snapshot(
         cash=pb["final_balance"],
         realized_pnl=pb.get("realized_pnl", 0.0),
@@ -1089,7 +1089,7 @@ def main() -> None:
             from scripts.paper_trading_engine import main as paper_main
             import concurrent.futures
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            fut = pool.submit(paper_main, _notifier)
+            fut = pool.submit(paper_main, notifier=_notifier, account_balance=config.account_balance)
             try:
                 fut.result(timeout=10)
             except concurrent.futures.TimeoutError:
