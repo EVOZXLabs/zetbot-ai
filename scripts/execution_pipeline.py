@@ -173,6 +173,19 @@ class ExecutionPipeline:
 
             tp_result = self._sell(symbol, tp_price, sell_qty)
             if tp_result.status != "FILLED":
+                if tp_result.error and str(tp_result.error).startswith("NO_BALANCE"):
+                    # Exchange already holds ~0 of this asset — the position
+                    # is gone (manual sell, or a sibling order got there
+                    # first). Retrying the same amount every pipeline cycle
+                    # will never succeed, so stop tracking it as open.
+                    _log.warning(
+                        "TP sell skipped for %s: %s — marking remaining "
+                        "quantity as closed instead of retrying forever",
+                        symbol, tp_result.error,
+                    )
+                    remaining = 0
+                    result[hit_key] = True
+                    break
                 _log.warning("TP sell failed for %s: %s", symbol, tp_result.error)
                 continue
 
@@ -193,6 +206,14 @@ class ExecutionPipeline:
                 cost_part = cost_basis * (remaining / qty) if qty > 0 else 0
                 close_pnl = (sl_result.cost or remaining * current_price) - cost_part
                 realized_pnl += close_pnl
+                remaining = 0
+                result["status"] = "STOPPED"
+            elif sl_result.error and str(sl_result.error).startswith("NO_BALANCE"):
+                _log.warning(
+                    "SL sell skipped for %s: %s — marking remaining "
+                    "quantity as closed instead of retrying forever",
+                    symbol, sl_result.error,
+                )
                 remaining = 0
                 result["status"] = "STOPPED"
             else:
