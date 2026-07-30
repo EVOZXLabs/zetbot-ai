@@ -319,6 +319,16 @@ def _notify_closure(
         logger.warning(f"Failed to send close notification for {symbol}: {exc}")
 
 
+def _pos_field(pos: Any, name: str, default: Any = 0) -> Any:
+    """Read a field from a position that may be a dict (from reconcile_position)
+    or an object with attributes (e.g. a Position dataclass). Handles both so
+    callers don't crash depending on which representation is passed in.
+    """
+    if isinstance(pos, dict):
+        return pos.get(name, default)
+    return getattr(pos, name, default)
+
+
 def _update_paper_on_closure(
     logger: Any,
     symbol: str,
@@ -328,13 +338,18 @@ def _update_paper_on_closure(
 ) -> tuple[float, float]:
     """Update paper balance and order history when a position closes.
 
+    ``new_pos`` may be either a dict (as returned by
+    ``pipeline.reconcile_position``) or a position object with attributes —
+    both are supported via ``_pos_field``.
+
     Returns:
         Tuple of (pnl, new_balance) for the caller to use in notifications.
     """
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
 
-    qty = new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity
+    remaining_qty = _pos_field(new_pos, "remaining_qty", 0)
+    qty = remaining_qty if remaining_qty > 0 else _pos_field(new_pos, "quantity", 0)
 
     # Use ExecutionModel for accurate fee/slippage calculation
     from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
@@ -344,7 +359,8 @@ def _update_paper_on_closure(
     total_proceeds = sell_result["total_proceeds"]
 
     # Use same ExecutionModel for cost basis so both sides include slippage
-    buy_result = ExecutionModel.buy(new_pos.entry_price, qty)
+    entry_price = _pos_field(new_pos, "entry_price", exit_price)
+    buy_result = ExecutionModel.buy(entry_price, qty)
     cost_basis = buy_result["total_cost"]
     pnl = total_proceeds - cost_basis
 
@@ -453,7 +469,7 @@ def _update_paper_on_closure(
         "type": "MARKET",
         "quantity": qty,
         "filled_quantity": qty,
-        "entry_price": new_pos.entry_price,
+        "entry_price": entry_price,
         "fill_price": round(fill_price, 6),
         "slippage": round(fill_price - exit_price, 6),
         "entry_fee": round(fee, 6),
@@ -461,10 +477,10 @@ def _update_paper_on_closure(
         "exit_fee": 0.0,
         "total_proceeds": round(total_proceeds, 2),
         "net_pnl": round(pnl, 2),
-        "net_pnl_pct": round(new_pos.floating_pnl_pct, 2),
+        "net_pnl_pct": round(_pos_field(new_pos, "floating_pnl_pct", 0), 2),
         "status": "CLOSED",
-        "created_at": new_pos.entry_time,
-        "filled_at": new_pos.entry_time,
+        "created_at": _pos_field(new_pos, "entry_time", now_ts),
+        "filled_at": _pos_field(new_pos, "entry_time", now_ts),
         "closed_at": now_ts,
         "exit_reason": exit_reason,
         }
