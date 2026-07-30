@@ -161,12 +161,12 @@ def _build_summary(
     losses = paper_balance.get("losing_trades", 0)
     lines.append(f"Today's trades      : {total_trades}  (W:{wins} L:{losses})")
     lines.append(f"Win rate            : {win_rate:.1f}%")
-    lines.append(f"Realized PnL        : {realized:>+10,.2f} USDT")
-    lines.append(f"Unrealized PnL      : {unrealized:>+10,.2f} USDT")
-    lines.append(f"Net PnL             : {net_pnl:>+10,.2f} USDT")
-    lines.append(f"USDT balance        : {balance:>10,.2f} USDT")
-    lines.append(f"Equity              : {equity:>10,.2f} USDT")
-    lines.append(f"Cash                : {balance:>10,.2f} USDT")
+    lines.append(f"Realized PnL        : {realized:>+10,.2f} {config.quote_currency}")
+    lines.append(f"Unrealized PnL      : {unrealized:>+10,.2f} {config.quote_currency}")
+    lines.append(f"Net PnL             : {net_pnl:>+10,.2f} {config.quote_currency}")
+    lines.append(f"{config.quote_currency} balance        : {balance:>10,.2f} {config.quote_currency}")
+    lines.append(f"Equity              : {equity:>10,.2f} {config.quote_currency}")
+    lines.append(f"Cash                : {balance:>10,.2f} {config.quote_currency}")
 
     # Stage execution times
     lines.append("")
@@ -807,7 +807,7 @@ def main() -> None:
     logger.info(f"Python : {sys.version.split()[0]}")
     logger.info(f"Exchange : {config.exchange}")
     logger.info(f"Timeframe: {config.timeframe}")
-    logger.info(f"Balance  : {config.account_balance:>8,.2f} USDT")
+    logger.info(f"Balance  : {config.account_balance:>8,.2f} {config.quote_currency}")
     logger.info(f"Mode     : {'PAPER' if config.paper_mode else 'LIVE'}")
 
     # ------------------------------------------------------------------

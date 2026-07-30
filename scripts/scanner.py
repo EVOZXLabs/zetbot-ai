@@ -878,15 +878,15 @@ class ScannerReport:
         print(f"  Watchlist   : {path}")
 
 
-def _fmt_vol(vol: float) -> str:
+def _fmt_vol(vol: float, currency: str = "USDT") -> str:
     """Format a volume figure for human display."""
     if vol >= 1_000_000_000:
-        return f"{vol / 1_000_000_000:.2f}B USDT"
+        return f"{vol / 1_000_000_000:.2f}B {currency}"
     if vol >= 1_000_000:
-        return f"{vol / 1_000_000:.1f}M USDT"
+        return f"{vol / 1_000_000:.1f}M {currency}"
     if vol >= 1_000:
-        return f"{vol / 1_000:.1f}K USDT"
-    return f"{vol:.0f} USDT"
+        return f"{vol / 1_000:.1f}K {currency}"
+    return f"{vol:.0f} {currency}"
 
 
 # ---------------------------------------------------------------------------

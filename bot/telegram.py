@@ -33,6 +33,7 @@ class TelegramNotifier:
         self._chat_id: str = str(CONFIG.get("telegram_chat_id", ""))
         self._timeout: int = int(CONFIG.get("telegram_timeout", 10))
         self._max_retry: int = int(CONFIG.get("telegram_retry", 3))
+        self._quote_currency: str = str(CONFIG.get("quote_currency", "USDT"))
 
         if self._enabled and (not self._token or not self._chat_id):
             logger.warning(
@@ -130,7 +131,7 @@ class TelegramNotifier:
         text = build_message(
             compact_header(),
             f"🔴 *BOT STOPPED*\n"
-            f"{cycles} cycles run · Balance {balance:,.2f} USDT",
+            f"{cycles} cycles run · Balance {balance:,.2f} {self._quote_currency}",
         )
         self._send(text)
 
@@ -242,7 +243,7 @@ class TelegramNotifier:
         text = build_message(
             compact_header(),
             f"♻️ *STATE RESTORED*\n"
-            f"Balance {balance:,.2f} USDT · Open position: {pos_str}\n"
+            f"Balance {balance:,.2f} {self._quote_currency} · Open position: {pos_str}\n"
             f"Past trades: {trades}",
             wib_now().replace("\n", ", "),
         )
@@ -272,7 +273,7 @@ class TelegramNotifier:
             text = build_message(
                 compact_header(),
                 "📅 *DAILY SUMMARY*\nNo trades completed today.",
-                f"Balance {balance:,.2f} USDT",
+                f"Balance {balance:,.2f} {self._quote_currency}",
                 wib_now().replace("\n", ", "),
             )
         else:
@@ -286,10 +287,10 @@ class TelegramNotifier:
             text = build_message(
                 compact_header(),
                 f"📅 *DAILY SUMMARY* — {total} trades\n"
-                f"{pnl_emoji(total_pnl)} PnL {total_pnl:+,.2f} USDT · "
+                f"{pnl_emoji(total_pnl)} PnL {total_pnl:+,.2f} {self._quote_currency} · "
                 f"{win_count}W/{loss_count}L",
                 f"Win rate {confidence_bar(win_rate)}\n"
-                f"Balance {balance:,.2f} USDT · Profit factor {fmt_pf(pf)}",
+                f"Balance {balance:,.2f} {self._quote_currency} · Profit factor {fmt_pf(pf)}",
                 wib_now().replace("\n", ", "),
             )
         self._send(text)

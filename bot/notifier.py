@@ -45,6 +45,7 @@ class Notifier:
         timeout: int = 10,
         max_retry: int = 3,
         testing: bool = False,
+        quote_currency: str = "USDT",
     ) -> None:
         self._enabled = enabled
         self._token = token
@@ -52,6 +53,7 @@ class Notifier:
         self._timeout = timeout
         self._max_retry = max_retry
         self._testing = testing
+        self._quote_currency = quote_currency
 
         if self._enabled and (not self._token or not self._chat_id):
             logger.warning(
@@ -77,6 +79,7 @@ class Notifier:
             timeout=int(getattr(config, "telegram_timeout", 10)),
             max_retry=int(getattr(config, "telegram_retry", 3)),
             testing=bool(getattr(config, "testing", False)),
+            quote_currency=str(getattr(config, "quote_currency", "USDT")),
         )
 
     @classmethod
@@ -383,7 +386,7 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, build_message
 
             where = " • ".join(p for p in (symbol, exchange, timeframe) if p)
-            bal_line = f"\nTotal {equity:,.2f} USDT · Cash {balance:,.2f} USDT" if equity > 0 else ""
+            bal_line = f"\nTotal {equity:,.2f} {self._quote_currency} · Cash {balance:,.2f} {self._quote_currency}" if equity > 0 else ""
             text = build_message(
                 compact_header(),
                 "🟢 *BOT STARTED*" + (f"\n{where}" if where else "") + bal_line,
@@ -405,11 +408,11 @@ class Notifier:
         try:
             from telegram.ui import compact_header, build_message
 
-            equity_line = f" · Total {equity:,.2f} USDT" if equity > 0 else ""
+            equity_line = f" · Total {equity:,.2f} {self._quote_currency}" if equity > 0 else ""
             text = build_message(
                 compact_header(),
                 f"🔴 *BOT STOPPED*\n"
-                f"{cycles} cycles run · Cash {balance:,.2f} USDT{equity_line}",
+                f"{cycles} cycles run · Cash {balance:,.2f} {self._quote_currency}{equity_line}",
             )
             return self._send(text)
         except Exception as exc:
@@ -461,7 +464,7 @@ class Notifier:
                 text = build_message(
                     compact_header(),
                     "📅 *DAILY SUMMARY*\nNo trades completed today.",
-                    f"Balance {balance:,.2f} USDT",
+                    f"Balance {balance:,.2f} {self._quote_currency}",
                     wib_now().replace("\n", ", "),
                 )
             else:
@@ -475,10 +478,10 @@ class Notifier:
                 text = build_message(
                     compact_header(),
                     f"📅 *DAILY SUMMARY* — {total} trades\n"
-                    f"{pnl_emoji(total_pnl)} PnL {total_pnl:+,.2f} USDT · "
+                    f"{pnl_emoji(total_pnl)} PnL {total_pnl:+,.2f} {self._quote_currency} · "
                     f"{win_count}W/{loss_count}L",
                     f"Win rate {confidence_bar(win_rate)}\n"
-                    f"Balance {balance:,.2f} USDT · Profit factor {fmt_pf(pf)}",
+                    f"Balance {balance:,.2f} {self._quote_currency} · Profit factor {fmt_pf(pf)}",
                     wib_now().replace("\n", ", "),
                 )
             return self._send(text)
@@ -500,7 +503,7 @@ class Notifier:
             text = build_message(
                 compact_header(),
                 f"♻️ *STATE RESTORED*\n"
-                f"Balance {balance:,.2f} USDT · Open position: {pos_str}\n"
+                f"Balance {balance:,.2f} {self._quote_currency} · Open position: {pos_str}\n"
                 f"Past trades: {trades}",
                 wib_now().replace("\n", ", "),
             )
