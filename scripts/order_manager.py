@@ -1001,6 +1001,9 @@ def _close_paper_position_on_sell(
     vp["current_price"] = price
     vp["closure_notified"] = True
 
+    entry_price = float(vp.get("entry_price", 0) or 0)
+    net_pnl_pct = round((pnl / cost_part * 100), 2) if cost_part > 0 else 0.0
+
     state.setdefault("orders", []).append({
         "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
         "symbol": symbol,
@@ -1008,9 +1011,16 @@ def _close_paper_position_on_sell(
         "type": "MARKET",
         "quantity": amount,
         "filled_quantity": amount,
+        "entry_price": entry_price,
         "fill_price": price,
+        "slippage": 0.0,
+        "entry_fee": 0.0,
+        "exit_price": price,
+        "exit_fee": 0.0,
+        "total_cost": round(cost_part, 2),
         "total_proceeds": round(proceeds, 2),
         "net_pnl": round(pnl, 2),
+        "net_pnl_pct": net_pnl_pct,
         "status": "CLOSED",
         "created_at": now_ts,
         "filled_at": now_ts,
