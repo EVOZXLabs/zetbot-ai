@@ -92,6 +92,9 @@ class OrderRequest:
             # Prefixed + truncated to stay within Binance's 36-char limit.
             self.client_order_id = "zb" + self.trace_id.replace("-", "")[:34]
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class OrderResult:

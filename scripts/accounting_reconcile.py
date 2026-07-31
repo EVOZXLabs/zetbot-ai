@@ -268,7 +268,7 @@ def reconcile(
             log.warning(
                 f"[RECONCILE] Stale equity detected: file={file_equity} "
                 f"but {len(open_positions)} open position(s) with "
-                f"unrealized={snapshot.unrealized_pnl:+.2f} USDT — repairing"
+                f"unrealized={snapshot.unrealized_pnl:+.2f} {os.getenv('QUOTE_CURRENCY', 'USDT').upper()} — repairing"
             )
 
         # Write computed values from canonical snapshot — only count
@@ -304,18 +304,20 @@ def reconcile(
         # Write file only if any repair was applied
         if findings["repairs_applied"] > 0:
             _write_json(_BALANCE_PATH, pb)
+            qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             log.info(
                 f"[RECONCILE] Accounting reconciled: "
-                f"balance={cash:,.2f} USDT equity={snapshot.equity:,.2f} USDT "
-                f"unrealized={snapshot.unrealized_pnl:+.2f} USDT "
+                f"balance={cash:,.2f} {qc} equity={snapshot.equity:,.2f} {qc} "
+                f"unrealized={snapshot.unrealized_pnl:+.2f} {qc} "
                 f"return={snapshot.total_return_pct:+.2f}% "
                 f"({len(open_positions)} open, "
                 f"{findings['repairs_applied']} repair(s))"
             )
         else:
+            qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             log.debug(
                 f"[RECONCILE] All clean — "
-                f"balance={cash:,.2f} USDT equity={snapshot.equity:,.2f} USDT "
+                f"balance={cash:,.2f} {qc} equity={snapshot.equity:,.2f} {qc} "
                 f"({len(open_positions)} open)"
             )
 

@@ -19,6 +19,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 
+DEFAULT_ACCOUNT_BALANCE: float = 10_000.0
+
 SUPPORTED_EXCHANGES: frozenset[str] = frozenset(
     {"binance", "bybit", "tokocrypto", "okx", "gate", "kucoin", "mexc", "indodax"}
 )
@@ -53,7 +55,7 @@ class AppConfig:
     logs_dir: str = "logs"
 
     # Account
-    account_balance: float = 10_000.0
+    account_balance: float = DEFAULT_ACCOUNT_BALANCE
     max_positions: int = 1
     max_risk_per_trade_pct: float = 1.0
 
@@ -165,7 +167,7 @@ def load_config() -> AppConfig:
         ),
         data_dir=os.getenv("DATA_DIR", "data"),
         logs_dir=os.getenv("LOGS_DIR", "logs"),
-        account_balance=float(os.getenv("ACCOUNT_BALANCE", "10000")),
+        account_balance=float(os.getenv("ACCOUNT_BALANCE", str(DEFAULT_ACCOUNT_BALANCE))),
         max_positions=int(os.getenv("MAX_POSITIONS", "1")),
         max_risk_per_trade_pct=float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.0")),
         money_management_mode=os.getenv("MONEY_MANAGEMENT_MODE", "RISK_PERCENTAGE"),

@@ -270,6 +270,7 @@ class ExecutionValidator:
         decision: DecisionScores | None,
     ) -> tuple[str, str]:
         """Return (status, reason)."""
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         reasons: list[str] = []
 
         # 1. Invalid price
@@ -291,8 +292,8 @@ class ExecutionValidator:
             if risk.entry_price > 0 else 0.0
         if risk.position_value < self.min_notional:
             reasons.append(
-                f"Position {risk.position_value:.2f} USDT "
-                f"< {self.min_notional:.0f} USDT min notional"
+                f"Position {risk.position_value:.2f} {_qc} "
+                f"< {self.min_notional:.0f} {_qc} min notional"
             )
 
         # 5. Duplicate symbol
@@ -391,12 +392,13 @@ class TradeExecutor:
 
     def run(self) -> list[TradeExecution]:
         """Full execution planning pipeline."""
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PROFESSIONAL TRADE EXECUTOR")
         print(f"  {'=' * 78}")
-        print(f"  Equity           : {self.equity:>8,.2f} USDT")
+        print(f"  Equity           : {self.equity:>8,.2f} {_qc}")
         print(f"  Max positions    : {self.validator.max_positions}")
-        print(f"  Max daily loss   : {self.validator.max_daily_loss:>8,.2f} USDT  "
+        print(f"  Max daily loss   : {self.validator.max_daily_loss:>8,.2f} {_qc}  "
               f"({MAX_DAILY_LOSS_PCT:.1f}% of equity)")
         print()
 
@@ -473,7 +475,7 @@ class TradeExecutor:
                 print(f"    READY   {risk.symbol:>12s}  "
                       f"conf={confidence:.1f}  "
                       f"R:R {risk.expected_rr:.2f}  "
-                      f"{risk.position_value:>7,.2f} USDT")
+                      f"{risk.position_value:>7,.2f} {_qc}")
             else:
                 print(f"    {status:>8s} {risk.symbol:>12s}  {reason}")
 
@@ -510,6 +512,7 @@ class TradeExecutor:
         return plans
 
     def _print_summary(self, elapsed: float) -> None:
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         ready = [p for p in self.executions if p.status == "READY"]
         rejected = [p for p in self.executions if p.status == "REJECTED"]
         skipped = [p for p in self.executions if p.status == "SKIPPED"]
@@ -537,11 +540,11 @@ class TradeExecutor:
 
             print(f"  Ready Trade Summary:")
             print(f"    Avg R:R            : {avg_rr:.2f}")
-            print(f"    Avg Position       : {avg_pos:>8,.2f} USDT")
-            print(f"    Largest Position   : {largest:>8,.2f} USDT")
-            print(f"    Smallest Position  : {smallest:>8,.2f} USDT")
-            print(f"    Total Risk         : {total_risk:>8,.2f} USDT")
-            print(f"    Total Expected Rwd : {total_reward:>8,.2f} USDT")
+            print(f"    Avg Position       : {avg_pos:>8,.2f} {_qc}")
+            print(f"    Largest Position   : {largest:>8,.2f} {_qc}")
+            print(f"    Smallest Position  : {smallest:>8,.2f} {_qc}")
+            print(f"    Total Risk         : {total_risk:>8,.2f} {_qc}")
+            print(f"    Total Expected Rwd : {total_reward:>8,.2f} {_qc}")
             print()
 
         print(f"  Execution time : {elapsed:.2f}s")
@@ -562,7 +565,7 @@ class TradeExecutor:
             ready.sort(key=lambda p: p.confidence, reverse=True)
             for i, p in enumerate(ready, 1):
                 qty_str = _fmt_qty(p.quantity)
-                size_str = f"{p.position_size_usdt:,.0f} USDT"
+                size_str = f"{p.position_size_usdt:,.0f} {_qc}"
                 print(
                     f"  {i:3d} {p.symbol:>12s} {p.confidence:6.1f} "
                     f"{size_str:>10s} {qty_str:>12s} "

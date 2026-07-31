@@ -21,8 +21,9 @@ class SellCommand(BaseCommand):
 
         parts = args.strip().split()
         symbol = parts[0].upper()
-        if not symbol.endswith("/USDT"):
-            symbol = symbol.upper() + "/USDT"
+        qc = (getattr(ctx.config, "quote_currency", None) or "USDT").upper()
+        if not symbol.endswith(f"/{qc}"):
+            symbol = symbol.upper() + f"/{qc}"
 
         if ctx.services is None:
             return "\u274c Services not available."

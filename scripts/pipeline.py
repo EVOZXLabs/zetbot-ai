@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 from scripts.app_config import AppConfig
 from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
+from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
 
 
 STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
@@ -92,6 +93,10 @@ _CONFIG_OVERRIDES: dict[str, dict[str, str]] = {
         "TAKER_FEE": "taker_fee",
         "MAKER_FEE": "maker_fee",
         "SLIPPAGE_BPS": "slippage_bps",
+    },
+    "scripts.execution_provider": {
+        "PAPER_INITIAL_BALANCE": "account_balance",
+        "QUOTE_CURRENCY": "quote_currency",
     },
 }
 
@@ -418,7 +423,8 @@ class Pipeline:
                     status = o.get("status", "UNKNOWN")
                     side = o.get("side", "N/A")
                     fill = o.get("fill_price", o.get("entry_price", 0))
-                    action = f"{side} {status} @ ${fill}" if status == "FILLED" else f"{side} {status}"
+                    qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+                    action = f"{side} {status} @ {fill} {qc}" if status == "FILLED" else f"{side} {status}"
                     trace.add(
                         "Paper", trace.top_candidate, status, action,
                         {k: o[k] for k in (
@@ -541,6 +547,7 @@ class Pipeline:
         The ExecutionProvider implementation (Paper vs Live) is the
         only difference — everything else is identical.
         """
+        qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
         from scripts.execution_provider import (
             PaperExecutionProvider,
             LiveExecutionProvider,
@@ -600,7 +607,7 @@ class Pipeline:
 
                 self.logger.info(
                     f"{mode} execution: submitting BUY for {symbol} "
-                    f"${plan.get('position_size_usdt', 0):,.2f}"
+                    f"{plan.get('position_size_usdt', 0):,.2f} {qc}"
                 )
                 try:
                     result = pipeline.execute_plan(plan)
@@ -609,6 +616,35 @@ class Pipeline:
                         self.logger.info(
                             f"{mode} execution result for {symbol}: {status}"
                         )
+                        if status == "FILLED" and self._notifier is not None:
+                            try:
+                                self._notifier.notify_buy_opened(
+                                    symbol=symbol,
+                                    exchange=getattr(self.config, "exchange", ""),
+                                    timeframe=getattr(self.config, "timeframe", ""),
+                                    entry_price=plan.get("entry_price", 0),
+                                    quantity=plan.get("quantity", 0),
+                                    position_size=plan.get("position_size_usdt", 0),
+                                    stop_loss=plan.get("stop_loss", 0),
+                                    take_profit=plan.get("tp1", 0),
+                                    take_profit_2=plan.get("tp2", 0),
+                                    take_profit_3=plan.get("tp3", 0),
+                                    reasons=["Pipeline execution"],
+                                )
+                                try:
+                                    notified_path = "data/.notified_buys"
+                                    notified = set()
+                                    if os.path.exists(notified_path):
+                                        with open(notified_path) as nf:
+                                            notified = set(line.strip() for line in nf if line.strip())
+                                    notified.add(symbol)
+                                    with open(notified_path, "w") as nf:
+                                        for sym in sorted(notified):
+                                            nf.write(f"{sym}\n")
+                                except Exception:
+                                    pass
+                            except Exception:
+                                self.logger.warning(f"BUY notification failed for {symbol}")
                 except Exception as exc:
                     self.logger.error(
                         f"{mode} execution failed for {symbol}: {exc}"
@@ -628,6 +664,7 @@ class Pipeline:
         is_live: bool,
     ) -> None:
         """Reconcile all open positions — shared TP/SL logic for both modes."""
+        qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
         import json, os  # noqa: PLC0415
 
         pos_path = "data/positions.json"
@@ -714,7 +751,7 @@ class Pipeline:
                 if old_status != new_status and new_status in CLOSED_STATUSES:
                     self.logger.info(
                         f"Position {sym}: {old_status} → {new_status} "
-                        f"(PnL: ${reconciled.get('total_pnl', 0):+.2f})"
+                        f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {qc})"
                     )
             else:
                 updated_positions.append(pos)

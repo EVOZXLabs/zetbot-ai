@@ -282,8 +282,10 @@ def _notify_closure(
     new_pos: Any,
     exit_price: float,
     exit_reason_map: dict[str, str],
+    config: Any = None,
 ) -> None:
     """Send Telegram notification when a position closes."""
+    quote = (getattr(config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper() if config else os.getenv("QUOTE_CURRENCY", "USDT").upper()
     exit_reason = exit_reason_map.get(new_pos.status, "Strategy Exit")
     # "CLOSED" can be from TP (tp3_hit) or trend_exit — use tp3_hit + PnL
     if exit_reason == "Take Profit":
@@ -293,7 +295,7 @@ def _notify_closure(
             exit_reason = "Strategy Exit"
     logger.info(
         f"Position {symbol}: {new_pos.status} "
-        f"(PnL: {new_pos.total_pnl:+.2f} USDT, {exit_reason})"
+        f"(PnL: {new_pos.total_pnl:+.2f} {quote}, {exit_reason})"
     )
 
     # Update paper balance & orders to reflect the closure
@@ -731,9 +733,10 @@ def _monitor_positions(
         ):
             from datetime import datetime
             exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
+            quote = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             logger.info(
                 f"Position {sym}: {old_status} → {new_status} "
-                f"(PnL: ${reconciled.get('total_pnl', 0):+.2f}, {exit_reason})"
+                f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {quote}, {exit_reason})"
             )
 
             pnl, new_balance = _update_paper_on_closure(

@@ -128,9 +128,10 @@ class SafeGuard:
         max_loss = balance * (self._max_daily_loss_pct / 100.0)
 
         if realized_pnl < 0 and abs(realized_pnl) >= max_loss:
+            qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             return False, (
-                f"Daily loss limit reached: {abs(realized_pnl):.2f} USDT loss "
-                f"(limit {max_loss:.2f} USDT, {self._max_daily_loss_pct:.1f}%)"
+                f"Daily loss limit reached: {abs(realized_pnl):.2f} {qc} loss "
+                f"(limit {max_loss:.2f} {qc}, {self._max_daily_loss_pct:.1f}%)"
             )
         return True, ""
 
