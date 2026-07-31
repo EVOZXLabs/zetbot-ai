@@ -492,7 +492,10 @@ class Pipeline:
             existing_exposure=existing_exposure,
             risk_per_trade=self.config.max_risk_per_trade_pct,
             max_daily_loss=self.config.max_daily_loss_pct,
-            max_positions=self.config.max_positions,
+            # Scale concurrent-position cap with equity instead of the
+            # fixed MAX_POSITIONS env value, so a bigger account can
+            # hold more than one position at a time.
+            max_positions=risk_manager.dynamic_max_positions(equity),
             mm_config=mm_config,
         )
         results = manager.run()
@@ -514,6 +517,14 @@ class Pipeline:
             equity = self.container.wallet.equity
 
         executor = trade_executor.TradeExecutor(equity=equity)
+        if equity is not None:
+            # Scale the concurrent-position cap with equity, matching
+            # the risk stage, instead of the fixed MAX_POSITIONS env
+            # value — otherwise trade planning would re-clamp back
+            # down to 1 even after the risk stage approved more.
+            executor.validator.max_positions = (
+                trade_executor.dynamic_max_positions(equity)
+            )
         plans = executor.run()
 
         trade_executor.PlanExport.to_csv(plans, "data/trade_plan.csv")
