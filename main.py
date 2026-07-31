@@ -336,7 +336,13 @@ def _update_paper_on_closure(
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
 
-    qty = new_pos.remaining_qty if new_pos.remaining_qty > 0 else new_pos.quantity
+    remaining_qty = new_pos.get("remaining_qty", 0) if isinstance(new_pos, dict) else getattr(new_pos, "remaining_qty", 0)
+    quantity = new_pos.get("quantity", 0) if isinstance(new_pos, dict) else getattr(new_pos, "quantity", 0)
+    entry_price_val = new_pos.get("entry_price", 0) if isinstance(new_pos, dict) else getattr(new_pos, "entry_price", 0)
+    floating_pnl_pct_val = new_pos.get("floating_pnl_pct", 0) if isinstance(new_pos, dict) else getattr(new_pos, "floating_pnl_pct", 0)
+    entry_time_val = new_pos.get("entry_time") if isinstance(new_pos, dict) else getattr(new_pos, "entry_time", None)
+
+    qty = remaining_qty if remaining_qty > 0 else quantity
 
     # Use ExecutionModel for accurate fee/slippage calculation
     from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
@@ -346,7 +352,7 @@ def _update_paper_on_closure(
     total_proceeds = sell_result["total_proceeds"]
 
     # Use same ExecutionModel for cost basis so both sides include slippage
-    buy_result = ExecutionModel.buy(new_pos.entry_price, qty)
+    buy_result = ExecutionModel.buy(entry_price_val, qty)
     cost_basis = buy_result["total_cost"]
     pnl = total_proceeds - cost_basis
 
@@ -455,7 +461,7 @@ def _update_paper_on_closure(
         "type": "MARKET",
         "quantity": qty,
         "filled_quantity": qty,
-        "entry_price": new_pos.entry_price,
+        "entry_price": entry_price_val,
         "fill_price": round(fill_price, 6),
         "slippage": round(fill_price - exit_price, 6),
         "entry_fee": round(fee, 6),
@@ -463,10 +469,10 @@ def _update_paper_on_closure(
         "exit_fee": 0.0,
         "total_proceeds": round(total_proceeds, 2),
         "net_pnl": round(pnl, 2),
-        "net_pnl_pct": round(new_pos.floating_pnl_pct, 2),
+        "net_pnl_pct": round(floating_pnl_pct_val, 2),
         "status": "CLOSED",
-        "created_at": new_pos.entry_time,
-        "filled_at": new_pos.entry_time,
+        "created_at": entry_time_val,
+        "filled_at": entry_time_val,
         "closed_at": now_ts,
         "exit_reason": exit_reason,
         }
