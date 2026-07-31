@@ -31,6 +31,8 @@ TRADE_PLAN_PATH = "data/trade_plan.json"
 POSITIONS_PATH = "data/positions.json"
 STATE_PATH = "data/paper_state.json"
 
+QUOTE_CURRENCY: str = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+
 INITIAL_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 TAKER_FEE = 0.001           # 0.1 %
 MAKER_FEE = 0.00075         # 0.075 %
@@ -301,8 +303,9 @@ class PaperTradingEngine:
     """Orchestrate paper trading simulation."""
 
     def __init__(self, notifier: Any = None, initial_balance: float | None = None) -> None:
+        self._explicit_initial = initial_balance is not None
         self.wallet = VirtualWallet(
-            initial_balance if initial_balance is not None else INITIAL_BALANCE
+            initial_balance if self._explicit_initial else INITIAL_BALANCE
         )
         self.orders: list[Order] = []
         self.positions: dict[str, VirtualPosition] = {}
@@ -328,7 +331,8 @@ class PaperTradingEngine:
             return
 
         self.wallet.balance = state.get("balance", INITIAL_BALANCE)
-        self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
+        if not self._explicit_initial:
+            self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
         self.wallet.margin_used = state.get("margin_used", 0.0)
         self.orders = [Order(**o) for o in state.get("orders", [])]
         self.positions = {
@@ -412,7 +416,11 @@ class PaperTradingEngine:
 
     def _save_state(self) -> None:
         """Persist wallet, orders, positions, and equity history."""
-        os.makedirs("data", exist_ok=True)
+        # Derive the data dir from STATE_PATH so a redirected (e.g. test)
+        # STATE_PATH also redirects the companion positions.json — never
+        # write test positions into the live data/positions.json.
+        data_dir = os.path.dirname(STATE_PATH) or "data"
+        os.makedirs(data_dir, exist_ok=True)
         state = {
             "version": 1,
             "balance": self.wallet.balance,
@@ -447,7 +455,7 @@ class PaperTradingEngine:
             ]
         }
 
-        with open("data/positions.json", "w") as f:
+        with open(os.path.join(data_dir, "positions.json"), "w") as f:
             json.dump(positions_data, f, indent=2, default=str)
 
     def run(self, allow_new_positions: bool = True) -> dict[str, Any]:
@@ -455,7 +463,7 @@ class PaperTradingEngine:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PAPER TRADING ENGINE")
         print(f"  {'=' * 78}")
-        print(f"  Initial Balance : {self.wallet.initial:>8,.2f} USDT")
+        print(f"  Initial Balance : {self.wallet.initial:>8,.2f} {QUOTE_CURRENCY}")
         print(f"  Taker Fee       : {TAKER_FEE * 100:.2f}%")
         print(f"  Slippage        : {SLIPPAGE_BPS} bps")
         print()
@@ -617,7 +625,7 @@ class PaperTradingEngine:
 
             qty = math.floor(max_affordable * 10000) / 10000
             print(f"    SCALED {symbol}: {plan_qty:.2f} -> {qty:.2f} units "
-                  f"(free={self.wallet.free_balance:,.2f} USDT)")
+                  f"(free={self.wallet.free_balance:,.2f} {QUOTE_CURRENCY})")
         else:
             qty = plan_qty
 
@@ -901,11 +909,11 @@ class PaperTradingEngine:
         print(f"  {'=' * 78}")
         print(f"  PAPER TRADING ENGINE — RESULTS")
         print(f"  {'=' * 78}")
-        print(f"  USDT Balance     : {m.get('final_balance', 0):>8,.2f} USDT")
-        print(f"  Equity           : {m.get('final_equity', 0):>8,.2f} USDT")
-        print(f"  Realized PnL     : {m.get('realized_pnl', 0):>+8,.2f} USDT")
-        print(f"  Unrealized PnL   : {m.get('unrealized_pnl', 0):>+8,.2f} USDT")
-        print(f"  Net PnL          : {m.get('net_pnl', 0):>+8,.2f} USDT")
+        print(f"  {QUOTE_CURRENCY} Balance    : {m.get('final_balance', 0):>8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Equity           : {m.get('final_equity', 0):>8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Realized PnL     : {m.get('realized_pnl', 0):>+8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Unrealized PnL   : {m.get('unrealized_pnl', 0):>+8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Net PnL          : {m.get('net_pnl', 0):>+8,.2f} {QUOTE_CURRENCY}")
         print(f"  Return           : {m.get('total_return_pct', 0):>+7.2f}%")
         print(f"  Open Positions   : {open_pos}")
         print(f"  Closed Positions : {closed_pos}")
@@ -914,7 +922,7 @@ class PaperTradingEngine:
             print(f"  Cancelled Orders : {len(cancelled)}")
         print(f"  Win Rate         : {m.get('win_rate', 0):.1f}%")
         print(f"  Profit Factor    : {_fmt_pf(m.get('profit_factor', 0))}")
-        print(f"  Max Drawdown     : {m.get('max_drawdown', 0):>8,.2f} USDT "
+        print(f"  Max Drawdown     : {m.get('max_drawdown', 0):>8,.2f} {QUOTE_CURRENCY} "
               f"({m.get('max_drawdown_pct', 0):.2f}%)")
         print(f"  Execution Time   : {elapsed:.2f}s")
         print(f"  {'=' * 78}")

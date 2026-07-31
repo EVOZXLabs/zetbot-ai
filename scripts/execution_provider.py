@@ -118,6 +118,9 @@ class OrderRequest:
         if not self.client_order_id:
             self.client_order_id = "zb" + self.trace_id.replace("-", "")[:34]
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class OrderResult:
@@ -370,19 +373,40 @@ class PaperExecutionProvider(ExecutionProvider):
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
-    def _save_positions(self) -> None:
+    def _save_positions(self, extra_order: Optional[dict[str, Any]] = None) -> None:
+        """Persist positions (and wallet) to paper_state.json.
+
+        ``paper_state.json`` is the authoritative state the pipeline and
+        risk manager re-derive from — never clobber its orders /
+        equity_history (those belong to paper_trading_engine), preserve
+        them so a provider save cannot wipe trade history.
+        """
         import json
         os.makedirs("data", exist_ok=True)
+        try:
+            with open(PAPER_STATE_PATH) as f:
+                existing = json.load(f)
+            orders = list(existing.get("orders", []))
+            equity_history = existing.get("equity_history", [])
+            initial_balance = existing.get("initial_balance", self.balance.initial)
+            margin_used = existing.get("margin_used", 0.0)
+        except (FileNotFoundError, json.JSONDecodeError):
+            orders = []
+            equity_history = []
+            initial_balance = self.balance.initial
+            margin_used = 0.0
+        if extra_order is not None:
+            orders.append(extra_order)
         state: dict[str, Any] = {
             "version": 1,
             "balance": self.balance.balance,
-            "initial_balance": self.balance.initial,
-            "margin_used": 0.0,
-            "orders": [],
+            "initial_balance": initial_balance,
+            "margin_used": margin_used,
+            "orders": orders,
             "positions": {
                 sym: asdict(vp) for sym, vp in self.positions.items()
             },
-            "equity_history": [],
+            "equity_history": equity_history,
         }
         with open(PAPER_STATE_PATH, "w") as f:
             json.dump(state, f, indent=2, default=str)
@@ -515,6 +539,44 @@ class PaperExecutionProvider(ExecutionProvider):
         self.balance.save()
 
         elapsed = (time.time() - t0) * 1000
+
+        # Close / reduce the paper position so paper_state.json stays the
+        # authoritative record — otherwise the next pipeline cycle reloads
+        # a stale OPEN position and reverts the sale (both the position
+        # and the credited balance).
+        vp = self.positions.get(symbol)
+        if vp is not None and vp.status in OPEN_STATUSES:
+            cost_part = vp.cost_basis * (qty / vp.quantity) if vp.quantity > 0 else 0.0
+            sell_pnl = total_proceeds - cost_part
+            vp.remaining_qty = max(0.0, vp.remaining_qty - qty)
+            vp.realized_pnl = round(vp.realized_pnl + sell_pnl, 2)
+            vp.current_price = fill_price
+            if vp.remaining_qty <= 0:
+                vp.status = "CLOSED"
+                vp.remaining_qty = 0.0
+                vp.unrealized_pnl = 0.0
+            vp.total_pnl = round(vp.realized_pnl + vp.unrealized_pnl, 2)
+            sell_order = {
+                "id": f"po_{uuid.uuid4().hex[:12]}",
+                "symbol": symbol,
+                "side": "SELL",
+                "type": request.type,
+                "quantity": qty,
+                "filled_quantity": qty,
+                "fill_price": fill_price,
+                "total_proceeds": round(total_proceeds, 8),
+                "net_pnl": round(sell_pnl, 2),
+                "status": "CLOSED",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "filled_at": datetime.now(timezone.utc).isoformat(),
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "exit_reason": "market_sell",
+            }
+            self._save_positions(extra_order=sell_order)
+            emit_event(PipelineEvent(
+                "POSITION_CLOSED", symbol,
+                qty=qty, price=fill_price, pnl=round(sell_pnl, 2),
+            ))
 
         return OrderResult(
             order_id="po_" + uuid.uuid4().hex[:12],

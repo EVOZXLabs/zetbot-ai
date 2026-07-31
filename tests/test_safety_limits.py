@@ -34,8 +34,13 @@ from scripts.order_manager import OrderManager
 
 
 @pytest.fixture
-def safeguard() -> SafeGuard:
+def safeguard(monkeypatch: pytest.MonkeyPatch) -> SafeGuard:
     """Fresh SafeGuard with low limits for easy testing."""
+    # _live_balance() reads the real data/paper_balance.json (live bot
+    # state) — redirect it to 0.0 so the fallback chain uses
+    # set_account_balance() and tests stay deterministic regardless of
+    # the bot's current balance file.
+    monkeypatch.setattr(SafeGuard, "_live_balance", staticmethod(lambda: 0.0))
     sg = SafeGuard(
         max_daily_loss_pct=5.0,
         max_consecutive_losses=3,

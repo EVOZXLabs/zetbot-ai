@@ -34,7 +34,6 @@ from scripts.paper_trading_engine import (
     VirtualWallet,
     TAKER_FEE,
     SLIPPAGE_BPS,
-    INITIAL_BALANCE,
 )
 
 
@@ -180,7 +179,11 @@ class TestStateRecovery:
 
         # Create engine, execute a buy
         engine = PaperTradingEngine()
-        assert engine.wallet.balance == INITIAL_BALANCE
+        # Fresh engine (no state file) → balance == its own initial balance.
+        # NOTE: assert against the engine itself, not a module-level
+        # INITIAL_BALANCE import — other test files reload the module with
+        # different env values, which would break this in a full-suite run.
+        assert engine.wallet.balance == engine.wallet.initial
 
         # Manually create a plan and execute
         plan = {
@@ -209,7 +212,7 @@ class TestStateRecovery:
 
         # Create new engine — should restore
         engine2 = PaperTradingEngine()
-        assert engine2.wallet.balance < INITIAL_BALANCE
+        assert engine2.wallet.balance < engine2.wallet.initial
         assert len(engine2.orders) == 1
         assert "BTC/USDT" in engine2.positions
         vp = engine2.positions["BTC/USDT"]

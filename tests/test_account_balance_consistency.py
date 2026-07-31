@@ -35,16 +35,17 @@ class TestInitialBalanceFromConfig:
 
     def test_engine_uses_account_balance_from_env(self) -> None:
         """PaperTradingEngine wallet uses env ACCOUNT_BALANCE when no state file."""
-        from scripts.paper_trading_engine import PaperTradingEngine, STATE_PATH
-        from scripts.paper_trading_engine import INITIAL_BALANCE
-
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("ACCOUNT_BALANCE", "180000")
-            # Point state to a non-existent path so _load_state() returns early
-            mp.setattr("scripts.paper_trading_engine.STATE_PATH", "/tmp/nonexistent_state.json")
             import importlib
             import scripts.paper_trading_engine as pte
             importlib.reload(pte)
+            # Point state to a non-existent path so _load_state() returns
+            # early. NOTE: must be set AFTER reload — reload() re-executes
+            # the module body and would otherwise reset STATE_PATH to the
+            # real data/paper_state.json, leaking live bot state into the
+            # test.
+            mp.setattr("scripts.paper_trading_engine.STATE_PATH", "/tmp/nonexistent_state.json")
             engine = pte.PaperTradingEngine()
             assert engine.wallet.initial == 180000.0
             assert engine.wallet.balance == 180000.0
@@ -64,10 +65,10 @@ class TestInitialBalanceFromConfig:
         """Explicit initial_balance takes precedence over env."""
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("ACCOUNT_BALANCE", "50000")
-            mp.setattr("scripts.paper_trading_engine.STATE_PATH", "/tmp/nonexistent_state.json")
             import importlib
             import scripts.paper_trading_engine as pte
             importlib.reload(pte)
+            mp.setattr("scripts.paper_trading_engine.STATE_PATH", "/tmp/nonexistent_state.json")
             engine = pte.PaperTradingEngine(initial_balance=99999.0)
             assert engine.wallet.initial == 99999.0
             importlib.reload(pte)

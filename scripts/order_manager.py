@@ -893,6 +893,14 @@ def _sync_paper_files(
         pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) - cost, 2)
     elif side == "SELL":
         proceeds = amount * price - fee
+        # Close the position in the AUTHORITATIVE state files so the
+        # next pipeline cycle can't resurrect it: paper_state.json
+        # (wallet balance + position + order) and positions.json
+        # (Telegram views). Returns the REAL realized PnL.
+        pnl = _close_paper_position_on_sell(symbol, amount, price, proceeds)
+        # Keep the order record consistent with the realized PnL.
+        if orders_data.get("orders"):
+            orders_data["orders"][-1]["net_pnl"] = round(pnl, 2)
         pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) + proceeds, 2)
         pb["total_trades"] = pb.get("total_trades", 0) + 1
         if pnl > 0:
@@ -941,3 +949,108 @@ def _sync_paper_files(
             json.dump(pb, f, indent=2)
     except OSError:
         pass
+
+
+def _close_paper_position_on_sell(
+    symbol: str,
+    amount: float,
+    price: float,
+    proceeds: float,
+) -> float:
+    """Close an OPEN paper position after a manual /sell fills.
+
+    ``paper_state.json`` is the authoritative state the pipeline re-derives
+    everything from.  A manual SELL that only updated ``paper_balance.json``
+    used to be silently reverted by the next pipeline cycle: the position
+    was reloaded as still-OPEN and the cash figure reverted to the
+    pre-sale balance.  This patches ``paper_state.json`` (wallet balance +
+    CLOSED position + SELL order) and ``positions.json`` so the closure is
+    durable and immediately visible to Telegram commands.
+
+    Returns the realized PnL computed against the position's cost basis
+    (0.0 when no matching OPEN position is found).
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+    now_ts = datetime.now(timezone.utc).isoformat()
+    data_dir = "data"
+
+    state_path = f"{data_dir}/paper_state.json"
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0.0
+
+    vp = (state.get("positions") or {}).get(symbol)
+    if vp is None or vp.get("status") != "OPEN":
+        return 0.0
+
+    qty_total = float(vp.get("quantity", 0) or 0)
+    cost_basis = float(vp.get("cost_basis", 0) or 0)
+    cost_part = cost_basis * (amount / qty_total) if qty_total > 0 else 0.0
+    pnl = proceeds - cost_part
+
+    # Credit the wallet so the next pipeline cycle sees the proceeds.
+    state["balance"] = round(float(state.get("balance", 0.0)) + proceeds, 2)
+
+    vp["status"] = "CLOSED"
+    vp["remaining_qty"] = 0.0
+    vp["unrealized_pnl"] = 0.0
+    vp["realized_pnl"] = round(pnl, 2)
+    vp["total_pnl"] = round(pnl, 2)
+    vp["current_price"] = price
+    vp["closure_notified"] = True
+
+    state.setdefault("orders", []).append({
+        "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
+        "symbol": symbol,
+        "side": "SELL",
+        "type": "MARKET",
+        "quantity": amount,
+        "filled_quantity": amount,
+        "fill_price": price,
+        "total_proceeds": round(proceeds, 2),
+        "net_pnl": round(pnl, 2),
+        "status": "CLOSED",
+        "created_at": now_ts,
+        "filled_at": now_ts,
+        "closed_at": now_ts,
+        "exit_reason": "manual",
+    })
+
+    try:
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+    except OSError:
+        pass
+
+    # Close the position in positions.json too so /status and /positions
+    # reflect the closure immediately.
+    from scripts.position_status import is_open  # noqa: PLC0415
+    pos_path = f"{data_dir}/positions.json"
+    try:
+        with open(pos_path) as f:
+            pos_data = json.load(f)
+        for p in pos_data.get("positions", []):
+            if p.get("symbol") == symbol and is_open(p.get("status")):
+                p["status"] = "CLOSED"
+                p["remaining_qty"] = 0.0
+                p["unrealized_pnl"] = 0.0
+                p["realized_pnl"] = round(pnl, 2)
+                p["total_pnl"] = round(pnl, 2)
+                p["closed_at"] = now_ts
+                break
+        pos_data["active_count"] = sum(
+            1 for p in pos_data.get("positions", [])
+            if is_open(p.get("status"))
+        )
+        pos_data["closed_count"] = sum(
+            1 for p in pos_data.get("positions", [])
+            if not is_open(p.get("status"))
+        )
+        with open(pos_path, "w") as f:
+            json.dump(pos_data, f, indent=2, default=str)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    return pnl

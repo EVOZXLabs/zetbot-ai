@@ -5,10 +5,8 @@ TP/SL execution, holding time progression, and wallet accounting.
 Covers Audit Phase 2 goals 1-9.
 """
 
-import copy
-import json
 import os
-import tempfile
+from typing import Any
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 
@@ -22,7 +20,6 @@ from scripts.paper_trading_engine import (
     VirtualPosition,
     VirtualWallet,
     EquitySnapshot,
-    STATE_PATH,
 )
 from scripts.position_manager import (
     DataLoader,
@@ -31,6 +28,20 @@ from scripts.position_manager import (
     PositionSimulator,
     TradePlan,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every test in this file redirects STATE_PATH to a temp file.
+
+    These tests used to read/write/delete the REAL ``data/paper_state.json``:
+    they failed whenever the bot had real state (assertions saw the bot's
+    orders/positions) and destroyed live bot state on save/cleanup.
+    """
+    import scripts.paper_trading_engine as pte
+    monkeypatch.setattr(pte, "STATE_PATH", str(tmp_path / "paper_state.json"))
 
 
 # ===================================================================
@@ -473,7 +484,11 @@ class TestMetricsCalculator:
 # ===================================================================
 
 class TestStatePersistence:
-    """PaperTradingEngine must save and reload state across cycles."""
+    """PaperTradingEngine must save and reload state across cycles.
+
+    STATE_PATH is redirected to a per-test temp file by the module-level
+    ``_isolated_state`` fixture (see top of file).
+    """
 
     def test_save_and_load_orders(self):
         """Orders survive a save/load cycle."""
@@ -592,9 +607,12 @@ class TestStatePersistence:
         assert not (vp is not None and vp.status == "OPEN")
 
     @staticmethod
-    def _cleanup():
+    def _cleanup() -> None:
+        # Use the module attribute (may be monkeypatched to a temp path)
+        # so cleanup NEVER touches the real data/paper_state.json.
+        import scripts.paper_trading_engine as pte
         try:
-            os.remove(STATE_PATH)
+            os.remove(pte.STATE_PATH)
         except FileNotFoundError:
             pass
 
