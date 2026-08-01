@@ -30,6 +30,7 @@ from scripts.execution_engine import (
     _now,
     append_audit,
 )
+from scripts.paper_state_lock import paper_state_writes
 
 
 class OrderVerificationError(Exception):
@@ -862,6 +863,7 @@ class OrderManager:
 # ---------------------------------------------------------------------------
 
 
+@paper_state_writes
 def _sync_paper_files(
     symbol: str, side: str, amount: float, price: float, cost: float, pnl: float,
     fee: float = 0.0,
@@ -979,6 +981,7 @@ def _sync_paper_files(
         pass
 
 
+@paper_state_writes
 def _close_paper_position_on_sell(
     symbol: str,
     amount: float,

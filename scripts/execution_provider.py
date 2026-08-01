@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import paper_state_writes
 
 
 # ======================================================================
@@ -304,6 +305,7 @@ class PaperBalance:
     def add(self, amount: float) -> None:
         self.balance += amount
 
+    @paper_state_writes
     def save(self) -> None:
         import json
         os.makedirs("data", exist_ok=True)
@@ -373,6 +375,7 @@ class PaperExecutionProvider(ExecutionProvider):
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
+    @paper_state_writes
     def _save_positions(self, extra_order: Optional[dict[str, Any]] = None) -> None:
         """Persist positions (and wallet) to paper_state.json.
 

@@ -60,6 +60,7 @@ from scripts.logger import PipelineLogger
 from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
 from scripts.position_status import is_open, OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import paper_state_writes, merge_positions
 
 # ---------------------------------------------------------------------------
 #  Configure the ZetBot logger — bot/notifier.py and all bot/ modules use
@@ -321,6 +322,7 @@ def _notify_closure(
         logger.warning(f"Failed to send close notification for {symbol}: {exc}")
 
 
+@paper_state_writes
 def _update_paper_on_closure(
     logger: Any,
     symbol: str,
@@ -494,6 +496,7 @@ def _update_paper_on_closure(
     return pnl, pb["final_balance"]
 
 
+@paper_state_writes
 def _sync_paper_state_on_closure(
     logger: Any,
     symbol: str,
@@ -796,11 +799,7 @@ def _monitor_positions(
                     logger.debug(f"Cancel protection for {sym}: {exc}")
 
     if changed:
-        try:
-            with open("data/positions.json", "w") as f:
-                json.dump(data, f, indent=2, default=str)
-        except OSError as exc:
-            logger.error(f"Failed to write positions.json: {exc}")
+        merge_positions(data.get("positions", []))
 
 
 def _live_quote_balance(container: Any) -> float:

@@ -30,6 +30,7 @@ from scripts.app_config import AppConfig
 from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import paper_state_writes, merge_positions
 
 
 STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
@@ -764,20 +765,9 @@ class Pipeline:
             else:
                 updated_positions.append(pos)
 
-        # Write updated positions
-        pos_data["positions"] = updated_positions
-        pos_data["active_count"] = sum(
-            1 for p in updated_positions if p.get("status") in OPEN_STATUSES
-        )
-        pos_data["closed_count"] = sum(
-            1 for p in updated_positions if p.get("status") in CLOSED_STATUSES
-        )
-        try:
-            os.makedirs("data", exist_ok=True)
-            with open(pos_path, "w") as f:
-                json.dump(pos_data, f, indent=2, default=str)
-        except OSError as exc:
-            self.logger.error(f"Failed to write positions.json: {exc}")
+        # Write updated positions (atomic merge so a concurrent writer's
+        # symbols are preserved — BUG-4).
+        merge_positions(updated_positions)
 
     def _reconcile_positions_live(self, pipeline: Any) -> None:
         """LIVE TP/SL reconciliation — serialized per symbol via exit_gate.
@@ -887,6 +877,7 @@ class Pipeline:
         except Exception as exc:
             self.logger.debug(f"Cancel protection for {symbol}: {exc}")
 
+    @paper_state_writes
     def _persist_paper_state(self, provider: Any) -> None:
         """Persist paper provider state to balance/orders JSON files."""
         import json  # noqa: PLC0415

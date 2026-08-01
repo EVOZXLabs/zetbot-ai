@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import paper_state_writes, merge_positions
 
 # ---------------------------------------------------------------------------
 #  Config
@@ -414,6 +415,7 @@ class PaperTradingEngine:
         from telegram.formatter import fmt_holding
         return fmt_holding(td.total_seconds())
 
+    @paper_state_writes
     def _save_state(self) -> None:
         """Persist wallet, orders, positions, and equity history."""
         # Derive the data dir from STATE_PATH so a redirected (e.g. test)
@@ -437,26 +439,11 @@ class PaperTradingEngine:
         with open(STATE_PATH, "w") as f:
             json.dump(state, f, indent=2, default=str)
 
-        # Sync positions.json for Telegram/reporting
-        positions_data = {
-            "generated": datetime.now(timezone.utc).isoformat(),
-            "total_positions": len(self.positions),
-            "active_count": sum(
-                1 for vp in self.positions.values()
-                if vp.status in OPEN_STATUSES
-            ),
-            "closed_count": sum(
-                1 for vp in self.positions.values()
-                if vp.status in CLOSED_STATUSES
-            ),
-            "positions": [
-                asdict(vp)
-                for vp in self.positions.values()
-            ]
-        }
-
-        with open(os.path.join(data_dir, "positions.json"), "w") as f:
-            json.dump(positions_data, f, indent=2, default=str)
+        # Sync positions.json for Telegram/reporting (atomic merge so a
+        # concurrent monitor/pipeline write is not clobbered — BUG-4).
+        merge_positions([
+            asdict(vp) for vp in self.positions.values()
+        ])
 
     def run(self, allow_new_positions: bool = True) -> dict[str, Any]:
         """Full paper trading pipeline."""
