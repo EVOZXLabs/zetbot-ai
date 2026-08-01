@@ -582,3 +582,73 @@ class TestPaperStateSyncOnClosure:
             state = json.load(f)
         # total_proceeds defaults to 0, so balance stays unchanged
         assert state["balance"] == 9500.0
+
+
+class TestIdleCycleDoesNotResetBalance:
+    """Regression test for the "BOT STARTED" / "/status" mismatch bug.
+
+    Bug: an open position was bought (cash correctly debited in
+    ``paper_state.json``), then a later pipeline cycle found no new
+    READY plans. Because that cycle appended nothing to
+    ``equity_history``, ``MetricsCalculator.compute()`` fell back to
+    ``initial_balance`` for ``final_balance`` -- silently "refunding"
+    the cash already spent on the still-open position. This made
+    ``paper_balance.json`` (and therefore /status, /balance, /wallet)
+    report cash == the full starting balance while equity also counted
+    the open position's value on top of it, effectively double-counting
+    the money.
+    """
+
+    def test_no_ready_plans_keeps_real_wallet_balance(
+        self, tmp_path: Any
+    ) -> None:
+        os.chdir(tmp_path)
+        os.makedirs("data", exist_ok=True)
+
+        engine = PaperTradingEngine(initial_balance=1_000_000.0)
+
+        plan = {
+            "symbol": "SHIB/IDR",
+            "entry_price": 0.088486538,
+            "quantity": 6_782_726.66,
+            "position_size_usdt": 600_000.0,
+            "stop_loss": 0.08538723,
+            "tp1": 0.09153277,
+            "tp2": 0.09460554,
+            "tp3": 0.09767831,
+            "risk_amount": 25.0,
+            "reward_amount": 25.0,
+            "risk_reward": 1.0,
+            "confidence": 80.0,
+            "recommendation": "BUY",
+            "signal_time": "2026-08-01T17:46:01",
+            "status": "READY",
+        }
+        order = engine._execute_plan(plan, None)
+        assert order is not None
+
+        real_cash_after_buy = engine.wallet.balance
+        assert real_cash_after_buy < engine.wallet.initial
+
+        # Simulate a later, separate pipeline run (new engine instance,
+        # state restored from disk) that finds no READY plans -- this is
+        # the "idle cycle" path (``run()`` with an empty ``plans`` list),
+        # which historically reset the reported cash back to the full
+        # initial balance.
+        engine._save_state()
+        idle_engine = PaperTradingEngine()
+        assert idle_engine.wallet.balance == pytest.approx(real_cash_after_buy)
+
+        metrics = idle_engine.run(allow_new_positions=True)
+
+        assert metrics["final_balance"] == pytest.approx(
+            real_cash_after_buy, abs=0.01
+        )
+        assert metrics["final_balance"] != pytest.approx(
+            idle_engine.wallet.initial, abs=0.01
+        )
+        # Equity must be cash + position value, never cash counted twice.
+        position_value = idle_engine._total_position_value()
+        assert metrics["final_equity"] == pytest.approx(
+            real_cash_after_buy + position_value, abs=0.01
+        )
