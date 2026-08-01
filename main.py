@@ -684,6 +684,11 @@ def _monitor_positions(
         container is not None
         and hasattr(container, "order")
         and getattr(container.order, "mode", "PAPER") == "LIVE"
+        # Same arm guard as the pipeline stage: the monitor must only use
+        # the real-exchange provider when live trading is actually armed.
+        # Otherwise TP/SL exits here would hit the exchange with real sell
+        # orders for positions that were only simulated.
+        and container.order.is_live_enabled()
     )
     if is_live:
         provider = LiveExecutionProvider(

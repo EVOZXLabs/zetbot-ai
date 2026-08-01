@@ -628,8 +628,29 @@ def _round_qty(qty: float) -> float:
 # ======================================================================
 
 
+def _live_armed() -> bool:
+    """True only when live trading has been explicitly armed.
+
+    Uses the SAME in-memory arm flag that gates ExecutionEngine's
+    LiveExecutor (flipped by OrderManager.arm_live() ->
+    LiveExecutor.enable(), reset to False on every process start and by
+    disarm_live()). This is the single safety switch that EVERY real-order
+    path must pass through — LiveExecutionProvider must never submit a
+    real exchange order while live trading is not armed, regardless of
+    which code path (pipeline stage, position monitor, manual command)
+    constructs it.
+    """
+    from scripts.execution_engine import LiveExecutor  # noqa: PLC0415
+    return LiveExecutor.is_enabled()
+
+
 class LiveExecutionProvider(ExecutionProvider):
-    """Executes orders on a real exchange via CCXT."""
+    """Executes orders on a real exchange via CCXT.
+
+    Real order submission is gated on the live-arm switch: while
+    ``LiveExecutor`` is not enabled, ``execute_buy``/``execute_sell``
+    refuse with REJECTED and never touch the exchange.
+    """
 
     name = "live"
     mode = "LIVE"
@@ -685,6 +706,14 @@ class LiveExecutionProvider(ExecutionProvider):
             return _round_qty(price)
 
     def execute_buy(self, request: OrderRequest) -> OrderResult:
+        if not _live_armed():
+            return OrderResult.rejected(
+                request,
+                "Live trading is not enabled (not armed). "
+                "Run /golive and reply CONFIRM LIVE to arm real-money trading.",
+                self.name,
+            )
+
         t0 = time.time()
         symbol = request.symbol
         amount = request.amount
@@ -751,6 +780,14 @@ class LiveExecutionProvider(ExecutionProvider):
             return OrderResult.failed(request, f"Live BUY error: {exc}", self.name)
 
     def execute_sell(self, request: OrderRequest) -> OrderResult:
+        if not _live_armed():
+            return OrderResult.rejected(
+                request,
+                "Live trading is not enabled (not armed). "
+                "Run /golive and reply CONFIRM LIVE to arm real-money trading.",
+                self.name,
+            )
+
         t0 = time.time()
         symbol = request.symbol
         amount = request.amount

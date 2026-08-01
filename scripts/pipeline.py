@@ -558,6 +558,12 @@ class Pipeline:
         is_live = (
             self.container is not None
             and self.container.order.mode == "LIVE"
+            # Only an ARMED live session may use the real exchange. A LIVE
+            # configured but not-armed run degrades to the paper provider
+            # (mirrors ExecutionEngine's simulation fallback) so that no
+            # real order can ever leave through this stage before the
+            # operator ran /golive + CONFIRM LIVE.
+            and self.container.order.is_live_enabled()
         )
 
         allow_new = True
