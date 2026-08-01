@@ -1010,63 +1010,67 @@ def _close_paper_position_on_sell(
         with open(state_path) as f:
             state = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return 0.0
+        state = None
 
-    vp = (state.get("positions") or {}).get(symbol)
-    if vp is None or vp.get("status") != "OPEN":
-        return 0.0
+    pnl = 0.0
+    vp = (state.get("positions") or {}).get(symbol) if state is not None else None
 
-    qty_total = float(vp.get("quantity", 0) or 0)
-    cost_basis = float(vp.get("cost_basis", 0) or 0)
-    cost_part = cost_basis * (amount / qty_total) if qty_total > 0 else 0.0
-    pnl = proceeds - cost_part
+    if vp is not None and vp.get("status") == "OPEN":
+        qty_total = float(vp.get("quantity", 0) or 0)
+        cost_basis = float(vp.get("cost_basis", 0) or 0)
+        cost_part = cost_basis * (amount / qty_total) if qty_total > 0 else 0.0
+        pnl = proceeds - cost_part
 
-    # Credit the wallet so the next pipeline cycle sees the proceeds.
-    state["balance"] = round(float(state.get("balance", 0.0)) + proceeds, 2)
+        # Credit the wallet so the next pipeline cycle sees the proceeds.
+        state["balance"] = round(float(state.get("balance", 0.0)) + proceeds, 2)
 
-    vp["status"] = "CLOSED"
-    vp["remaining_qty"] = 0.0
-    vp["unrealized_pnl"] = 0.0
-    vp["realized_pnl"] = round(pnl, 2)
-    vp["total_pnl"] = round(pnl, 2)
-    vp["current_price"] = price
-    vp["closure_notified"] = True
+        vp["status"] = "CLOSED"
+        vp["remaining_qty"] = 0.0
+        vp["unrealized_pnl"] = 0.0
+        vp["realized_pnl"] = round(pnl, 2)
+        vp["total_pnl"] = round(pnl, 2)
+        vp["current_price"] = price
+        vp["closure_notified"] = True
 
-    entry_price = float(vp.get("entry_price", 0) or 0)
-    net_pnl_pct = round((pnl / cost_part * 100), 2) if cost_part > 0 else 0.0
+        entry_price = float(vp.get("entry_price", 0) or 0)
+        net_pnl_pct = round((pnl / cost_part * 100), 2) if cost_part > 0 else 0.0
 
-    state.setdefault("orders", []).append({
-        "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
-        "symbol": symbol,
-        "side": "SELL",
-        "type": "MARKET",
-        "quantity": amount,
-        "filled_quantity": amount,
-        "entry_price": entry_price,
-        "fill_price": price,
-        "slippage": 0.0,
-        "entry_fee": 0.0,
-        "exit_price": price,
-        "exit_fee": 0.0,
-        "total_cost": round(cost_part, 2),
-        "total_proceeds": round(proceeds, 2),
-        "net_pnl": round(pnl, 2),
-        "net_pnl_pct": net_pnl_pct,
-        "status": "CLOSED",
-        "created_at": now_ts,
-        "filled_at": now_ts,
-        "closed_at": now_ts,
-        "exit_reason": "manual",
-    })
+        state.setdefault("orders", []).append({
+            "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
+            "symbol": symbol,
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": amount,
+            "filled_quantity": amount,
+            "entry_price": entry_price,
+            "fill_price": price,
+            "slippage": 0.0,
+            "entry_fee": 0.0,
+            "exit_price": price,
+            "exit_fee": 0.0,
+            "total_cost": round(cost_part, 2),
+            "total_proceeds": round(proceeds, 2),
+            "net_pnl": round(pnl, 2),
+            "net_pnl_pct": net_pnl_pct,
+            "status": "CLOSED",
+            "created_at": now_ts,
+            "filled_at": now_ts,
+            "closed_at": now_ts,
+            "exit_reason": "manual",
+        })
 
-    try:
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2, default=str)
-    except OSError:
-        pass
+        try:
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2, default=str)
+        except OSError:
+            pass
 
     # Close the position in positions.json too so /status and /positions
-    # reflect the closure immediately.
+    # reflect the closure immediately — this must run regardless of
+    # whether paper_state.json had a matching OPEN entry above. Relying
+    # on that guard used to let an out-of-sync paper_state.json silently
+    # skip this block entirely, leaving positions.json (what Telegram
+    # actually reads) showing a position that had already been sold.
     from scripts.position_status import is_open  # noqa: PLC0415
     pos_path = f"{data_dir}/positions.json"
     try:
@@ -1074,6 +1078,14 @@ def _close_paper_position_on_sell(
             pos_data = json.load(f)
         for p in pos_data.get("positions", []):
             if p.get("symbol") == symbol and is_open(p.get("status")):
+                if vp is None:
+                    # paper_state.json didn't have this position — fall
+                    # back to positions.json's own cost basis so PnL is
+                    # still reported instead of a misleading 0.0.
+                    fallback_cost_basis = float(p.get("cost_basis", 0.0) or 0.0)
+                    if fallback_cost_basis <= 0:
+                        fallback_cost_basis = float(p.get("entry_price", 0.0) or 0.0) * amount
+                    pnl = proceeds - fallback_cost_basis
                 p["status"] = "CLOSED"
                 p["remaining_qty"] = 0.0
                 p["unrealized_pnl"] = 0.0
