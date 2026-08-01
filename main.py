@@ -803,6 +803,35 @@ def _monitor_positions(
             logger.error(f"Failed to write positions.json: {exc}")
 
 
+def _live_quote_balance(container: Any) -> float:
+    """Best-effort LIVE account balance in the quote currency.
+
+    LIVE closures must NEVER read or write the paper accounting files
+    (``paper_balance.json`` / ``paper_orders.json`` / ``paper_state.json``)
+    — BUG-3. The "Balance now ..." line in a LIVE close notification
+    therefore comes straight from the exchange, never from paper state.
+    """
+    try:
+        config = getattr(container, "_config", None)
+        quote = (
+            getattr(config, "quote_currency", None)
+            or os.getenv("QUOTE_CURRENCY", "USDT")
+        ).upper()
+        exchange = getattr(container, "exchange", None)
+        if exchange is None:
+            return 0.0
+        raw = exchange.fetch_balance()
+        bucket = raw.get(quote) if isinstance(raw, dict) else None
+        if isinstance(bucket, dict):
+            return float(bucket.get("total", 0) or 0)
+        try:
+            return float(bucket or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    except Exception:
+        return 0.0
+
+
 def _monitor_positions_live(
     logger: Any,
     notifier: Any,
@@ -852,7 +881,9 @@ def _monitor_positions_live(
             _sym: str = sym,
             _price: float = current_price,
         ) -> None:
-            _monitor_live_closure(logger, notifier, _sym, _price, prev, reconciled)
+            _monitor_live_closure(
+                logger, notifier, container, _sym, _price, prev, reconciled,
+            )
 
         reconcile_exit(
             pipeline,
@@ -867,6 +898,7 @@ def _monitor_positions_live(
 def _monitor_live_closure(
     logger: Any,
     notifier: Any,
+    container: Any,
     sym: str,
     current_price: float,
     prev: dict,
@@ -876,8 +908,13 @@ def _monitor_live_closure(
 
     Runs inside the per-symbol exit lock (via ``reconcile_exit``'s
     ``on_reconciled``), so follow-up bookkeeping (``closure_notified``)
-    is persisted atomically with the reconcile. Mirror of the PAPER
-    monitor's closure path — kept in the same shape for parity.
+    is persisted atomically with the reconcile.
+
+    LIVE closures must NEVER touch the paper accounting files
+    (``paper_balance.json`` / ``paper_orders.json`` / ``paper_state.json``)
+    — BUG-3. PnL comes from the reconciled position (real fill data) and
+    the "Balance now ..." line comes from the real exchange balance, so
+    no paper file is read or written here.
     """
     from datetime import datetime, timedelta  # noqa: PLC0415
     from scripts.exit_gate import save_position  # noqa: PLC0415
@@ -894,13 +931,11 @@ def _monitor_live_closure(
     ):
         exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
         quote = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+        pnl = float(reconciled.get("total_pnl", 0) or 0)
+        new_balance = _live_quote_balance(container)
         logger.info(
             f"Position {sym}: {old_status} → {new_status} "
-            f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {quote}, {exit_reason})"
-        )
-
-        pnl, new_balance = _update_paper_on_closure(
-            logger, sym, reconciled, current_price, exit_reason,
+            f"(PnL: {pnl:+.2f} {quote}, {exit_reason})"
         )
 
         try:
