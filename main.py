@@ -699,6 +699,18 @@ def _monitor_positions(
         provider = PaperExecutionProvider()
 
     pipeline = ExecutionPipeline(provider)
+
+    if is_live:
+        # LIVE exits go through the shared per-symbol gate so a TP/SL
+        # market sell here can never duplicate the pipeline's or the
+        # protection scheduler's (BUG-2). Protection orders are cancelled
+        # BEFORE the market sell, inside the same critical section.
+        _monitor_positions_live(
+            logger, notifier, container,
+            positions, tickers, plans_by_symbol, pipeline,
+        )
+        return
+
     changed = False
 
     for pos in positions:
@@ -789,6 +801,126 @@ def _monitor_positions(
                 json.dump(data, f, indent=2, default=str)
         except OSError as exc:
             logger.error(f"Failed to write positions.json: {exc}")
+
+
+def _monitor_positions_live(
+    logger: Any,
+    notifier: Any,
+    container: Any,
+    positions: list[Any],
+    tickers: Any,
+    plans_by_symbol: dict[str, dict],
+    pipeline: Any,
+) -> None:
+    """LIVE position monitor — serialized per symbol via exit_gate.
+
+    Uses the SAME per-symbol lock and atomic positions.json updates as
+    the pipeline reconciliation and the protection scheduler, so a TP/SL
+    market sell here can never duplicate one of theirs (BUG-2). Resting
+    protection orders are cancelled BEFORE the market sell.
+    """
+    from scripts.exit_gate import reconcile_exit  # noqa: PLC0415
+
+    def _cancel_live_protection(symbol: str) -> None:
+        try:
+            from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+            pm = ProtectionManager(
+                container.exchange,
+                getattr(container, "_config", None),
+            )
+            pm.cancel_protection(symbol, reason="exit_gate_reconcile")
+        except Exception as exc:
+            logger.debug(f"Cancel protection for {symbol}: {exc}")
+
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        if not is_open(pos.get("status")):
+            continue
+
+        ticker = tickers.get(sym)
+        if ticker is None:
+            continue
+        current_price = float(ticker.get("last", 0) or 0)
+        if current_price <= 0:
+            continue
+
+        plan_data = plans_by_symbol.get(sym, {})
+
+        def _on_reconciled(
+            prev: dict,
+            reconciled: Any,
+            _sym: str = sym,
+            _price: float = current_price,
+        ) -> None:
+            _monitor_live_closure(logger, notifier, _sym, _price, prev, reconciled)
+
+        reconcile_exit(
+            pipeline,
+            sym,
+            current_price,
+            plan_data,
+            cancel_protection=_cancel_live_protection,
+            on_reconciled=_on_reconciled,
+        )
+
+
+def _monitor_live_closure(
+    logger: Any,
+    notifier: Any,
+    sym: str,
+    current_price: float,
+    prev: dict,
+    reconciled: Any,
+) -> None:
+    """Closure handling for the LIVE monitor.
+
+    Runs inside the per-symbol exit lock (via ``reconcile_exit``'s
+    ``on_reconciled``), so follow-up bookkeeping (``closure_notified``)
+    is persisted atomically with the reconcile. Mirror of the PAPER
+    monitor's closure path — kept in the same shape for parity.
+    """
+    from datetime import datetime, timedelta  # noqa: PLC0415
+    from scripts.exit_gate import save_position  # noqa: PLC0415
+
+    if reconciled is None:
+        return
+
+    old_status = prev.get("status")
+    new_status = reconciled.get("status")
+    if (
+        old_status != new_status
+        and new_status in CLOSED_STATUSES
+        and not prev.get("closure_notified", False)
+    ):
+        exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
+        quote = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+        logger.info(
+            f"Position {sym}: {old_status} → {new_status} "
+            f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {quote}, {exit_reason})"
+        )
+
+        pnl, new_balance = _update_paper_on_closure(
+            logger, sym, reconciled, current_price, exit_reason,
+        )
+
+        try:
+            holding_secs = float(reconciled.get("holding_hours", 0) * 3600)
+            notifier.notify_position_closed(
+                symbol=sym,
+                entry_price=reconciled.get("entry_price", 0),
+                exit_price=current_price,
+                pnl=pnl,
+                pnl_pct=reconciled.get("floating_pnl_pct", 0),
+                balance=new_balance,
+                exit_reason=exit_reason,
+                holding_time=timedelta(seconds=holding_secs),
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to send close notification for {sym}: {exc}")
+
+        merged = dict(reconciled)
+        merged["closure_notified"] = True
+        save_position(sym, merged)
 
 
 def main() -> None:

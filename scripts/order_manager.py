@@ -94,6 +94,11 @@ class OrderManager:
         Accepts both ``OrderRequest`` and ``dict`` (backward compat).
         When given a ``dict``, converts to ``OrderRequest`` internally.
 
+        LIVE SELL orders are serialized on the same per-symbol lock used
+        by every other exit path (position monitor, pipeline
+        reconciliation, protection scheduler) so a manual /sell can never
+        race a concurrent TP/SL market sell for the same symbol (BUG-2).
+
         Returns ``OrderResult`` (or ``dict`` when given a ``dict`` for
         backward compatibility).
         """
@@ -104,6 +109,15 @@ class OrderManager:
         else:
             request = self._plan_to_request(trade_plan) if isinstance(trade_plan, dict) else trade_plan
 
+        if self._engine.mode == "LIVE" and (request.side or "").upper() == "SELL":
+            from scripts.exit_gate import exit_guard  # noqa: PLC0415
+            with exit_guard(request.symbol):
+                return self._execute(request, was_dict)
+        return self._execute(request, was_dict)
+
+    def _execute(self, request: OrderRequest, was_dict: bool) -> Any:
+        """Execute an already-built order request (holds the per-symbol
+        exit lock when it is a LIVE sell — see ``execute``)."""
         # ── 0. SafeGuard check (paused/limits/cooldown) ────────────────
         if self._safeguard is not None and request.side == "BUY":
             ok, reason = self._safeguard.can_open_new_position()
@@ -118,6 +132,20 @@ class OrderManager:
             self._metrics.record(risk_result)
             append_audit(self._result_to_audit(risk_result))
             return risk_result.to_dict() if was_dict else risk_result
+
+        # ── 1b. Cancel resting protection BEFORE a LIVE market sell ────
+        # A stale protection leg (full-quantity limit/stop order) could
+        # double-fill together with this market sell at the same level.
+        # Runs inside the per-symbol exit lock held by ``execute``, i.e.
+        # before any concurrent TP/SL exit for the same symbol.
+        if self._engine.mode == "LIVE" and (request.side or "").upper() == "SELL":
+            try:
+                from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+                ProtectionManager(self._exchange, self._config).cancel_protection(
+                    request.symbol, reason="manual_sell_pre_execution",
+                )
+            except Exception:
+                pass  # best-effort — _handle_live_protection retries after fill
 
         # ── 2. Execute with retry ───────────────────────────────────────
         result = self._execute_with_retry(request)

@@ -669,7 +669,18 @@ class Pipeline:
         provider: Any,
         is_live: bool,
     ) -> None:
-        """Reconcile all open positions — shared TP/SL logic for both modes."""
+        """Reconcile all open positions — shared TP/SL logic for both modes.
+
+        LIVE mode runs through ``scripts.exit_gate`` (per-symbol lock +
+        atomic positions.json read-modify-write) so that no two exit
+        paths can sell the same quantity, and protection orders are
+        cancelled BEFORE the market sell. PAPER mode keeps its existing
+        single-threaded batched behavior untouched.
+        """
+        if is_live:
+            self._reconcile_positions_live(pipeline)
+            return
+
         qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
         import json, os  # noqa: PLC0415
 
@@ -721,15 +732,6 @@ class Pipeline:
             self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
             return
 
-        # For LIVE mode: cancel protection orders BEFORE reconciliation
-        # so the sibling order doesn't double-fill with our market sell.
-        if is_live:
-            for pos in positions:
-                sym = pos.get("symbol", "")
-                if pos.get("status") not in OPEN_STATUSES:
-                    continue
-                self._cancel_live_protection(sym)
-
         updated_positions = []
         for pos in positions:
             sym = pos.get("symbol", "")
@@ -776,6 +778,102 @@ class Pipeline:
                 json.dump(pos_data, f, indent=2, default=str)
         except OSError as exc:
             self.logger.error(f"Failed to write positions.json: {exc}")
+
+    def _reconcile_positions_live(self, pipeline: Any) -> None:
+        """LIVE TP/SL reconciliation — serialized per symbol via exit_gate.
+
+        Every LIVE exit path (monitor, pipeline, protection scheduler,
+        Telegram /sell) shares the same per-symbol lock and the same
+        atomic positions.json read-modify-write, so two threads can
+        never both sell the same quantity. Protection orders are
+        cancelled BEFORE the market sell (inside ``reconcile_exit``)
+        whenever an exit is about to fire.
+        """
+        from scripts.exit_gate import reconcile_exit  # noqa: PLC0415
+        import json, os  # noqa: PLC0415
+
+        qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
+
+        pos_path = "data/positions.json"
+        if not os.path.exists(pos_path):
+            return
+
+        try:
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        positions = pos_data.get("positions", [])
+        open_positions = [
+            p for p in positions if p.get("status") in OPEN_STATUSES
+        ]
+        if not open_positions:
+            return
+
+        # Load plans for TP/SL reference prices
+        plan_path = "data/trade_plan.json"
+        plans_by_symbol: dict[str, dict] = {}
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path) as f:
+                    plan_data = json.load(f)
+                for p in plan_data.get("plans", []):
+                    plans_by_symbol[p["symbol"]] = p
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Fetch current prices from exchange
+        try:
+            import ccxt  # noqa: PLC0415
+            exchange = ccxt.binance({
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+                "timeout": 15000,
+            })
+            symbols = [p["symbol"] for p in open_positions if "symbol" in p]
+            tickers = exchange.fetch_tickers(symbols) if symbols else {}
+        except Exception as exc:
+            self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
+            return
+
+        for pos in positions:
+            sym = pos.get("symbol", "")
+            if pos.get("status") not in OPEN_STATUSES:
+                continue
+
+            ticker = tickers.get(sym) if sym in tickers else None
+            if ticker is None:
+                continue
+            current_price = float(ticker.get("last", 0) or 0)
+            if current_price <= 0:
+                continue
+
+            plan = plans_by_symbol.get(sym, {})
+
+            def _on_reconciled(
+                prev: dict,
+                reconciled: Any,
+                _sym: str = sym,
+            ) -> None:
+                if reconciled is None:
+                    return
+                old_status = prev.get("status")
+                new_status = reconciled.get("status")
+                if old_status != new_status and new_status in CLOSED_STATUSES:
+                    self.logger.info(
+                        f"Position {_sym}: {old_status} → {new_status} "
+                        f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {qc})"
+                    )
+
+            reconcile_exit(
+                pipeline,
+                sym,
+                current_price,
+                plan,
+                cancel_protection=self._cancel_live_protection,
+                on_reconciled=_on_reconciled,
+            )
 
     def _cancel_live_protection(self, symbol: str) -> None:
         """Cancel live protection orders for a position that just closed."""
