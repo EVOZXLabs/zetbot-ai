@@ -204,6 +204,58 @@ class TestClosePaperPositionOnSell:
             state = json.load(f)
         assert state["balance"] == first_balance
 
+    def test_closes_positions_json_even_when_paper_state_out_of_sync(
+        self,
+    ) -> None:
+        """Regression: a manual /sell on a symbol that IS open in
+        ``positions.json`` but has no matching OPEN entry in
+        ``paper_state.json`` (e.g. state drifted, was reset, or never
+        had the symbol) used to hit an early ``return 0.0`` before ever
+        reaching the ``positions.json`` closure block below it — leaving
+        /positions and /status showing a position that had already been
+        sold. It must close in ``positions.json`` regardless.
+        """
+        # paper_state.json has NO entry at all for SHIB/IDR.
+        _write_state({
+            "version": 1,
+            "balance": 1_009_974.03,
+            "initial_balance": 1_000_000.0,
+            "margin_used": 0.0,
+            "orders": [],
+            "positions": {},
+            "equity_history": [],
+        })
+        _write_positions([
+            {
+                "symbol": "SHIB/IDR",
+                "status": "OPEN",
+                "remaining_qty": 110549.1906,
+                "entry_price": 0.0913,
+                "cost_basis": 10093.0,
+                "unrealized_pnl": -12.99,
+                "realized_pnl": 0.0,
+                "total_pnl": -12.99,
+            },
+        ])
+        from scripts.order_manager import _close_paper_position_on_sell
+
+        proceeds = 110549.1906 * 0.090313
+        pnl = _close_paper_position_on_sell(
+            "SHIB/IDR", 110549.1906, 0.090313, proceeds,
+        )
+
+        with open("data/positions.json") as f:
+            data = json.load(f)
+        by_symbol = {p["symbol"]: p for p in data["positions"]}
+
+        assert by_symbol["SHIB/IDR"]["status"] == "CLOSED"
+        assert by_symbol["SHIB/IDR"]["remaining_qty"] == 0.0
+        assert data["active_count"] == 0
+        assert data["closed_count"] == 1
+        # Falls back to positions.json's own cost_basis for PnL since
+        # paper_state.json had nothing to compute it from.
+        assert pnl == pytest.approx(proceeds - 10093.0, abs=0.01)
+
 
 # ---------------------------------------------------------------------------
 #  scripts.execution_provider.PaperExecutionProvider.execute_sell
