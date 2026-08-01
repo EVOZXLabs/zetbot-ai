@@ -241,6 +241,8 @@ class MetricsCalculator:
         equity_snapshots: list[EquitySnapshot],
         initial_balance: float,
         unrealized_pnl: float = 0.0,
+        current_balance: float | None = None,
+        current_equity: float | None = None,
     ) -> dict[str, Any]:
         closed = [o for o in orders if o.status == "CLOSED"]
         winners = [o for o in closed if o.net_pnl > 0]
@@ -271,13 +273,29 @@ class MetricsCalculator:
                 max_dd = dd
                 max_dd_pct = dd_pct
 
-        final_eq = equity_snapshots[-1].equity if equity_snapshots else initial_balance
+        # When this run produced no new equity snapshots (e.g. an idle
+        # cycle with no READY plans and nothing to reconcile), fall back
+        # to the wallet's actual CURRENT cash/equity — never to
+        # initial_balance. Falling back to initial_balance silently
+        # "refunded" any cash already spent on still-open positions,
+        # which corrupted paper_balance.json's final_balance back to the
+        # starting balance and made /status, /balance, /wallet double
+        # count the position's value on top of it.
+        if equity_snapshots:
+            final_balance_val = equity_snapshots[-1].balance
+            final_eq = equity_snapshots[-1].equity
+        else:
+            final_balance_val = (
+                current_balance if current_balance is not None else initial_balance
+            )
+            final_eq = (
+                current_equity if current_equity is not None else final_balance_val
+            )
         total_return = _safe_div(final_eq - initial_balance, initial_balance) * 100.0
 
         return {
             "initial_balance": round(initial_balance, 2),
-            "final_balance": round(equity_snapshots[-1].balance, 2)
-            if equity_snapshots else round(initial_balance, 2),
+            "final_balance": round(final_balance_val, 2),
             "final_equity": round(final_eq, 2),
             "total_return_pct": round(total_return, 2),
             "total_trades": total_trades,
@@ -470,6 +488,8 @@ class PaperTradingEngine:
             self.metrics = MetricsCalculator.compute(
                 self.orders, self.equity_history, self.wallet.initial,
                 unrealized_pnl=self._total_unrealized_pnl(),
+                current_balance=self.wallet.balance,
+                current_equity=self.wallet.balance + self._total_position_value(),
             )
             self._print_summary(0.0)
             print("  No READY plans.  Exiting.")
@@ -534,6 +554,8 @@ class PaperTradingEngine:
         self.metrics = MetricsCalculator.compute(
             self.orders, self.equity_history, self.wallet.initial,
             unrealized_pnl=self._total_unrealized_pnl(),
+            current_balance=self.wallet.balance,
+            current_equity=self.wallet.balance + self._total_position_value(),
         )
 
         elapsed = time.time() - t0
