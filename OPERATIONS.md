@@ -294,6 +294,139 @@ running).
 
 ---
 
+## Menjalankan di Termux (Android)
+
+Termux has **no systemd**, so the bot + watchdog are kept alive with `tmux`
+sessions (and optionally the Termux:Boot app after reboot). Everything below
+is an **operational layer on top of the bot/watchdog** — no trading or
+watchdog logic is modified.
+
+### 1. Install prerequisites
+
+```bash
+pkg update
+pkg install tmux termux-api
+```
+
+`termux-api` provides `termux-wake-lock` (keeps the CPU awake so the bot and
+watchdog survive Android's Doze). For the wake-lock to actually work you must
+also install the **Termux:API app** (separate from the package):
+
+- F-Droid: `https://f-droid.org/packages/com.termux.api/`
+- (Play Store also has it, but F-Droid is the maintained source)
+
+Install it, open it once, then re-run the launcher.
+
+### 2. Manual start (tmux)
+
+```bash
+cd /path/to/zetbot-ai
+
+# Session 1 — the bot
+tmux new-session -d -s zetbot-bot 'python main.py'
+
+# Session 2 — the watchdog (attaches to the running bot)
+tmux new-session -d -s zetbot-watchdog 'python scripts/watchdog.py'
+```
+
+View/attach: `tmux attach -t zetbot-bot` (detach with `Ctrl-b d`).
+The watchdog attaches to the bot via `data/zetbot.pid`; if the bot crashes,
+the watchdog restarts it as its own child.
+
+### 3. Automatic start (recommended) — `termux-start.sh`
+
+```bash
+./scripts/termux-start.sh            # start bot + watchdog (idempotent)
+./scripts/termux-start.sh --status   # sessions / pids / flags / logs
+./scripts/termux-start.sh --verify   # crash-test: kill bot, watchdog restart,
+                                     #   real Telegram delivery check
+./scripts/termux-start.sh --stop     # stop watchdog then bot (graceful)
+```
+
+The launcher:
+
+- takes `termux-wake-lock` (and prints install instructions if Termux:API is
+  missing),
+- cleans stale flags (`data/.shutdown_requested`, `data/.watchdog_halt`,
+  `data/.watchdog_paused`) **only if they are older than 5 minutes**
+  (`ZETBOT_STALE_FLAG_MINUTES`) — a halt/pause flag an operator just created
+  is respected and kept,
+- starts bot + watchdog in separate tmux sessions only if they are not
+  already running (safe to re-run any time — no duplicate sessions).
+
+### 4. Auto-start on reboot — Termux:Boot
+
+Termux:Boot (`https://f-droid.org/packages/com.termux.boot/`) runs scripts in
+`~/.termux/boot/` after every reboot:
+
+```bash
+mkdir -p ~/.termux/boot
+cp scripts/termux-boot/zetbot-start.sh ~/.termux/boot/
+chmod +x ~/.termux/boot/zetbot-start.sh
+```
+
+It waits for the device/network to settle, then calls `termux-start.sh`
+(idempotent) and logs to `~/zetbot-boot.log`. See
+`scripts/termux-boot/README.md`.
+
+### 5. Battery optimization (READ THIS — most common cause of a "stopped" watchdog)
+
+Android aggressively freezes background apps (Doze / App Standby). Termux is
+an ordinary app, so **Android can silently freeze the entire Termux process —
+and the watchdog inside it — with no crash, no log, no error.** The code can
+be perfectly correct and the watchdog still "stops for no reason".
+
+Whitelist both apps from battery optimization:
+
+- **Termux** and **Termux:Boot** (and Termux:API if you use it):
+
+  1. Open Android **Settings → Apps** (or **App info**).
+  2. Tap **Termux** → **Battery** (wording varies by device).
+  3. Choose **Unrestricted** (or "Don't optimize" / "No restrictions").
+     "Optimized" or "Restricted" is NOT enough for a 24/7 bot.
+  4. Repeat for **Termux:Boot**.
+
+- OEM-specific notes (the menu names differ):
+  - **Xiaomi/POCO (MIUI/HyperOS)**: Settings → Apps → Manage apps →
+    Termux → Battery saver → **No restrictions**. Also disable "Pause app
+    activity if unused". MIUI can kill apps even when they're in the
+    foreground of another app.
+  - **Samsung (One UI)**: Settings → Battery → Background usage limits →
+    select Termux → **Never sleeping apps**. Also under "App settings" →
+    **Allow background activity**.
+  - **Oppo/Realme (ColorOS)**: Settings → Battery → App battery management →
+    Termux → **Allow auto-launch** + **Allow background running**.
+  - **Huawei/Honor (EMUI/HarmonyOS)**: Settings → Battery → App launch →
+    Termux → toggle all three to **Manage manually** and enable everything.
+
+- Extra: with `termux-wake-lock` active the CPU stays awake while Termux is
+  alive, but it does **not** stop Android from killing the Termux *app*.
+  Whitelisting is what prevents that.
+
+After whitelisting, reboot once and confirm with:
+
+```bash
+./scripts/termux-start.sh --status
+```
+
+### 6. Termux troubleshooting
+
+- **`pkg` says "Cannot run as root"**: Termux refuses root. Run everything
+  as the normal Termux user, not via `su`.
+- **`termux-wake-lock` is a no-op**: the Termux:API *app* is missing or was
+  never opened. Install/open it, then re-run.
+- **Watchdog stops without any log entry**: almost always battery
+  optimization freezing Termux — see section 5.
+- **No notification after a crash**: run `./scripts/termux-start.sh --verify`
+  — it reports whether Telegram delivery really succeeds (`NOTIFIER_OK=True`
+  means the Telegram API accepted the message; `NOTIFIER_DISABLED` means
+  `.env` has `TELEGRAM_ENABLED=false` or missing credentials).
+- **Bot started but Telegram command center doesn't answer**: check that the
+  bot process is the one started with `main.py` and that `data/zetbot.pid`
+  points to a live process.
+
+---
+
 ## Configuration Reference
 
 All settings are stored in `.env`. Key settings:
@@ -339,7 +472,9 @@ All settings are stored in `.env`. Key settings:
 │   ├── telegram_test.py  # Telegram test
 │   ├── system_info.py    # System information
 │   ├── wizard_menu.py    # Interactive menu
-│   └── watchdog.py       # Auto-restart supervisor
+│   ├── watchdog.py       # Auto-restart supervisor
+│   ├── termux-start.sh   # Termux launcher (tmux + wake-lock + --verify)
+│   └── termux-boot/      # Termux:Boot auto-start hook + README
 ├── deploy/
 │   └── zetbot-watchdog.service  # systemd unit for the watchdog
 ├── data/                 # Runtime data
