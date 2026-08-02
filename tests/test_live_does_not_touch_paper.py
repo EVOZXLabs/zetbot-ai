@@ -75,6 +75,9 @@ class _FakeProvider:
     def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
         return {}
 
+    def market_buy_requires_price(self) -> bool:
+        return False
+
 
 class _FakeExchangeManager:
     name = "binance"

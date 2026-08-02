@@ -719,14 +719,11 @@ class Pipeline:
         if not open_positions:
             return
 
-        # Fetch prices from exchange
+        # Fetch prices from the configured exchange (indodax pairs like
+        # GOAT/IDR never resolve on binance).
         try:
-            import ccxt
-            exchange = ccxt.binance({
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-                "timeout": 15000,
-            })
+            from bot.data import build_public_exchange  # noqa: PLC0415
+            exchange = build_public_exchange(getattr(self.config, "exchange", "binance"))
             symbols = [p["symbol"] for p in open_positions if "symbol" in p]
             tickers = exchange.fetch_tickers(symbols) if symbols else {}
         except Exception as exc:
@@ -813,14 +810,10 @@ class Pipeline:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        # Fetch current prices from exchange
+        # Fetch current prices from the configured exchange
         try:
-            import ccxt  # noqa: PLC0415
-            exchange = ccxt.binance({
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-                "timeout": 15000,
-            })
+            from bot.data import build_public_exchange  # noqa: PLC0415
+            exchange = build_public_exchange(getattr(self.config, "exchange", "binance"))
             symbols = [p["symbol"] for p in open_positions if "symbol" in p]
             tickers = exchange.fetch_tickers(symbols) if symbols else {}
         except Exception as exc:

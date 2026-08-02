@@ -668,15 +668,17 @@ def _monitor_positions(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    # Fetch current prices
+    # Fetch current prices from the configured exchange (non-binance
+    # exchanges like indodax list symbols such as GOAT/IDR).
     symbols = [p["symbol"] for p in active if "symbol" in p]
     try:
-        import ccxt
-        exchange = ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-            "timeout": 15000,
-        })
+        from bot.data import build_public_exchange
+        _cfg = getattr(container, "_config", None)
+        _exchange_name = (
+            getattr(_cfg, "exchange", None)
+            if _cfg is not None else None
+        ) or os.getenv("EXCHANGE", "binance")
+        exchange = build_public_exchange(_exchange_name)
         tickers = exchange.fetch_tickers(symbols)
     except Exception as exc:
         logger.debug(f"Monitor ticker fetch failed: {exc}")

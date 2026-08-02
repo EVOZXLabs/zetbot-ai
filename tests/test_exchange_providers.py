@@ -427,9 +427,17 @@ class TestClientOrderIdParams:
         p = MEXCProvider()
         assert p.client_order_id_params("my-id") == {"clientOrderId": "my-id"}
 
-    def test_indodax_uses_unified_client_order_id(self) -> None:
+    def test_indodax_sends_no_client_order_id_param(self) -> None:
+        # Indodax has no client-order-id concept; its private trade endpoint
+        # signs the ENTIRE request body, so a stray param risks rejection.
         p = IndodaxProvider()
-        assert p.client_order_id_params("my-id") == {"clientOrderId": "my-id"}
+        assert p.client_order_id_params("my-id") == {}
+
+    def test_indodax_market_buy_requires_price(self) -> None:
+        assert IndodaxProvider().market_buy_requires_price() is True
+
+    def test_binance_market_buy_does_not_require_price(self) -> None:
+        assert BinanceProvider().market_buy_requires_price() is False
 
 
 # ======================================================================

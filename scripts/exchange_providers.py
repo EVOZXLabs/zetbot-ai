@@ -198,9 +198,23 @@ class BaseProvider:
         """Default: unified ccxt ``clientOrderId`` param.
 
         Override per-exchange if the API needs a different key name
-        (see ``BinanceProvider``).
+        (see ``BinanceProvider``) or has no client-order-id concept at
+        all (see ``IndodaxProvider``).
         """
         return {"clientOrderId": client_order_id}
+
+    def market_buy_requires_price(self) -> bool:
+        """True when the exchange API requires a ``price`` argument to
+        submit a MARKET BUY order.
+
+        Most exchanges ignore price for market orders, but some (e.g.
+        Indodax) compute the quote amount to spend as ``amount * price``
+        and reject market buys without it. Callers must pass the resolved
+        price through to ``create_order`` only when this is True, because
+        on Binance & friends a stray price converts a market BUY into a
+        ``quoteOrderQty`` spend instead of a base-quantity order.
+        """
+        return False
 
     # -- Properties ------------------------------------------------------
 
@@ -394,6 +408,20 @@ class IndodaxProvider(BaseProvider):
     See: https://github.com/btcid/indodax-official-api-docs
     """
     CCXT_NAME = "indodax"
+
+    def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+        # Indodax has no client-order-id concept. Its private trade
+        # endpoint signs the ENTIRE request body, so sending an
+        # unsupported param risks the order being rejected server-side —
+        # return no params rather than leak an unknown field in.
+        return {}
+
+    def market_buy_requires_price(self) -> bool:
+        # Indodax's API sizes a market BUY by the quote (IDR) amount; ccxt
+        # computes that cost as amount × price and raises InvalidOrder
+        # when price is missing. SELL is sized by base quantity and needs
+        # no price.
+        return True
 
 
 # ======================================================================

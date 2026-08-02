@@ -422,8 +422,8 @@ class PaperExecutionProvider(ExecutionProvider):
 
     def get_current_price(self, symbol: str) -> Optional[float]:
         try:
-            import ccxt
-            ex = ccxt.binance({"enableRateLimit": True, "timeout": 15000})
+            from bot.data import build_public_exchange
+            ex = build_public_exchange(self.get_exchange_name())
             ticker = ex.fetch_ticker(symbol)
             return float(ticker.get("last", 0) or 0)
         except Exception:
@@ -685,7 +685,7 @@ class LiveExecutionProvider(ExecutionProvider):
     def get_current_price(self, symbol: str) -> Optional[float]:
         try:
             provider = self._exchange.get_provider()
-            raw = provider.fetch_ticker(symbol)
+            raw = provider.get_ticker(symbol)
             if isinstance(raw, dict):
                 return float(raw.get("last", 0) or raw.get("ask", 0) or raw.get("bid", 0) or 0)
             if hasattr(raw, "last"):
@@ -747,7 +747,11 @@ class LiveExecutionProvider(ExecutionProvider):
         try:
             provider = self._exchange.get_provider()
             ex = provider._get_exchange()
-            price_p = None
+            # Indodax sizes a market BUY by quote (IDR) cost = amount ×
+            # price, and rejects the order without a price; Binance and
+            # friends ignore price for market orders (passing it there
+            # would silently convert the order to a quoteOrderQty spend).
+            price_p = price if provider.market_buy_requires_price() else None
             id_params = provider.client_order_id_params(request.client_order_id)
             ccxt_order = ex.create_order(
                 symbol=symbol,
@@ -756,6 +760,13 @@ class LiveExecutionProvider(ExecutionProvider):
                 amount=amount_p,
                 price=price_p,
                 params=id_params,
+            )
+            ccxt_order = _settle_live_order(
+                provider,
+                str(ccxt_order.get("id", "")),
+                symbol,
+                amount_p,
+                ccxt_order,
             )
             elapsed = (time.time() - t0) * 1000
             status = _map_live_status(ccxt_order, amount_p)
@@ -822,6 +833,13 @@ class LiveExecutionProvider(ExecutionProvider):
                 price=price_p,
                 params=id_params,
             )
+            ccxt_order = _settle_live_order(
+                provider,
+                str(ccxt_order.get("id", "")),
+                symbol,
+                amount_p,
+                ccxt_order,
+            )
             elapsed = (time.time() - t0) * 1000
             status = _map_live_status(ccxt_order, amount_p)
             return OrderResult(
@@ -851,15 +869,64 @@ class LiveExecutionProvider(ExecutionProvider):
 def _map_live_status(ccxt_order: dict[str, Any], requested_amount: float) -> str:
     raw_status = str(ccxt_order.get("status") or "").lower()
     filled = float(ccxt_order.get("filled", 0) or 0)
+    remaining = float(ccxt_order.get("remaining", 0) or 0)
     if raw_status in ("canceled", "cancelled", "expired"):
         return "CANCELLED"
     if raw_status == "rejected":
         return "REJECTED"
+    # Some exchanges (e.g. Indodax) report a settled order as status
+    # "closed"/"filled" but omit the numeric `filled` field entirely —
+    # treat those as fully filled rather than PENDING.
+    if raw_status in ("closed", "filled"):
+        return "FILLED"
+    if raw_status in ("partial", "partially_filled"):
+        return "PARTIALLY_FILLED"
     if filled <= 0:
         return "PENDING"
     if requested_amount > 0 and filled < requested_amount * 0.999:
         return "PARTIALLY_FILLED"
     return "FILLED"
+
+
+def _settle_live_order(
+    provider: Any,
+    order_id: str,
+    symbol: str,
+    requested_amount: float,
+    initial_order: dict[str, Any],
+) -> dict[str, Any]:
+    """Confirm a market order's outcome when ``create_order`` returned only
+    a bare order id (no status/fill snapshot).
+
+    Indodax's trade endpoint answers with just ``{success, return.order_id}``,
+    so without this the pipeline would forever report the fill as PENDING.
+    Bounded and best-effort: polls ``fetch_order`` for ~3s and returns the
+    confirmed order dict, or keeps the initial snapshot if confirmation is
+    unavailable or fails (the order still went through; the live-position
+    sync reconstructs it from exchange balance on the next cycle).
+    """
+    if _map_live_status(initial_order, requested_amount) != "PENDING":
+        return initial_order
+    if not order_id or not symbol:
+        return initial_order
+
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            raw = provider.fetch_order(order_id, symbol)
+        except Exception:
+            continue
+        if not raw:
+            continue
+        status = _map_live_status(raw, requested_amount)
+        if status != "PENDING":
+            merged = dict(initial_order)
+            for key in ("status", "filled", "price", "average", "cost", "fee", "remaining"):
+                if raw.get(key) is not None:
+                    merged[key] = raw[key]
+            return merged
+    return initial_order
 
 
 # ======================================================================

@@ -30,6 +30,24 @@ def _get_exchange_map():
         "indodax": ccxt.indodax,
     }
 
+def build_public_exchange(exchange_name: str = "binance") -> Any:
+    """Build an unauthenticated ccxt client for public price fetches.
+
+    TP/SL reconciliation and position monitoring fetch current prices
+    through this helper so symbols on non-binance exchanges (e.g. indodax
+    ``GOAT/IDR``) resolve against the right exchange instead of always
+    hitting binance. Falls back to binance when the exchange is unknown.
+    """
+    import ccxt
+    exchange_map = _get_exchange_map()
+    exchange_class = exchange_map.get((exchange_name or "binance").lower(), ccxt.binance)
+    return exchange_class({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+        "timeout": 15000,
+    })
+
+
 NORMALIZED_COLUMNS: list[str] = [
     "timestamp",
     "open",

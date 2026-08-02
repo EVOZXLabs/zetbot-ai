@@ -233,6 +233,13 @@ def _map_live_order_status(ccxt_order: dict[str, Any], requested_amount: float) 
         return "CANCELLED"
     if raw_status == "rejected":
         return "REJECTED"
+    # Some exchanges (e.g. Indodax) report a settled order as status
+    # "closed"/"filled" but omit the numeric `filled` field entirely —
+    # treat those as fully filled rather than PENDING.
+    if raw_status in ("closed", "filled"):
+        return "FILLED"
+    if raw_status in ("partial", "partially_filled"):
+        return "PARTIALLY_FILLED"
 
     if filled <= 0:
         return "PENDING"
@@ -543,6 +550,15 @@ class LiveExecutor:
                 provider.price_to_precision(symbol, price)
                 if request.type == "LIMIT" else None
             )
+
+            # Indodax sizes a market BUY by quote (IDR) cost = amount ×
+            # price and rejects the order without a price; Binance and
+            # friends ignore price for market orders (passing it there
+            # would silently convert the order to a quoteOrderQty spend).
+            if order_type == "market" and side.lower() == "buy" and provider.market_buy_requires_price():
+                if price is None or price <= 0:
+                    raise ValueError(f"market BUY on {exchange.name} requires a price")
+                precise_price = provider.price_to_precision(symbol, price)
 
             # Tag the order with our client_order_id so a retry can check
             # "did this already land?" instead of blindly resubmitting —
