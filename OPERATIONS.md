@@ -220,6 +220,80 @@ Does **not** overwrite your existing `.env` or trading data.
 
 ---
 
+## Watchdog / Auto-restart (Recommended for Live Trading)
+
+> ⚠️ **SL/TP protection on exchanges without native stop orders (e.g. indodax)
+> only exists while the bot process is alive.** The bot executes SL/TP through
+> its own position-monitoring loop — not via exchange stop orders. If the bot
+> crashes and stays down, an open position is completely unprotected.
+>
+> The watchdog is therefore a **critical part of live trading on such
+> exchanges, not optional** — it restarts the bot within ~20 s of any crash.
+
+### What it does
+
+- Supervises the bot every `WATCHDOG_INTERVAL` seconds (default `20`).
+- If the bot is already running (e.g. started manually in tmux), it attaches
+  to that instance instead of starting a second one.
+- On crash or exit it restarts the bot with the same command used for a
+  manual start (`.venv/bin/python main.py`).
+- Does **not** auto-restart on a deliberate stop: `data/.shutdown_requested`
+  (from `/shutdown`), a clean exit (code 0), or while `data/.watchdog_paused`
+  exists.
+- Rate-limits crash loops: more than `WATCHDOG_MAX_RESTARTS` (default `3`)
+  crashes inside `WATCHDOG_WINDOW` (default `600`) seconds halts auto-restart,
+  writes `data/.watchdog_halt`, alerts via Telegram ("MANUAL INTERVENTION
+  NEEDED") and exits non-zero. The halt is sticky — the watchdog keeps
+  standing by until you remove `data/.watchdog_halt`.
+- Sends Telegram alerts on restart / halt / manual stop, using the same
+  `TELEGRAM_*` settings as the bot.
+
+### Run it in the foreground (tmux / screen / termux-services)
+
+```bash
+cd /path/to/zetbot-ai
+./.venv/bin/python scripts/watchdog.py
+```
+
+Run it under `tmux` / `screen`, or use Termux services on Android
+(`sv-enable zetbot-watchdog`), so it survives the terminal closing.
+
+### Run it under systemd (VPS)
+
+```bash
+sudo cp deploy/zetbot-watchdog.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zetbot-watchdog
+```
+
+Adjust `User`, `WorkingDirectory` and `ExecStart` in
+`deploy/zetbot-watchdog.service` to match your install. The unit uses
+`Restart=always` and `KillMode=process` (stopping the service leaves the bot
+running).
+
+### Controlling the watchdog
+
+| Command | Effect |
+|---|---|
+| `python scripts/watchdog.py --status` | Show bot / watchdog / flag state |
+| `python scripts/watchdog.py --stop` | Stop the watchdog (bot keeps running) |
+| `touch data/.watchdog_paused` | Pause auto-restart (bot unaffected) |
+| `rm data/.watchdog_halt` | Re-arm the watchdog after a halt (fix the bug first) |
+| `rm data/.shutdown_requested` | Let the watchdog (re)start the bot after a deliberate stop |
+
+### Troubleshooting
+
+- **Bot keeps dying and the watchdog halts**: inspect `logs/bot-console.log`
+  and `logs/watchdog.log`, fix the bug, then `rm data/.watchdog_halt` and
+  restart the watchdog.
+- **Bot won't start after a `/shutdown`**: a stale `data/.shutdown_requested`
+  is respected as a deliberate stop. Remove it (`rm data/.shutdown_requested`)
+  to let the watchdog start the bot again.
+- **Status shows `watchdog: alive=False`**: the watchdog is not running —
+  start it again (see above). While it is down there is no auto-restart.
+
+---
+
 ## Configuration Reference
 
 All settings are stored in `.env`. Key settings:
@@ -238,6 +312,9 @@ All settings are stored in `.env`. Key settings:
 | `PIPELINE_INTERVAL` | `300` | Pipeline interval (seconds) |
 | `ACCOUNT_BALANCE` | `10000` | Initial balance (USDT) |
 | `MAX_RISK_PER_TRADE_PCT` | `2.0` | Max risk per trade (%) |
+| `WATCHDOG_INTERVAL` | `20` | Watchdog supervision interval (s) |
+| `WATCHDOG_MAX_RESTARTS` | `3` | Max bot restarts in `WATCHDOG_WINDOW` before auto-restart halts |
+| `WATCHDOG_WINDOW` | `600` | Rate-limit window for watchdog restarts (s) |
 
 ---
 
@@ -261,9 +338,12 @@ All settings are stored in `.env`. Key settings:
 │   ├── exchange_test.py  # Exchange test
 │   ├── telegram_test.py  # Telegram test
 │   ├── system_info.py    # System information
-│   └── wizard_menu.py    # Interactive menu
+│   ├── wizard_menu.py    # Interactive menu
+│   └── watchdog.py       # Auto-restart supervisor
+├── deploy/
+│   └── zetbot-watchdog.service  # systemd unit for the watchdog
 ├── data/                 # Runtime data
-├── logs/                 # Log files
+├── logs/                 # Log files (incl. watchdog.log, bot-console.log)
 ├── backups/              # Backup archives
 └── telegram/             # Telegram command system
 ```

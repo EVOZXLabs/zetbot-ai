@@ -251,6 +251,21 @@ No:
 
 required.
 
+### Keep the bot alive (live trading)
+
+SL/TP protection on exchanges without native stop orders (e.g. indodax) only
+exists while the bot process is running — a dead bot means an unprotected live
+position. Use the bundled watchdog (`scripts/watchdog.py`) to auto-restart the
+bot within ~20 s of any crash:
+
+```bash
+./.venv/bin/python scripts/watchdog.py
+```
+
+See the **Watchdog / Auto-restart** section in `OPERATIONS.md` (including the
+systemd unit `deploy/zetbot-watchdog.service`) for full instructions and the
+crash-loop safety rules.
+
 ---
 
 # Architecture
