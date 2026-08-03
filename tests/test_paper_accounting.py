@@ -246,6 +246,83 @@ class TestStateRecovery:
         engine3 = PaperTradingEngine()
         assert engine3.positions["TEST"].closure_notified is True
 
+    def test_load_state_tolerates_incomplete_order_records(self, tmp_path: Any) -> None:
+        """Regression: the pipeline's PaperExecutionProvider used to append
+        SELL orders missing 7 ``Order`` fields (``entry_price``,
+        ``slippage``, ``entry_fee``, ``exit_price``, ``exit_fee``,
+        ``total_cost``, ``net_pnl_pct``). ``Order(**o)`` then raised on the
+        next startup, silently disabling the paper engine. Loading must
+        backfill the missing fields instead of crashing.
+        """
+        os.chdir(tmp_path)
+        os.makedirs("data", exist_ok=True)
+
+        legacy_sell = {
+            "id": "po_legacy1",
+            "symbol": "ADA/IDR",
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": 1.9614,
+            "filled_quantity": 1.9614,
+            "fill_price": 3065.0802,
+            "total_proceeds": 6011.8,
+            "net_pnl": -12.4,
+            "status": "CLOSED",
+            "created_at": "2026-07-31T00:00:00",
+            "filled_at": "2026-07-31T00:00:00",
+            "closed_at": "2026-07-31T00:00:00",
+            "exit_reason": "market_sell",
+        }
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "version": 1,
+                "balance": 384640.58,
+                "initial_balance": 1000000.0,
+                "margin_used": 0.0,
+                "orders": [legacy_sell],
+                "positions": {},
+                "equity_history": [],
+            }, f)
+
+        engine = PaperTradingEngine()
+        assert len(engine.orders) == 1
+        order = engine.orders[0]
+        assert order.side == "SELL"
+        assert order.status == "CLOSED"
+        assert order.net_pnl == -12.4
+        assert order.entry_price == 0.0
+        assert order.slippage == 0.0
+        assert order.total_cost == 0.0
+        assert order.net_pnl_pct == 0.0
+
+        # Unknown extra keys must not leak into the dataclass.
+        legacy_sell["some_unknown_key"] = "ignored"
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "version": 1,
+                "balance": 384640.58,
+                "initial_balance": 1000000.0,
+                "margin_used": 0.0,
+                "orders": [legacy_sell],
+                "positions": {},
+                "equity_history": [],
+            }, f)
+        engine2 = PaperTradingEngine()
+        assert len(engine2.orders) == 1
+        assert not hasattr(engine2.orders[0], "some_unknown_key")
+
+        # Round-trip: saving normalizes the record to the full schema.
+        engine2._save_state()
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        saved = state["orders"][0]
+        for field in (
+            "entry_price", "slippage", "entry_fee", "exit_price",
+            "exit_fee", "total_cost", "net_pnl_pct",
+        ):
+            assert field in saved, f"field {field} not persisted"
+        assert "some_unknown_key" not in saved
+
 
 # ---------------------------------------------------------------------------
 #  Wallet exposure

@@ -361,6 +361,37 @@ class TestHealthMonitor:
         assert "internet=OK" in result
         assert "exchange=OK" in result
 
+    def test_health_net_pnl_is_canonical_not_stale_key(self, tmp_path: Any) -> None:
+        """Regression: HEALTH used to log the raw ``net_pnl`` key from
+        ``paper_balance.json`` — a value only refreshed on position closure,
+        so it sat frozen (e.g. ``+250.00``) and matched nothing in the real
+        account. It must come from the canonical MetricsManager snapshot
+        (realized + unrealized computed from raw data).
+        """
+        import json
+
+        os.makedirs(tmp_path, exist_ok=True)
+        with open(os.path.join(tmp_path, "paper_balance.json"), "w") as f:
+            json.dump({
+                "initial_balance": 1_000_000.0,
+                "final_balance": 972_462.60,
+                "final_equity": 972_462.60,
+                "net_pnl": 250.00,  # stale leftover
+            }, f)
+        with open(os.path.join(tmp_path, "positions.json"), "w") as f:
+            json.dump({"positions": []}, f)
+
+        from scripts.health import HealthMonitor
+        cfg = self._make_config()
+        cfg = cfg.__class__(**{**cfg.__dict__, "data_dir": str(tmp_path)})
+        monitor = HealthMonitor(logger=_FakeLogger(), config=cfg, interval=60.0)
+
+        net_pnl = monitor._gather()["net_pnl"]
+        # No open positions and no realized PnL recorded → 0.00, never the
+        # stale raw key (+250.00).
+        assert net_pnl == pytest.approx(0.0)
+        assert net_pnl != 250.00
+
 
 # ---------------------------------------------------------------------------
 #  /health command tests

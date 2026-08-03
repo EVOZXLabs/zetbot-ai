@@ -70,6 +70,35 @@ class Order:
     exit_reason: str = ""
 
 
+# Fallback values for Order records persisted by older writers (e.g. the
+# pipeline's PaperExecutionProvider) that omitted some dataclass fields.
+# Used by ``PaperTradingEngine._coerce_order`` so ``Order(**o)`` in
+# ``_load_state`` never crashes on a legacy/incomplete record.
+ORDER_FIELD_DEFAULTS: dict[str, Any] = {
+    "id": "unknown",
+    "symbol": "",
+    "side": "SELL",
+    "type": "MARKET",
+    "quantity": 0.0,
+    "filled_quantity": 0.0,
+    "entry_price": 0.0,
+    "fill_price": 0.0,
+    "slippage": 0.0,
+    "entry_fee": 0.0,
+    "exit_price": 0.0,
+    "exit_fee": 0.0,
+    "total_cost": 0.0,
+    "total_proceeds": 0.0,
+    "net_pnl": 0.0,
+    "net_pnl_pct": 0.0,
+    "status": "CLOSED",
+    "created_at": "",
+    "filled_at": "",
+    "closed_at": "",
+    "exit_reason": "",
+}
+
+
 @dataclass
 class VirtualPosition:
     """An open virtual position."""
@@ -353,7 +382,7 @@ class PaperTradingEngine:
         if not self._explicit_initial:
             self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
         self.wallet.margin_used = state.get("margin_used", 0.0)
-        self.orders = [Order(**o) for o in state.get("orders", [])]
+        self.orders = [self._coerce_order(o) for o in state.get("orders", [])]
         self.positions = {
             sym: VirtualPosition(**vp)
             for sym, vp in state.get("positions", {}).items()
@@ -361,6 +390,21 @@ class PaperTradingEngine:
         self.equity_history = [
             EquitySnapshot(**s) for s in state.get("equity_history", [])
         ]
+
+    @staticmethod
+    def _coerce_order(raw: dict[str, Any]) -> Order:
+        """Build an ``Order`` from a persisted record tolerantly.
+
+        Legacy writers (e.g. ``PaperExecutionProvider.execute_sell``)
+        persisted order dicts missing several ``Order`` fields, which
+        made ``Order(**o)`` raise at startup and silently disabled the
+        whole paper engine.  Unknown keys are dropped and missing fields
+        are backfilled with ``ORDER_FIELD_DEFAULTS`` so the engine never
+        fails to load state again — the next ``_save_state`` rewrites the
+        record in full.
+        """
+        record = {k: v for k, v in raw.items() if k in ORDER_FIELD_DEFAULTS}
+        return Order(**{**ORDER_FIELD_DEFAULTS, **record})
 
     # ------------------------------------------------------------------
     #  Telegram notification helper
@@ -468,6 +512,7 @@ class PaperTradingEngine:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PAPER TRADING ENGINE")
         print(f"  {'=' * 78}")
+        print(f"  Current Balance : {self.wallet.balance:>8,.2f} {QUOTE_CURRENCY}")
         print(f"  Initial Balance : {self.wallet.initial:>8,.2f} {QUOTE_CURRENCY}")
         print(f"  Taker Fee       : {TAKER_FEE * 100:.2f}%")
         print(f"  Slippage        : {SLIPPAGE_BPS} bps")

@@ -1,4 +1,21 @@
+import os
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environ():
+    """Safety net: no test may leak environment-variable changes to others.
+
+    Snapshots ``os.environ`` before every test and restores it exactly
+    afterwards — any key added by the test is removed, any key deleted or
+    changed is restored. Guards against e.g. a stray ``EXCHANGE=indodax``
+    leaking into later tests and flipping their exchange resolution.
+    """
+    original = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(original)
 
 
 def pytest_configure(config):

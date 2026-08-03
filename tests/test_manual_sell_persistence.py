@@ -318,6 +318,60 @@ class TestPaperExecutionProviderSell:
 
         monkeypatch.undo()
 
+    def test_execute_sell_writes_complete_order_record(
+        self, open_position_state: dict[str, Any],
+    ) -> None:
+        """Regression: the provider's SELL order used to omit 7 ``Order``
+        fields, so ``PaperTradingEngine._load_state`` crashed on the next
+        startup (``Order.__init__() missing 7 required positional
+        arguments``). The persisted record must contain every dataclass
+        field so the engine can always reload it.
+        """
+        import dataclasses
+
+        _write_state(open_position_state)
+        import scripts.execution_provider as ep
+        from scripts.paper_trading_engine import Order
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            ep, "PAPER_STATE_PATH", os.path.abspath("data/paper_state.json")
+        )
+        monkeypatch.setattr(
+            ep, "PAPER_BALANCE_PATH", os.path.abspath("data/paper_balance.json")
+        )
+
+        provider = ep.PaperExecutionProvider()
+        provider.balance.load()
+        provider.execute_sell(OrderRequest(
+            symbol="ADA/IDR",
+            side=OrderSide.SELL,
+            type=OrderType.MARKET,
+            amount=1.9614,
+            price=3065.0802,
+        ))
+
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        sell_orders = [
+            o for o in state["orders"]
+            if o["side"] == "SELL" and o["symbol"] == "ADA/IDR"
+        ]
+        assert len(sell_orders) == 1
+
+        order_fields = {f.name for f in dataclasses.fields(Order)}
+        missing = order_fields - set(sell_orders[0])
+        assert not missing, f"SELL order missing Order fields: {missing}"
+
+        # The coercion path must round-trip it back into an Order.
+        from scripts.paper_trading_engine import ORDER_FIELD_DEFAULTS
+        coerce_kwargs = {
+            k: v for k, v in sell_orders[0].items() if k in ORDER_FIELD_DEFAULTS
+        }
+        Order(**{**ORDER_FIELD_DEFAULTS, **coerce_kwargs})
+
+        monkeypatch.undo()
+
     def test_execute_sell_keeps_state_history(
         self, open_position_state: dict[str, Any],
     ) -> None:

@@ -105,6 +105,18 @@ class HealthMonitor:
 
         paper_data = _read_json(f"{d}/paper_balance.json")
 
+        # net_pnl is the canonical snapshot value (realized + unrealized
+        # from raw data via MetricsManager.compute_snapshot), never the
+        # raw ``net_pnl`` key of paper_balance.json — that key is only
+        # refreshed on position closure and can sit stale (or absent)
+        # for long stretches, which made HEALTH report a frozen/positive
+        # P&L that matched nothing in the actual account.
+        try:
+            from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+            net_pnl = round(MetricsManager(self._config.data_dir).account().net_pnl, 2)
+        except Exception:
+            net_pnl = paper_data.get("net_pnl", 0.0)
+
         # Derive scanner status
         if scanner_age == float("inf"):
             scanner_status = "no_data"
@@ -139,7 +151,7 @@ class HealthMonitor:
             "api_age": api_age,
             "balance": paper_data.get("final_balance", 0.0),
             "equity": paper_data.get("final_equity", 0.0),
-            "net_pnl": paper_data.get("net_pnl", 0.0),
+            "net_pnl": net_pnl,
             "open_positions": sum(
                 1 for p in _read_json(f"{d}/positions.json").get("positions", [])
                 if is_open(p.get("status"))

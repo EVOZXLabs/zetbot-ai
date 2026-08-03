@@ -989,7 +989,12 @@ def main() -> None:
     logger.info(f"Python : {sys.version.split()[0]}")
     logger.info(f"Exchange : {config.exchange}")
     logger.info(f"Timeframe: {config.timeframe}")
-    logger.info(f"Balance  : {config.account_balance:>8,.2f} {config.quote_currency}")
+    _pb = _read_json(os.path.join(config.data_dir, "paper_balance.json"))
+    _live_balance = _pb.get("final_balance")
+    _display_balance = (
+        _live_balance if _live_balance is not None else float(config.account_balance)
+    )
+    logger.info(f"Balance  : {_display_balance:>8,.2f} {config.quote_currency}")
     logger.info(f"Mode     : {'PAPER' if config.paper_mode else 'LIVE'}")
 
     # ------------------------------------------------------------------
