@@ -11,11 +11,26 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from scripts.app_config import AppConfig
 from telegram.base_command import BaseCommand
 from telegram.command_center import CommandCenter
 from telegram.context import CommandContext
 from telegram.registry import CommandRegistry
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    These tests write ``data/positions.json`` / ``data/paper_balance.json``
+    / ``data/paper_orders.json`` fixtures; without the redirect they used
+    to clobber the REAL production data files (dummy BTC/USDT entries kept
+    appearing in the live bot's positions.json).
+    """
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("data", exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +270,32 @@ class TestSpecificCommands:
         result = _execute(PositionsCommand, _make_ctx())
         # Should contain at least one symbol or a message about no positions
         assert "/USDT" in result or "/BTC" in result or "position" in result.lower() or "No open" in result
+
+    def test_positions_no_cost_basis_no_fake_profit(self) -> None:
+        """BUG-3 regression: a position missing ``cost_basis`` must not show
+        its whole market value as profit (VEX/IDR showed "+586,941.66 IDR" —
+        exactly the position size). When entry == current the derived cost
+        basis makes PnL ~0."""
+        import json  # noqa: PLC0415
+        from telegram.commands.positions import PositionsCommand
+
+        with open("data/positions.json", "w") as f:
+            json.dump({"positions": [{
+                "symbol": "VEX/IDR",
+                "status": "OPEN",
+                "entry_price": 1111.0,
+                "current_price": 1111.0,
+                "quantity": 1068.69,
+                "remaining_qty": 1068.69,
+                "stop_loss": 1000.0,
+            }]}, f)
+
+        result = _execute(PositionsCommand, _make_ctx())
+        assert "VEX/IDR" in result
+        # The fake profit (position market value) must NOT appear.
+        assert "+1,187,314.59 IDR" not in result
+        # With entry == current the shown PnL is ~0, not the position value.
+        assert "+0.00 IDR" in result
 
     def test_summary_shows_stats(self) -> None:
         from telegram.commands.summary import SummaryCommand

@@ -123,6 +123,14 @@ class PositionsCommand(BaseCommand):
             remaining = p.get("remaining_qty", p.get("quantity", 0.0))
             cost_basis = p.get("cost_basis", 0.0)
 
+            # positions.json records don't always carry ``cost_basis``
+            # (legacy entries); with it defaulting to 0 the whole position
+            # market value is misreported as profit (e.g. VEX/IDR showed
+            # "+586,941.66 IDR" — exactly the position size). Derive the
+            # remaining cost basis from the entry price instead.
+            if cost_basis <= 0 and entry > 0:
+                cost_basis = entry * remaining
+
             pnl = current * remaining - cost_basis
             pnl_pct = ((current / entry) - 1) * 100 if entry > 0 else 0.0
 

@@ -182,18 +182,31 @@ def _check_internet() -> tuple[bool, float]:
         return False, 0.0
 
 
+_exchange_check_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
+_EXCHANGE_CHECK_TTL = 120.0
+
+
 def _check_exchange(name: str) -> tuple[bool, str]:
-    """Check exchange API connectivity."""
+    """Check exchange API connectivity (cached 2 minutes).
+
+    The check loads all markets (``/api/pairs`` on indodax) — running it
+    every 60s on top of the monitor/pipeline ticker fetches used to trip
+    the exchange rate limit (429), so results are cached with a TTL and
+    the check goes through the shared cached client.
+    """
+    now = time.time()
+    cached = _exchange_check_cache.get(name)
+    if cached is not None and now - cached[0] < _EXCHANGE_CHECK_TTL:
+        return cached[1]
     try:
-        import ccxt
-        exchange_class = getattr(ccxt, name, None)
-        if exchange_class is None:
-            return False, "unknown"
-        ex = exchange_class({"enableRateLimit": False, "timeout": 15000})
+        from bot.data import get_cached_public_exchange  # noqa: PLC0415
+        ex = get_cached_public_exchange(name)
         ex.load_markets()
-        return True, name
+        result = (True, name)
     except Exception:
-        return False, name
+        result = (False, name)
+    _exchange_check_cache[name] = (time.time(), result)
+    return result
 
 
 # ---------------------------------------------------------------------------

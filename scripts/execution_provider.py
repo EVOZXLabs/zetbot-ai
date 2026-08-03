@@ -264,6 +264,13 @@ class PaperPosition:
     opened_at: str = ""
     signal_time: str = ""
     closure_notified: bool = False
+    # Mirror the paper engine's tpX_sold vocabulary so a TP level sold by
+    # the pipeline is never sold again by the engine's startup reconcile
+    # (BUG-1: restart double-sell after a crash between the sell and the
+    # positions.json persist step).
+    tp1_sold: bool = False
+    tp2_sold: bool = False
+    tp3_sold: bool = False
 
 
 class PaperBalance:
@@ -371,6 +378,9 @@ class PaperExecutionProvider(ExecutionProvider):
                     opened_at=vp.get("opened_at", ""),
                     signal_time=vp.get("signal_time", ""),
                     closure_notified=vp.get("closure_notified", False),
+                    tp1_sold=vp.get("tp1_sold", False),
+                    tp2_sold=vp.get("tp2_sold", False),
+                    tp3_sold=vp.get("tp3_sold", False),
                 )
         except (FileNotFoundError, json.JSONDecodeError):
             pass
@@ -422,9 +432,8 @@ class PaperExecutionProvider(ExecutionProvider):
 
     def get_current_price(self, symbol: str) -> Optional[float]:
         try:
-            from bot.data import build_public_exchange
-            ex = build_public_exchange(self.get_exchange_name())
-            ticker = ex.fetch_ticker(symbol)
+            from bot.data import fetch_ticker_cached
+            ticker = fetch_ticker_cached(self.get_exchange_name(), symbol)
             return float(ticker.get("last", 0) or 0)
         except Exception:
             return None
@@ -554,6 +563,13 @@ class PaperExecutionProvider(ExecutionProvider):
             vp.remaining_qty = max(0.0, vp.remaining_qty - qty)
             vp.realized_pnl = round(vp.realized_pnl + sell_pnl, 2)
             vp.current_price = fill_price
+            # Mark the take-profit level as sold in paper_state.json so
+            # the paper engine's startup reconcile (which checks its own
+            # tpX_sold flags) never executes the same level a second time
+            # after a crash/restart (BUG-1).
+            exit_level = (request.metadata or {}).get("exit_level", "")
+            if exit_level in ("tp1_hit", "tp2_hit", "tp3_hit"):
+                setattr(vp, exit_level.replace("_hit", "_sold"), True)
             if vp.remaining_qty <= 0:
                 vp.status = "CLOSED"
                 vp.remaining_qty = 0.0

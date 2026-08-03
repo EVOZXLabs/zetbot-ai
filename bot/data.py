@@ -7,6 +7,8 @@ ZetBot AI
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -46,6 +48,109 @@ def build_public_exchange(exchange_name: str = "binance") -> Any:
         "options": {"defaultType": "spot"},
         "timeout": 15000,
     })
+
+
+# ---------------------------------------------------------------------------
+#  Rate-limit safe public data access (BUG: 429 on indodax /api/pairs)
+#
+#  The monitor, the pipeline reconciliation, the paper provider and the
+#  health check each used to build their OWN ccxt client — every client
+#  then loaded markets (/api/pairs) independently at startup, so a burst
+#  of concurrent clients tripped the exchange rate limit and every
+#  ticker fetch failed (positions kept stale prices). These helpers share
+#  ONE client per exchange (one /api/pairs call, one rate-limit budget)
+#  and a short TTL ticker cache so overlapping fetches from different
+#  threads collapse into a single network call.
+# ---------------------------------------------------------------------------
+
+_client_cache: dict[str, tuple[float, Any]] = {}
+_ticker_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+# RLock: fetch_tickers_cached holds the lock while calling
+# get_cached_public_exchange, which must be able to re-acquire it.
+_data_lock = threading.RLock()
+
+PUBLIC_CLIENT_TTL = 300.0
+TICKER_TTL = 45.0
+
+
+def get_cached_public_exchange(
+    exchange_name: str = "binance", ttl: float = PUBLIC_CLIENT_TTL,
+) -> Any:
+    """Return a shared public ccxt client for ``exchange_name``.
+
+    All components that fetch public prices must use this instead of
+    ``build_public_exchange`` so the ccxt rate limiter and the markets
+    cache are shared process-wide instead of one client per caller.
+    Network calls through the returned client are serialized by
+    :func:`fetch_tickers_cached` (same lock) so a single client is
+    never hammered concurrently from several threads.
+    """
+    key = (exchange_name or "binance").lower()
+    now = time.time()
+    with _data_lock:
+        entry = _client_cache.get(key)
+        if entry is not None and now - entry[0] < ttl:
+            return entry[1]
+    client = build_public_exchange(exchange_name)
+    with _data_lock:
+        _client_cache[key] = (time.time(), client)
+    return client
+
+
+def fetch_tickers_cached(
+    exchange_name: str = "binance",
+    symbols: Optional[list[str]] = None,
+    ttl: float = TICKER_TTL,
+) -> dict[str, Any]:
+    """Fetch tickers for ``symbols`` with a TTL cache.
+
+    Returns ``{symbol: ticker}``. Fresh entries within ``ttl`` seconds
+    are served from the in-process cache; only expired/missing symbols
+    trigger ONE batched network call through the shared client. Safe to
+    call from several threads concurrently.
+    """
+    symbols = [s for s in (symbols or []) if s]
+    if not symbols:
+        return {}
+    now = time.time()
+    result: dict[str, Any] = {}
+    missing: list[str] = []
+    key_prefix = (exchange_name or "binance").lower()
+    with _data_lock:
+        for sym in symbols:
+            entry = _ticker_cache.get((key_prefix, sym))
+            if entry is not None and now - entry[0] < ttl:
+                result[sym] = entry[1]
+            else:
+                missing.append(sym)
+    if not missing:
+        return result
+    with _data_lock:
+        try:
+            exchange = get_cached_public_exchange(exchange_name)
+            fresh = exchange.fetch_tickers(missing)
+        except Exception:
+            return result
+        for sym, ticker in (fresh or {}).items():
+            if not isinstance(ticker, dict):
+                continue
+            _ticker_cache[(key_prefix, sym)] = (time.time(), dict(ticker))
+            result[sym] = ticker
+    return result
+
+
+def fetch_ticker_cached(
+    exchange_name: str = "binance", symbol: str = "", ttl: float = TICKER_TTL,
+) -> Optional[dict[str, Any]]:
+    """TTL-cached single-symbol ticker (wrapper over fetch_tickers_cached)."""
+    return fetch_tickers_cached(exchange_name, [symbol], ttl=ttl).get(symbol)
+
+
+def clear_public_data_cache() -> None:
+    """Drop cached clients/tickers (used by tests)."""
+    with _data_lock:
+        _client_cache.clear()
+        _ticker_cache.clear()
 
 
 NORMALIZED_COLUMNS: list[str] = [

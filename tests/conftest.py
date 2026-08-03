@@ -1,6 +1,58 @@
 import os
+from typing import Any
 
 import pytest
+
+import requests as _requests  # noqa: PLC0415
+
+# ---------------------------------------------------------------------------
+#  Real-notification guard
+# ---------------------------------------------------------------------------
+# Running the test suite must NEVER send real Telegram notifications to the
+# production chat. Two real notifier classes read the REAL .env credentials
+# (bot/telegram.py TelegramNotifier via bot.config, bot/notifier.py Notifier
+# via from_env/from_config) and a few modules instantiate them directly during
+# tests — which used to fire genuine BUY OPENED / POSITION CLOSED / STATE
+# RESTORED messages into the live chat. The default sandbox below swaps
+# ``requests.post`` so ANY attempt to hit api.telegram.org during a test
+# FAILS that test loudly. Tests that genuinely exercise remote delivery are
+# opt-in only: they must carry ``@pytest.mark.real_notifier`` AND the suite
+# must be run with ``ZETBOT_ALLOW_REAL_NOTIFIER=1`` (never set in normal runs).
+
+_ORIGINAL_POST = _requests.post
+
+
+def _no_real_telegram_post(*args: Any, **kwargs: Any) -> Any:
+    url = str(kwargs.get("url") or (args[0] if args else ""))
+    if "api.telegram.org" in url:
+        raise AssertionError(
+            "Real Telegram send attempted during tests. Every notifier must "
+            "be replaced with a mock/disabled stub — mark the test "
+            "@pytest.mark.real_notifier AND run with "
+            "ZETBOT_ALLOW_REAL_NOTIFIER=1 to deliberately allow it (never "
+            "in normal test runs).",
+        )
+    return _ORIGINAL_POST(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_telegram(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Block every outbound Telegram POST unless explicitly opted in."""
+    marker = request.node.get_closest_marker("real_notifier")
+    allowed = os.getenv("ZETBOT_ALLOW_REAL_NOTIFIER", "").lower() in ("1", "true", "yes")
+    if marker is not None and allowed:
+        yield
+        return
+    # Also cut the CONFIG-driven notifiers at the source (bot/paper_engine,
+    # bot/telegram.TelegramNotifier read bot.config.CONFIG at construction)
+    # and pin the exchange/quote labels the notifiers embed in messages so
+    # fixtures using BTC/USDT pairs never render "indodax … BTC/USDT".
+    import bot.config as _bot_config  # noqa: PLC0415
+    monkeypatch.setitem(_bot_config.CONFIG, "telegram_enabled", False)
+    monkeypatch.setitem(_bot_config.CONFIG, "exchange", "binance")
+    monkeypatch.setitem(_bot_config.CONFIG, "quote_currency", "USDT")
+    monkeypatch.setattr("requests.post", _no_real_telegram_post)
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +78,11 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "exchange(name): live tests that require the named exchange to be reachable",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_notifier: allow real Telegram delivery (requires "
+        "ZETBOT_ALLOW_REAL_NOTIFIER=1; never used in normal runs)",
     )
 
 

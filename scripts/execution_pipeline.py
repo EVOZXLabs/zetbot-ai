@@ -169,11 +169,30 @@ class ExecutionPipeline:
             if sell_qty <= 0:
                 continue
 
+            # A concurrent reconciler (paper monitor vs pipeline) may have
+            # already sold this level and persisted the hit flag while we
+            # were fetching prices. Re-read the authoritative state so two
+            # in-process threads can never both sell the same quantity.
+            if self._level_already_executed(symbol, hit_key, remaining):
+                continue
+
             emit_event(PipelineEvent("TP_TRIGGERED", symbol, price=tp_price, qty=sell_qty))
 
-            tp_result = self._sell(symbol, tp_price, sell_qty)
+            # Write-ahead: persist the anticipated post-exit state BEFORE
+            # submitting the sell. If the process dies right after the
+            # order fills, positions.json already shows the level as hit,
+            # so a restart can never re-sell the same quantity (the crash
+            # window that double-sold CELR/IDR). Rolled back if the sell
+            # itself fails.
+            pending = dict(result)
+            pending[hit_key] = True
+            pending["remaining_qty"] = round(remaining - sell_qty, 8)
+            self._write_ahead(symbol, pending)
+
+            tp_result = self._sell(symbol, tp_price, sell_qty, exit_level=hit_key)
             if tp_result.status != "FILLED":
-                _log.warning("TP sell failed for %s: %s", symbol, tp_result.error)
+                _log.warning("TP sell failed for %s: %s — rolling back exit state", symbol, tp_result.error)
+                self._write_ahead(symbol, dict(result))
                 continue
 
             emit_event(PipelineEvent("EXIT_SUBMITTED", symbol, side="SELL_TP", result=tp_result.to_dict()))
@@ -186,24 +205,39 @@ class ExecutionPipeline:
 
         # --- Process SL ---
         if sl_hit and remaining > 0:
-            emit_event(PipelineEvent("SL_TRIGGERED", symbol, price=current_price, qty=remaining))
-            sl_result = self._sell(symbol, current_price, remaining)
-            if sl_result.status == "FILLED":
-                emit_event(PipelineEvent("EXIT_SUBMITTED", symbol, side="SELL_SL", result=sl_result.to_dict()))
-                cost_part = cost_basis * (remaining / qty) if qty > 0 else 0
-                close_pnl = (sl_result.cost or remaining * current_price) - cost_part
-                realized_pnl += close_pnl
-                remaining = 0
-                result["status"] = "STOPPED"
-            else:
-                _log.warning("SL sell failed for %s: %s", symbol, sl_result.error)
+            # Same guard as the TP levels: skip if a concurrent reconciler
+            # already drained the position.
+            if not self._position_drained(symbol):
+                emit_event(PipelineEvent("SL_TRIGGERED", symbol, price=current_price, qty=remaining))
+
+                # Write-ahead the full close before selling (see above).
+                pending = dict(result)
+                pending["status"] = "STOPPED"
+                pending["remaining_qty"] = 0.0
+                self._write_ahead(symbol, pending)
+
+                sl_result = self._sell(symbol, current_price, remaining, exit_level="sl")
+                if sl_result.status == "FILLED":
+                    emit_event(PipelineEvent("EXIT_SUBMITTED", symbol, side="SELL_SL", result=sl_result.to_dict()))
+                    cost_part = cost_basis * (remaining / qty) if qty > 0 else 0
+                    close_pnl = (sl_result.cost or remaining * current_price) - cost_part
+                    realized_pnl += close_pnl
+                    remaining = 0
+                    result["status"] = "STOPPED"
+                else:
+                    _log.warning("SL sell failed for %s: %s — rolling back exit state", symbol, sl_result.error)
+                    self._write_ahead(symbol, dict(result))
 
         # --- Update position state ---
         result["remaining_qty"] = round(remaining, 8)
         result["realized_pnl"] = round(realized_pnl, 2)
 
         if remaining <= 0:
-            result["status"] = "CLOSED"
+            # STOPPED (stop-loss) must survive here — the generic CLOSED
+            # label is only for take-profit drains, otherwise every
+            # stop-loss exit gets misreported as "Take Profit".
+            if result.get("status") not in CLOSED_STATUSES:
+                result["status"] = "CLOSED"
             result["remaining_qty"] = 0.0
             result["unrealized_pnl"] = 0.0
             result["total_pnl"] = round(realized_pnl, 2)
@@ -238,13 +272,68 @@ class ExecutionPipeline:
     #  Internal
     # ------------------------------------------------------------------
 
-    def _sell(self, symbol: str, price: float, qty: float) -> OrderResult:
+    def _write_ahead(self, symbol: str, state: dict[str, Any]) -> None:
+        """Persist ``state`` for ``symbol`` into positions.json (fail-soft).
+
+        Write-ahead: called BEFORE a market sell so that a crash between
+        the order fill and the caller's own persist step can never make a
+        restart re-sell the same quantity. Never raises — a failed state
+        write must not break trading.
+        """
+        try:
+            from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+            merge_positions([state])
+        except Exception:
+            _log.debug("Write-ahead persist failed for %s", symbol)
+
+    def _authoritative(self, symbol: str) -> Optional[dict[str, Any]]:
+        """Re-read the position record from positions.json (or None)."""
+        try:
+            from scripts.exit_gate import load_position  # noqa: PLC0415
+            return load_position(symbol)
+        except Exception:
+            return None
+
+    def _level_already_executed(self, symbol: str, hit_key: str, remaining: float) -> bool:
+        """True when a concurrent reconciler already sold this TP level."""
+        fresh = self._authoritative(symbol)
+        if fresh is None:
+            return False
+        if fresh.get(hit_key, False):
+            return True
+        fresh_remaining = float(
+            fresh.get("remaining_qty", fresh.get("quantity", 0)) or 0
+        )
+        return fresh_remaining <= 0 or fresh_remaining < remaining
+
+    def _position_drained(self, symbol: str) -> bool:
+        """True when a concurrent reconciler already closed the position."""
+        fresh = self._authoritative(symbol)
+        if fresh is None:
+            return False
+        if fresh.get("status") not in OPEN_STATUSES:
+            return True
+        fresh_remaining = float(
+            fresh.get("remaining_qty", fresh.get("quantity", 0)) or 0
+        )
+        return fresh_remaining <= 0
+
+    def _sell(
+        self,
+        symbol: str,
+        price: float,
+        qty: float,
+        exit_level: str = "",
+    ) -> OrderResult:
         request = OrderRequest(
             symbol=symbol,
             side="SELL",
             type="MARKET",
             amount=qty,
             price=price,
-            metadata={"source": "execution_pipeline"},
+            metadata={
+                "source": "execution_pipeline",
+                "exit_level": exit_level,
+            },
         )
         return self._provider.execute_sell(request)

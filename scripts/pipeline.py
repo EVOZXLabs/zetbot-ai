@@ -720,12 +720,15 @@ class Pipeline:
             return
 
         # Fetch prices from the configured exchange (indodax pairs like
-        # GOAT/IDR never resolve on binance).
+        # GOAT/IDR never resolve on binance). Shared cached client + TTL
+        # ticker cache so we never burst the exchange with concurrent
+        # /api/pairs calls (429 rate-limit fix).
         try:
-            from bot.data import build_public_exchange  # noqa: PLC0415
-            exchange = build_public_exchange(getattr(self.config, "exchange", "binance"))
+            from bot.data import fetch_tickers_cached  # noqa: PLC0415
             symbols = [p["symbol"] for p in open_positions if "symbol" in p]
-            tickers = exchange.fetch_tickers(symbols) if symbols else {}
+            tickers = fetch_tickers_cached(
+                getattr(self.config, "exchange", "binance"), symbols,
+            ) if symbols else {}
         except Exception as exc:
             self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
             return
@@ -812,10 +815,11 @@ class Pipeline:
 
         # Fetch current prices from the configured exchange
         try:
-            from bot.data import build_public_exchange  # noqa: PLC0415
-            exchange = build_public_exchange(getattr(self.config, "exchange", "binance"))
+            from bot.data import fetch_tickers_cached  # noqa: PLC0415
             symbols = [p["symbol"] for p in open_positions if "symbol" in p]
-            tickers = exchange.fetch_tickers(symbols) if symbols else {}
+            tickers = fetch_tickers_cached(
+                getattr(self.config, "exchange", "binance"), symbols,
+            ) if symbols else {}
         except Exception as exc:
             self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
             return

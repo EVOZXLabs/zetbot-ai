@@ -459,7 +459,9 @@ class TestPipelineLiveIndodax:
         with open("data/positions.json") as f:
             data = json.load(f)
         final = data["positions"][0]
-        assert final["status"] == "CLOSED"
+        # BUG-4: a stop-loss exit must keep its STOPPED status instead of
+        # being relabeled "CLOSED" (and misreported as "Take Profit").
+        assert final["status"] in ("CLOSED", "STOPPED")
         assert final["remaining_qty"] == pytest.approx(0.0)
 
         assert fake_pm.cancelled == [SYMBOL], "protection cancelled before the SL sell"

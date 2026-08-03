@@ -669,17 +669,19 @@ def _monitor_positions(
         pass
 
     # Fetch current prices from the configured exchange (non-binance
-    # exchanges like indodax list symbols such as GOAT/IDR).
+    # exchanges like indodax list symbols such as GOAT/IDR). Uses the
+    # shared cached client + TTL ticker cache so the monitor, the
+    # pipeline reconciliation and the health check collapse into a
+    # single /api/pairs call and one rate-limit budget (429 fix).
     symbols = [p["symbol"] for p in active if "symbol" in p]
     try:
-        from bot.data import build_public_exchange
+        from bot.data import fetch_tickers_cached
         _cfg = getattr(container, "_config", None)
         _exchange_name = (
             getattr(_cfg, "exchange", None)
             if _cfg is not None else None
         ) or os.getenv("EXCHANGE", "binance")
-        exchange = build_public_exchange(_exchange_name)
-        tickers = exchange.fetch_tickers(symbols)
+        tickers = fetch_tickers_cached(_exchange_name, symbols)
     except Exception as exc:
         logger.debug(f"Monitor ticker fetch failed: {exc}")
         return

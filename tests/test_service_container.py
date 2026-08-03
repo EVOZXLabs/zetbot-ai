@@ -27,6 +27,17 @@ from scripts.service_container import ServiceContainer
 #  Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    These tests write / rename ``data/paper_balance.json`` and
+    ``data/positions.json``; without the redirect they used to touch the
+    REAL production data files (including temporarily renaming them).
+    """
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("data", exist_ok=True)
+
 BASE_CFG = AppConfig(
     paper_mode=True,
     exchange="binance",

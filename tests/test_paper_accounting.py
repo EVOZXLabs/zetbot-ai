@@ -21,6 +21,18 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    Tests here persist ``data/paper_state.json`` / ``data/positions.json``;
+    without the redirect they used to overwrite the REAL paper state used
+    by the live bot (test positions leaking into the running bot).
+    Tests create their own ``data/`` dir (some via plain ``mkdir()``).
+    """
+    monkeypatch.chdir(tmp_path)
+
 # Ensure project root is on sys.path
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:

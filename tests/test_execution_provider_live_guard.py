@@ -11,6 +11,7 @@ These tests never touch a real exchange; a recording fake stands in for
 CCXT.
 """
 
+import os
 from typing import Any
 
 import pytest
@@ -89,6 +90,19 @@ def _reset_live_flag() -> None:
     LiveExecutor.disable()
     yield
     LiveExecutor.disable()
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    ``reconcile_position`` write-aheads pending exit state into
+    ``data/positions.json`` before selling (BUG-1 fix) — without this
+    redirect the TP/SL tests used to write their fake BTC/USDT test
+    positions into the REAL production positions.json.
+    """
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("data", exist_ok=True)
 
 
 def _make_provider() -> tuple[LiveExecutionProvider, _RecordingExchange]:
