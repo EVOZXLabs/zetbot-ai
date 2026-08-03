@@ -103,7 +103,7 @@ MIN_RR=1.5
 MAX_RR=5.0
 
 # Protection orders OFF → tes satu jalur exit pada satu waktu
-AUTO_PROTECT=false                   # catatan: default TRUE jika tidak di-set
+AUTO_PROTECT=false                   # default bila tidak di-set (sebelumnya bug: default true)
 
 # Pipeline
 AUTO_PIPELINE=true
