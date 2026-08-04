@@ -24,9 +24,9 @@
 - [x] Production setup health check
 - [x] Environment validation
 - [ ] VPS deployment
-- [ ] systemd service
-- [ ] Automatic restart
-- [ ] Log rotation
+- [x] systemd service (`deploy/zetbot-watchdog.service`)
+- [x] Automatic restart (`scripts/watchdog.py` auto-restart, systemd `Restart=always`)
+- [x] Log rotation (`deploy/zetbot-logrotate`)
 
 ## Trading Validation
 
