@@ -120,19 +120,41 @@ class PositionsCommand(BaseCommand):
             symbol = p.get("symbol", "?")
             entry = p.get("entry_price", 0.0)
             current = p.get("current_price", 0.0)
-            remaining = p.get("remaining_qty", p.get("quantity", 0.0))
+            total_qty = p.get("quantity", 0.0)
+            remaining = p.get("remaining_qty", total_qty)
             cost_basis = p.get("cost_basis", 0.0)
 
-            # positions.json records don't always carry ``cost_basis``
-            # (legacy entries); with it defaulting to 0 the whole position
-            # market value is misreported as profit (e.g. VEX/IDR showed
-            # "+586,941.66 IDR" — exactly the position size). Derive the
-            # remaining cost basis from the entry price instead.
+            # ``cost_basis`` in positions.json represents the *total* cost for
+            # the original full quantity (including fees + slippage).  After a
+            # partial TP sell, ``remaining_qty < quantity`` but ``cost_basis``
+            # is still the full amount, so we must scale it down to the
+            # remaining portion before computing PnL.
+            #
+            # Legacy entries without cost_basis: derive from entry price.
             if cost_basis <= 0 and entry > 0:
-                cost_basis = entry * remaining
+                cost_basis = entry * total_qty
 
-            pnl = current * remaining - cost_basis
-            pnl_pct = ((current / entry) - 1) * 100 if entry > 0 else 0.0
+            # Scale cost_basis to the remaining portion of the position.
+            if total_qty > 0:
+                cost_basis_remaining = cost_basis * (remaining / total_qty)
+            else:
+                cost_basis_remaining = cost_basis
+
+            pnl = current * remaining - cost_basis_remaining
+            # pnl_pct derived from the *actual* pnl vs cost paid — consistent
+            # with the absolute pnl value shown next to it.
+            # Guard: when cost_basis_remaining is 0 (legacy position with
+            # missing cost data), fall back to entry-price calculation so
+            # pnl_pct sign always matches the sign of pnl (no contradiction
+            # like "-103 IDR (+28.04%)").
+            if cost_basis_remaining > 0:
+                pnl_pct = pnl / cost_basis_remaining * 100
+            elif entry > 0 and remaining > 0:
+                # Fallback: derive from entry price
+                fallback_cost = entry * remaining
+                pnl_pct = (current * remaining - fallback_cost) / fallback_cost * 100
+            else:
+                pnl_pct = 0.0
 
             emoji = pnl_emoji(pnl)
 

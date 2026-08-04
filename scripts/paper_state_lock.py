@@ -137,3 +137,72 @@ def merge_positions(positions: list[dict[str, Any]]) -> None:
             atomic_write_json(POSITIONS_PATH, data, indent=2, default=str)
         except OSError:
             pass
+
+
+def prune_closed_positions(
+    max_closed: int = 50,
+    positions_path: str = "data/positions.json",
+    archive_path: str = "data/positions_archive.json",
+) -> int:
+    """Move old CLOSED positions to an archive file to keep positions.json lean.
+
+    Keeps the most recent ``max_closed`` closed positions in
+    ``positions.json``.  Any excess (oldest by ``opened_at``) are moved
+    to ``positions_archive.json`` so trade history is never lost.
+
+    Returns the number of entries archived.
+    """
+    from scripts.position_status import is_open  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    with PAPER_STATE_LOCK:
+        try:
+            with open(positions_path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return 0
+
+        positions = data.get("positions", [])
+        open_pos = [p for p in positions if is_open(p.get("status"))]
+        closed_pos = [p for p in positions if not is_open(p.get("status"))]
+
+        if len(closed_pos) <= max_closed:
+            return 0  # nothing to prune
+
+        # Sort closed by opened_at so oldest are pruned first
+        closed_pos.sort(key=lambda p: p.get("opened_at", ""), reverse=False)
+        to_archive = closed_pos[: len(closed_pos) - max_closed]
+        to_keep = closed_pos[len(closed_pos) - max_closed :]
+
+        # Append to archive
+        try:
+            with open(archive_path) as f:
+                archive = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            archive = {"positions": []}
+
+        archive.setdefault("positions", []).extend(to_archive)
+        if "archived_runs" not in archive:
+            archive["archived_runs"] = []
+        archive["archived_runs"].append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "count": len(to_archive),
+        })
+
+        try:
+            os.makedirs(os.path.dirname(archive_path) or ".", exist_ok=True)
+            atomic_write_json(archive_path, archive, indent=2, default=str)
+        except OSError:
+            pass
+
+        # Update positions.json with pruned list
+        data["positions"] = open_pos + to_keep
+        data["total_positions"] = len(data["positions"])
+        data["active_count"] = len(open_pos)
+        data["closed_count"] = len(to_keep)
+        try:
+            atomic_write_json(positions_path, data, indent=2, default=str)
+        except OSError:
+            return 0
+
+        return len(to_archive)

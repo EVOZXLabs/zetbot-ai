@@ -1304,6 +1304,16 @@ def main() -> None:
         except Exception as exc:
             logger.warning(f"Accounting reconciliation failed (non-fatal): {exc}")
 
+        # Prune old closed positions from positions.json to keep it lean.
+        # Anything over 50 closed entries is archived to positions_archive.json.
+        try:
+            from scripts.paper_state_lock import prune_closed_positions
+            pruned = prune_closed_positions(max_closed=50)
+            if pruned > 0:
+                logger.info(f"Pruned {pruned} old closed positions to positions_archive.json")
+        except Exception as exc:
+            logger.debug(f"Position pruning failed (non-fatal): {exc}")
+
         # Send BUY notifications for any open positions from prior sessions
         # that weren't notified yet (deduplicated via data/.notified_buys).
         try:

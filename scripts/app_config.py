@@ -239,9 +239,22 @@ def validate_config(config: AppConfig) -> None:
     required value is missing, invalid, or out of range.
     """
     errors: list[str] = []
+    warnings: list[str] = []
 
     if config.account_balance <= 0:
         errors.append(f"ACCOUNT_BALANCE must be > 0 (got {config.account_balance})")
+
+    # IDR exchanges (Indodax) use much larger nominal values than USD-quoted
+    # exchanges. 10,000 IDR ≈ $0.63 — too small to execute any real trade.
+    # Warn (but don't block startup) when QUOTE_CURRENCY=IDR and ACCOUNT_BALANCE
+    # looks like it was accidentally left at a USDT-scale value (< 100,000 IDR).
+    if config.quote_currency == "IDR" and 0 < config.account_balance < 100_000:
+        warnings.append(
+            f"ACCOUNT_BALANCE={config.account_balance} looks too small for IDR trading "
+            f"(Indodax pairs like BTC/IDR cost millions of IDR per trade). "
+            f"Set ACCOUNT_BALANCE to at least 1,000,000 for a meaningful paper balance, "
+            f"e.g. ACCOUNT_BALANCE=1000000 (≈ 1 juta IDR)."
+        )
     if config.exchange not in SUPPORTED_EXCHANGES:
         errors.append(
             f"EXCHANGE must be one of {sorted(SUPPORTED_EXCHANGES)} "
@@ -323,6 +336,11 @@ def validate_config(config: AppConfig) -> None:
             "PAPER_MODE=false requires API_KEY and API_SECRET to be set "
             "(live trading cannot start without exchange credentials)"
         )
+
+    if warnings:
+        import sys  # noqa: PLC0415
+        for w in warnings:
+            print(f"WARNING: {w}", file=sys.stderr)
 
     if errors:
         raise ConfigError("\n".join(errors))

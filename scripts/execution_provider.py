@@ -561,6 +561,10 @@ class PaperExecutionProvider(ExecutionProvider):
             cost_part = vp.cost_basis * (qty / vp.quantity) if vp.quantity > 0 else 0.0
             sell_pnl = total_proceeds - cost_part
             vp.remaining_qty = max(0.0, vp.remaining_qty - qty)
+            # Reduce cost_basis proportionally so future PnL calculations
+            # (both here and in the /positions Telegram command) remain
+            # correct for the remaining portion of the position.
+            vp.cost_basis = max(0.0, vp.cost_basis - cost_part)
             vp.realized_pnl = round(vp.realized_pnl + sell_pnl, 2)
             vp.current_price = fill_price
             # Mark the take-profit level as sold in paper_state.json so

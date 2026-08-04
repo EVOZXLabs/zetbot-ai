@@ -66,11 +66,24 @@ class WalletCommand(BaseCommand):
             pos_data = ctx.read_json("positions.json")
             pos_list = pos_data.get("positions", []) if pos_data else []
             positions = [p for p in pos_list if is_open(p.get("status"))]
-            unrealized = sum(
-                p.get("current_price", 0.0) * p.get("remaining_qty", p.get("quantity", 0.0))
-                - p.get("cost_basis", 0.0)
-                for p in positions
-            )
+            def _unrealized(p: dict) -> float:
+                current = p.get("current_price", 0.0)
+                total_qty = p.get("quantity", 0.0)
+                remaining = p.get("remaining_qty", total_qty)
+                cost_basis = p.get("cost_basis", 0.0)
+                if cost_basis <= 0 and p.get("entry_price", 0.0) > 0:
+                    cost_basis = p["entry_price"] * total_qty
+                # Scale cost_basis to remaining portion (partial TP may have
+                # reduced remaining_qty while cost_basis still represents
+                # the original full-position cost).
+                cost_remaining = (
+                    cost_basis * (remaining / total_qty)
+                    if total_qty > 0
+                    else cost_basis
+                )
+                return current * remaining - cost_remaining
+
+            unrealized = sum(_unrealized(p) for p in positions)
             in_positions_pct = (
                 (pos_value / total_balance * 100) if total_balance > 0 else 0.0
             )
