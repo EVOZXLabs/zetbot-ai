@@ -313,9 +313,23 @@ class TestPaperMonitorStillUpdatesPaper:
         """Control: the PAPER path must keep updating the paper accounting
         files — the BUG-3 fix must not have broken paper mode."""
         import ccxt  # noqa: PLC0415
+        import bot.data as _bd  # noqa: PLC0415
 
         notifier = _RecordingNotifier()
         monkeypatch.setattr(ccxt, "binance", _FakeBinance)
+
+        # Clear the shared ticker/client cache so a stale client from a
+        # previous test (possibly pointing at a different exchange, e.g.
+        # indodax from EXCHANGE=indodax in the shell env) does not prevent
+        # the monitor from receiving the patched ticker.
+        _bd.clear_public_data_cache()
+
+        # Patch fetch_tickers_cached directly so the monitor always gets the
+        # expected price regardless of which exchange the env points at.
+        def _fake_fetch(exchange_name: str, symbols=None, ttl: float = 45.0):
+            return {s: {"last": 105.0} for s in (symbols or [])}
+
+        monkeypatch.setattr(_bd, "fetch_tickers_cached", _fake_fetch)
 
         _seed_position(_base_position())
 

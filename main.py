@@ -677,14 +677,37 @@ def _monitor_positions(
     try:
         from bot.data import fetch_tickers_cached
         _cfg = getattr(container, "_config", None)
-        _exchange_name = (
-            getattr(_cfg, "exchange", None)
-            if _cfg is not None else None
-        ) or os.getenv("EXCHANGE", "binance")
+        # Prefer the injected container config; fall back to .env file
+        # (re-loaded via dotenv so an env-var override like EXCHANGE=indodax
+        # from the shell does not silently override the configured exchange
+        # for a position that belongs to a different exchange).
+        _exchange_name = getattr(_cfg, "exchange", None) if _cfg is not None else None
+        if not _exchange_name:
+            from scripts.app_config import load_config as _load_cfg  # noqa: PLC0415
+            try:
+                _exchange_name = _load_cfg().exchange
+            except Exception:
+                _exchange_name = os.getenv("EXCHANGE", "binance")
         tickers = fetch_tickers_cached(_exchange_name, symbols)
     except Exception as exc:
         logger.debug(f"Monitor ticker fetch failed: {exc}")
-        return
+        tickers = {}
+
+    # If tickers came back empty (network hiccup, exchange down), build a
+    # best-effort fallback from each position's last known current_price so
+    # SL/TP reconciliation can still run and protect open positions.
+    # Without this guard a transient network failure silently skips ALL
+    # position monitoring until the next cycle.
+    if not tickers:
+        for p in active:
+            sym = p.get("symbol", "")
+            if sym and p.get("current_price", 0.0) > 0:
+                tickers[sym] = {"last": p["current_price"]}
+        if tickers:
+            logger.debug(
+                "Monitor: exchange unreachable — using last known prices "
+                f"for {list(tickers.keys())}"
+            )
 
     # Get the right provider
     is_live = (

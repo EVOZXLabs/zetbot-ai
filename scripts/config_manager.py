@@ -110,6 +110,13 @@ def write_env(values: dict[str, str], path: str = ENV_PATH) -> None:
 
 
 def display_config() -> str:
+    # Re-load the .env file so the output reflects the current file on disk,
+    # not a stale os.environ snapshot from before any .env changes this
+    # session. ``override=True`` ensures file values win over any pre-existing
+    # env vars (e.g. the shell had EXCHANGE=indodax before the file was
+    # changed to EXCHANGE=binance).
+    if os.path.exists(ENV_PATH):
+        load_dotenv(ENV_PATH, override=True)
     lines = ["\n=== Current Configuration ===\n"]
     for field in CONFIG_FIELDS:
         value = os.getenv(field.key, field.default)
@@ -119,6 +126,10 @@ def display_config() -> str:
 
 
 def config_to_dict() -> dict[str, str]:
+    # Re-load the .env file so the returned dict reflects the current file
+    # on disk, not a stale os.environ snapshot.
+    if os.path.exists(ENV_PATH):
+        load_dotenv(ENV_PATH, override=True)
     result: dict[str, str] = {}
     for field in CONFIG_FIELDS:
         value = os.getenv(field.key, field.default)
