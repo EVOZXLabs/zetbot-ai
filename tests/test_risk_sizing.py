@@ -301,6 +301,108 @@ class TestPortfolioExposureCap:
 
 
 # ===================================================================
+#  MAX_POSITION_SIZE_PCT must be honored from .env / AppConfig at
+#  runtime — regression for the reported LIVE-trading bug.
+#
+#  Symptom: .env set MAX_POSITION_SIZE_PCT=0.05 but a position opened by
+#  the pipeline consumed ~60% of equity. Root cause:
+#  ``RiskManager.__init__`` declared ``max_position_size_pct=
+#  MAX_POSITION_SIZE_PCT`` as a DEFAULT ARGUMENT, which Python binds ONCE
+#  at module import time (0.6). ``Pipeline._apply_config()`` correctly
+#  re-wrote the module constant from AppConfig before every run, but the
+#  already-bound default kept winning — so every RiskManager built
+#  without an explicit value silently capped exposure at 60%.
+#
+#  Fix: the constructor now resolves the module constant AT INSTANTIATION
+#  time, and the pipeline/main explicitly pass config.max_position_size_pct.
+#  These tests pin that a new position NEVER exceeds
+#  MAX_POSITION_SIZE_PCT × equity, for any configured value.
+# ===================================================================
+
+
+class TestMaxPositionSizePctHonored:
+    """Every new position RiskManager opens must be capped at
+    MAX_POSITION_SIZE_PCT × equity — including small values like 0.05."""
+
+    def test_constructor_resolves_module_constant_at_instantiation(self, monkeypatch):
+        """Regression for the default-argument binding bug: overriding the
+        module constant (exactly what Pipeline._apply_config does) MUST be
+        visible to a RiskManager built without an explicit value."""
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MAX_POSITION_SIZE_PCT", 0.05)
+        mgr = rm.RiskManager(balance=10_000.0, equity=10_000.0)
+        assert mgr.max_position_size_pct == pytest.approx(0.05)
+        assert mgr._max_new_position_value() == pytest.approx(500.0)
+
+    def test_app_config_loads_env_value(self, monkeypatch):
+        """MAX_POSITION_SIZE_PCT from .env must reach AppConfig so the
+        pipeline can forward it."""
+        from scripts.app_config import load_config
+
+        monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "0.05")
+        cfg = load_config()
+        assert cfg.max_position_size_pct == pytest.approx(0.05)
+
+    def test_pipeline_config_override_reaches_risk_manager(self, monkeypatch):
+        """The exact wiring Pipeline._apply_config() -> RiskManager() (built
+        the way _run_risk_di builds it) must yield the configured 5% cap."""
+        import scripts.risk_manager as rm
+        from scripts.app_config import load_config
+
+        monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "0.05")
+        cfg = load_config()
+        # mirrors _apply_config()
+        monkeypatch.setattr(rm, "MAX_POSITION_SIZE_PCT", cfg.max_position_size_pct)
+        # mirrors _run_risk_di()'s constructor call
+        mgr = rm.RiskManager(
+            balance=996_588.0,
+            equity=996_588.0,
+            existing_exposure=0.0,
+            risk_per_trade=cfg.max_risk_per_trade_pct,
+            max_daily_loss=cfg.max_daily_loss_pct,
+            max_positions=cfg.max_positions,
+        )
+        assert mgr.max_position_size_pct == pytest.approx(0.05)
+        assert mgr._max_new_position_value() == pytest.approx(49_829.4)
+
+    @pytest.mark.parametrize("cap_pct", [0.05, 0.1, 0.3, 0.6, 1.0])
+    def test_new_position_never_exceeds_cap_times_equity(self, cap_pct):
+        """A full sizing pass must never produce a position value above
+        cap_pct × equity, even with a tight stop that would otherwise want
+        to be huge."""
+        equity = 996_588.0
+        mgr = RiskManager(
+            balance=equity, equity=equity, existing_exposure=0.0,
+            max_position_size_pct=cap_pct, max_positions=5,
+        )
+        budget = mgr._max_new_position_value()
+        assert budget == pytest.approx(cap_pct * equity)
+
+        result = _simulate_trade(mgr, entry=50_000.0)
+        assert result.position_value <= cap_pct * equity + 1e-6
+        # When risk-based sizing wants MORE than the cap, the position is
+        # pinned exactly to the cap (never above it).
+        if result.approval == "APPROVED":
+            assert result.position_value <= budget + 1e-6
+
+    def test_real_world_scenario_5pct_cap(self):
+        """The reported incident: equity ≈ Rp996,588, entry ≈ 7.5010 IDR.
+        The 60% position (~Rp598k) must become ~Rp49,829 (5% of equity)."""
+        equity = 996_588.0
+        mgr = RiskManager(
+            balance=equity, equity=equity, existing_exposure=0.0,
+            max_position_size_pct=0.05, max_positions=1,
+        )
+        budget = mgr._max_new_position_value()
+        assert budget == pytest.approx(49_829.4)
+        assert budget < equity  # 5% of equity, not 60%
+
+        result = _simulate_trade(mgr, entry=7.5010)
+        assert result.position_value <= budget + 1e-6
+
+
+# ===================================================================
 #  Insufficient balance
 # ===================================================================
 

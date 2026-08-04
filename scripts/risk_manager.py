@@ -66,10 +66,19 @@ MIN_POSITION_SIZE_USDT = 10.0       # smallest trade value — reflects real
 MIN_PROBABILITY = 50.0              # from decision engine
 MAX_ATR_PCT = 8.0                   # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
-MAX_POSITION_SIZE_PCT = 0.6         # max % of account EQUITY across ALL open
-                                     # positions combined ($ VALUE, not risk).
-                                     # This is a PORTFOLIO-WIDE exposure cap,
-                                     # not a per-position allowance.
+# max % of account EQUITY across ALL open positions combined
+# ($ VALUE, not risk). This is a PORTFOLIO-WIDE exposure cap, not a
+# per-position allowance.
+#
+# WARNING: ``RiskManager.__init__`` deliberately defaults
+# ``max_position_size_pct=None`` and resolves this module-level constant
+# AT INSTANTIATION time (not at import time). A Python default argument
+# like ``max_position_size_pct=MAX_POSITION_SIZE_PCT`` would be bound
+# once when the module is imported and could never observe the live
+# value that ``Pipeline._apply_config()`` writes into this module before
+# every run — which is exactly how a stale 0.6 (60 %) cap survived a
+# ``MAX_POSITION_SIZE_PCT=0.05`` .env edit and over-exposed the account.
+MAX_POSITION_SIZE_PCT = 0.6
 STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
 STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 
@@ -548,7 +557,7 @@ class RiskManager:
         risk_per_trade: float = MAX_RISK_PER_TRADE_PCT,
         max_daily_loss: float = MAX_DAILY_LOSS_PCT,
         max_positions: int | None = None,
-        max_position_size_pct: float = MAX_POSITION_SIZE_PCT,
+        max_position_size_pct: float | None = None,
         equity: float | None = None,
         existing_exposure: float | None = None,
         mm_config: MoneyManagementConfig | None = None,
@@ -568,6 +577,17 @@ class RiskManager:
             :mod:`scripts.money_management`. Callers that still want
             the old equity-tiered position count can pass
             ``max_positions=dynamic_max_positions(equity)`` explicitly.
+        max_position_size_pct : float | None
+            Portfolio-wide notional exposure cap as a fraction of equity
+            (e.g. 0.05 == 5 %). If ``None`` (default), it is resolved from
+            the module-level ``MAX_POSITION_SIZE_PCT`` constant AT
+            INSTANTIATION time — NOT at import time. This is deliberate:
+            ``Pipeline._apply_config()`` writes the AppConfig value from
+            ``.env`` into ``risk_manager.MAX_POSITION_SIZE_PCT`` before
+            every run, and a ``def __init__(..., max_position_size_pct=
+            MAX_POSITION_SIZE_PCT)`` default argument would freeze the
+            import-time value (0.6) forever and silently ignore the
+            operator's configured cap.
         equity : float | None
             Total account equity = cash + value of open positions (e.g.
             ``wallet.equity``). Used as the base for the portfolio-wide
@@ -586,7 +606,10 @@ class RiskManager:
         self.balance = balance
         self.risk_per_trade = risk_per_trade
         self.max_daily_loss_amt = balance * (max_daily_loss / 100.0)
-        self.max_position_size_pct = max_position_size_pct
+        self.max_position_size_pct = (
+            MAX_POSITION_SIZE_PCT if max_position_size_pct is None
+            else max_position_size_pct
+        )
         self.validator = TradeValidator()
         self.results: list[RiskResult] = []
         self._used_capital = 0.0
@@ -955,10 +978,18 @@ def main() -> None:
     mm_config = MoneyManagementConfig(
         mode=MoneyManagementMode(MONEY_MANAGEMENT_MODE),
     )
+    # Resolve MAX_POSITION_SIZE_PCT from .env / AppConfig so a direct
+    # CLI run (``python -m scripts.risk_manager``) honors the operator's
+    # configured cap exactly like the pipeline's DI risk stage does —
+    # never the module-default 0.6.
+    from scripts.app_config import load_config  # noqa: PLC0415
+
+    _cfg = load_config()
     manager = RiskManager(
         balance=balance,
         equity=equity,
         existing_exposure=existing_exposure,
+        max_position_size_pct=_cfg.max_position_size_pct,
         mm_config=mm_config,
     )
     results = manager.run()

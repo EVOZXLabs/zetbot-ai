@@ -499,6 +499,7 @@ class Pipeline:
             risk_per_trade=self.config.max_risk_per_trade_pct,
             max_daily_loss=self.config.max_daily_loss_pct,
             max_positions=self.config.max_positions,
+            max_position_size_pct=self.config.max_position_size_pct,
             mm_config=mm_config,
         )
         results = manager.run()

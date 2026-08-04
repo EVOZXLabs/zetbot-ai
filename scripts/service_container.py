@@ -537,6 +537,7 @@ class _RiskAdapter:
             risk_per_trade=self._config.max_risk_per_trade_pct,
             max_daily_loss=5.0,
             max_positions=self._config.max_positions,
+            max_position_size_pct=self._config.max_position_size_pct,
         )
         if decisions:
             mgr._data.decisions = decisions
