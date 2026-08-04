@@ -21,6 +21,14 @@ import requests as _requests  # noqa: PLC0415
 
 _ORIGINAL_POST = _requests.post
 
+# os.environ as it exists when conftest is loaded — i.e. BEFORE pytest starts
+# collecting test modules. Several modules (bot.config via bot.data, scripts/
+# validation.py, …) call load_dotenv() at import time during collection,
+# which injects the REAL .env values (e.g. EXCHANGE=indodax) into os.environ.
+# _isolate_environ must restore to THIS clean baseline, not to a per-test
+# snapshot taken after collection, or the pollution survives every test.
+_ENV_BASELINE = os.environ.copy()
+
 
 def _no_real_telegram_post(*args: Any, **kwargs: Any) -> Any:
     url = str(kwargs.get("url") or (args[0] if args else ""))
@@ -47,7 +55,15 @@ def _no_real_telegram(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
     # bot/telegram.TelegramNotifier read bot.config.CONFIG at construction)
     # and pin the exchange/quote labels the notifiers embed in messages so
     # fixtures using BTC/USDT pairs never render "indodax … BTC/USDT".
+    # NOTE: bot.config calls load_dotenv() at import time, which injects the
+    # REAL .env values (e.g. EXCHANGE=indodax) into os.environ. That happens
+    # inside an autouse fixture that runs BEFORE _isolate_environ snapshots
+    # the env, so the pollution would survive into every later test and flip
+    # their exchange resolution. Revert the env right after the import.
+    _env_before_import = os.environ.copy()
     import bot.config as _bot_config  # noqa: PLC0415
+    os.environ.clear()
+    os.environ.update(_env_before_import)
     monkeypatch.setitem(_bot_config.CONFIG, "telegram_enabled", False)
     monkeypatch.setitem(_bot_config.CONFIG, "exchange", "binance")
     monkeypatch.setitem(_bot_config.CONFIG, "quote_currency", "USDT")
@@ -59,15 +75,19 @@ def _no_real_telegram(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
 def _isolate_environ():
     """Safety net: no test may leak environment-variable changes to others.
 
-    Snapshots ``os.environ`` before every test and restores it exactly
-    afterwards — any key added by the test is removed, any key deleted or
-    changed is restored. Guards against e.g. a stray ``EXCHANGE=indodax``
-    leaking into later tests and flipping their exchange resolution.
+    Restores ``os.environ`` to the pristine pre-collection baseline every
+    test — any key added by the test is removed, any key deleted or changed
+    is restored. Guards against e.g. a stray ``EXCHANGE=indodax`` leaking
+    into later tests and flipping their exchange resolution.
     """
-    original = os.environ.copy()
+    original = _ENV_BASELINE.copy()
+    # pytest manages its own runtime vars (e.g. PYTEST_CURRENT_TEST) around
+    # every test and expects them present when it pops them; keep those.
+    pytest_vars = {k: v for k, v in os.environ.items() if k.startswith("PYTEST")}
     yield
     os.environ.clear()
     os.environ.update(original)
+    os.environ.update(pytest_vars)
 
 
 def pytest_configure(config):

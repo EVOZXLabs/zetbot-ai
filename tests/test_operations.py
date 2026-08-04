@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 ENV_BAK = ".env.test_bak"
 _ENV_KEYS: list[str] = []
+_ENV_SAVED = False
 _CONFIG_FIELD_KEYS: list[str] = []
 
 
@@ -38,17 +39,25 @@ def _init_env_keys() -> None:
 
 
 def _save_env() -> None:
-    global _ENV_KEYS
+    global _ENV_KEYS, _ENV_SAVED
     _init_env_keys()
     _ENV_KEYS = []
+    _ENV_SAVED = True
     # Save current values of config env vars
     for k in _CONFIG_FIELD_KEYS:
         if k in os.environ:
             _ENV_KEYS.append(k)
+    # Back up the real .env FILE too — _restore_env() deletes any .env it
+    # did not restore, so without this backup running the test suite would
+    # permanently destroy the operator's production configuration.
+    if os.path.exists(ENV_BAK):
+        os.remove(ENV_BAK)
+    if os.path.exists(".env"):
+        shutil.copy2(".env", ENV_BAK)
 
 
 def _restore_env() -> None:
-    global _ENV_KEYS
+    global _ENV_KEYS, _ENV_SAVED
     # Clear config env vars from os.environ
     for k in _CONFIG_FIELD_KEYS:
         os.environ.pop(k, None)
@@ -56,9 +65,13 @@ def _restore_env() -> None:
     if os.path.exists(ENV_BAK):
         shutil.copy2(ENV_BAK, ".env")
         os.remove(ENV_BAK)
-    elif os.path.exists(".env"):
+    elif _ENV_SAVED and os.path.exists(".env"):
+        # Only remove a .env created from scratch BY THIS TEST's save cycle;
+        # never delete a real .env that _save_env() had no chance to back up
+        # (e.g. teardown_method called without a matching setup_method).
         os.remove(".env")
     _ENV_KEYS = []
+    _ENV_SAVED = False
 
 
 def _write_env(content: str) -> None:
@@ -360,6 +373,9 @@ class TestExchangeTest:
 
 
 class TestTelegramTest:
+    def setup_method(self) -> None:
+        _save_env()
+
     def teardown_method(self) -> None:
         _restore_env()
 
