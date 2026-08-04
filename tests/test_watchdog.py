@@ -8,6 +8,7 @@ implementations (against ``tmp_path``).
 
 import json
 import logging
+import os
 import sys
 import time
 from unittest.mock import MagicMock
@@ -181,6 +182,78 @@ class TestCheckAndAct:
         wd = _wd(tmp_path)
         wd._ensure_bot()
         assert wd.spawn_calls == [wd.clock[0]]
+
+
+# -----------------------------------------------------------------------
+#  BUG A regression: /shutdown must not trigger watchdog restart
+# -----------------------------------------------------------------------
+
+class TestShutdownBugARegression:
+    """Attached-mode /shutdown used to skip writing .shutdown_requested.
+
+    The watchdog supervises the bot via PID file (attached mode) where
+    ``child.poll()`` is never called and ``last_returncode`` stays None.
+    Without .shutdown_requested the watchdog cannot distinguish a
+    deliberate /shutdown from a crash and auto-restarts the bot.
+    """
+
+    def test_attached_mode_crash_without_file_restarts(self, tmp_path):
+        """No shutdown file + non-graceful exit → crash → restart."""
+        wd = _wd(tmp_path)
+        wd.running = False
+        wd.rc = None  # attached mode: last_returncode never set
+        assert wd.check_and_act() == "restarted"
+        assert len(wd.spawn_calls) == 1
+
+    def test_attached_mode_with_file_no_restart(self, tmp_path):
+        """Shutdown file present + bot down → deliberate stop, no restart."""
+        wd = _wd(tmp_path)
+        wd.running = False
+        wd.rc = None  # attached mode
+        wd.files.add(SHUTDOWN_FILE)
+        assert wd.check_and_act() == "stopped_manual"
+        assert wd.spawn_calls == []
+
+    def test_child_mode_with_file_no_restart(self, tmp_path):
+        """Child mode (rc=9) but shutdown file present → still deliberate."""
+        wd = _wd(tmp_path)
+        wd.running = False
+        wd.rc = 9  # crash-like exit code, but file overrides
+        wd.files.add(SHUTDOWN_FILE)
+        assert wd.check_and_act() == "stopped_manual"
+        assert wd.spawn_calls == []
+
+    def test_file_written_even_when_event_set(self, tmp_path):
+        """Shutdown command must write .shutdown_requested regardless of
+        whether a shutdown_event is available (BUG A root cause)."""
+        import threading
+        from telegram.commands.shutdown import ShutdownCommand, SHUTDOWN_FILE
+
+        cmd = ShutdownCommand()
+        event = threading.Event()
+
+        class _FakeCtx:
+            chat_id = 999
+            shutdown_event = event
+            services = None
+
+        ctx = _FakeCtx()
+        # Seed the confirm-again timing so the next call confirms immediately
+        import time as _time
+        cmd._pending[str(ctx.chat_id)] = _time.time() - 1
+
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            result = cmd.execute(ctx, "/shutdown")
+
+            # Shutdown file must exist even though shutdown_event was available
+            assert os.path.exists(SHUTDOWN_FILE), (
+                "SHUTDOWN_FILE not written by ShutdownCommand"
+            )
+            assert "Shutting Down" in result
+        finally:
+            os.chdir(old_cwd)
 
 
 # ---------------------------------------------------------------------------

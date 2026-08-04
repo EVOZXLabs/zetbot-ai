@@ -1384,10 +1384,12 @@ def main() -> None:
                 # Bound total shutdown time the same way the signal
                 # handlers do, in case a worker thread fails to join.
                 _arm_force_exit_timer()
-                try:
-                    os.remove("data/.shutdown_requested")
-                except OSError:
-                    pass
+                # Do NOT remove .shutdown_requested here.  The file must
+                # persist until the watchdog has observed it so that the
+                # supervisor knows the stop was deliberate (BUG A fix).
+                # Stale files from previous runs are cleaned up at next
+                # startup (lines 1033-1040) and watchdog._do_restart
+                # clears it before crash-restarts.
                 break
 
             shutdown.wait(timeout=1.0)

@@ -436,12 +436,14 @@ class TelegramCommandCenter:
             )
 
         _log("Shutdown confirmed — initiating graceful shutdown")
+        # Always write the shutdown signal file so the watchdog sees a
+        # deliberate stop and does not auto-restart (BUG A fix).
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(SHUTDOWN_FILE, "w") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
+
         if self._shutdown_event:
             self._shutdown_event.set()
-        else:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(SHUTDOWN_FILE, "w") as f:
-                f.write(datetime.now(timezone.utc).isoformat())
         self._running = False
         return (
             "\U0001f6d1 *Shutting Down*\n"
