@@ -220,9 +220,8 @@ def load_live_positions() -> dict[str, Any]:
 
 def save_live_positions(positions_by_symbol: dict[str, Any]) -> None:
     try:
-        os.makedirs(os.path.dirname(LIVE_POSITIONS_PATH), exist_ok=True)
-        with open(LIVE_POSITIONS_PATH, "w") as f:
-            json.dump(positions_by_symbol, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(LIVE_POSITIONS_PATH, positions_by_symbol, indent=2)
     except Exception:
         pass  # best-effort cache write; the exchange remains the truth
 

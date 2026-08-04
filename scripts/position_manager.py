@@ -591,8 +591,8 @@ class PositionExport:
             ),
             "positions": [asdict(p) for p in positions],
         }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data, indent=2, default=str)
         print(f"  JSON export    : {path}")
 
 

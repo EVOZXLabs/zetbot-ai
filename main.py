@@ -421,8 +421,8 @@ def _update_paper_on_closure(
     pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
 
     try:
-        with open("data/paper_balance.json", "w") as f:
-            json.dump(pb, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj("data/paper_balance.json", pb, indent=2)
     except OSError as exc:
         logger.warning(f"Failed to update paper_balance.json: {exc}")
 
@@ -450,8 +450,8 @@ def _update_paper_on_closure(
                 1 for p in pos_data.get("positions", [])
                 if not is_open(p.get("status"))
             )
-            with open("data/positions.json", "w") as f:
-                json.dump(pos_data, f, indent=2, default=str)
+            from scripts.paper_state_lock import atomic_write_json as _awj
+            _awj("data/positions.json", pos_data, indent=2, default=str)
     except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
         logger.warning(f"Failed to update positions.json: {exc}")
 
@@ -485,8 +485,8 @@ def _update_paper_on_closure(
         orders_data = {"orders": []}
     orders_data.setdefault("orders", []).append(order)
     try:
-        with open("data/paper_orders.json", "w") as f:
-            json.dump(orders_data, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj("data/paper_orders.json", orders_data, indent=2)
     except OSError as exc:
         logger.warning(f"Failed to update paper_orders.json: {exc}")
 
@@ -539,8 +539,8 @@ def _sync_paper_state_on_closure(
     vp["unrealized_pnl"] = 0.0
 
     try:
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(state_path, state, indent=2, default=str)
     except OSError as exc:
         logger.warning(f"Failed to sync paper_state.json for {symbol}: {exc}")
 

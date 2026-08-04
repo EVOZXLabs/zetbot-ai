@@ -120,8 +120,8 @@ def save_position(symbol: str, position: dict[str, Any]) -> None:
         1 for p in positions if p.get("status") not in OPEN_STATUSES
     )
     try:
-        with open(POSITIONS_PATH, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(POSITIONS_PATH, data, indent=2, default=str)
     except OSError:
         pass
 

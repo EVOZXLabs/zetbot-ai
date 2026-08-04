@@ -896,8 +896,8 @@ def _sync_paper_files(
         "filled_at": now_ts,
     })
     try:
-        with open(orders_path, "w") as f:
-            json.dump(orders_data, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(orders_path, orders_data, indent=2)
     except OSError:
         pass
 
@@ -975,8 +975,8 @@ def _sync_paper_files(
     pb["net_pnl"] = round(snapshot.net_pnl, 2)
 
     try:
-        with open(bal_path, "w") as f:
-            json.dump(pb, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(bal_path, pb, indent=2)
     except OSError:
         pass
 
@@ -1060,8 +1060,8 @@ def _close_paper_position_on_sell(
         })
 
         try:
-            with open(state_path, "w") as f:
-                json.dump(state, f, indent=2, default=str)
+            from scripts.paper_state_lock import atomic_write_json as _awj
+            _awj(state_path, state, indent=2, default=str)
         except OSError:
             pass
 
@@ -1101,8 +1101,8 @@ def _close_paper_position_on_sell(
             1 for p in pos_data.get("positions", [])
             if not is_open(p.get("status"))
         )
-        with open(pos_path, "w") as f:
-            json.dump(pos_data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(pos_path, pos_data, indent=2, default=str)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
 

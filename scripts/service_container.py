@@ -276,8 +276,8 @@ class _WalletAdapter:
         import json, os  # noqa: PLC0415
         path = os.path.join(self._config.data_dir, "paper_balance.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(data, f)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data)
 
     @property
     def balance(self) -> float:

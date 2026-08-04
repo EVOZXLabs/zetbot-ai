@@ -498,8 +498,8 @@ class PaperTradingEngine:
             "equity_history": [asdict(s) for s in self.equity_history],
         }
     
-        with open(STATE_PATH, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(STATE_PATH, state, indent=2, default=str)
 
         # Sync positions.json for Telegram/reporting (atomic merge so a
         # concurrent monitor/pipeline write is not clobbered — BUG-4).
@@ -1113,8 +1113,8 @@ class PaperExport:
             "closed_orders": closed_cnt,
             "orders": merged,
         }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data, indent=2, default=str)
         print(f"  Orders JSON    : {path}")
 
     @staticmethod
@@ -1222,8 +1222,8 @@ class PaperExport:
         data["generated"] = datetime.now(timezone.utc).isoformat()
         data["equity_history"] = [asdict(s) for s in equity_history]
 
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data, indent=2, default=str)
         print(f"  Balance JSON   : {path}")
 
     @staticmethod

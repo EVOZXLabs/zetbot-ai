@@ -32,6 +32,7 @@ These tests never touch a real exchange or the real ``data/`` dir: every
 import json
 import logging
 import os
+import threading
 from threading import Barrier, Event, Thread
 from typing import Any
 
@@ -234,3 +235,88 @@ class TestMonitorVsManualSell:
         with PAPER_STATE_LOCK:
             with PAPER_STATE_LOCK:
                 pass
+
+
+class TestAtomicWriteJson:
+    """BUG B regression: concurrent readers must never see truncated JSON.
+
+    ``atomic_write_json`` writes to a temp file in the same directory
+    then atomically renames (``os.replace``) it over the target.  A
+    concurrent reader either sees the old complete file or the new
+    complete file — never a partially-written / empty / truncated file
+    that triggers ``json.JSONDecodeError`` → silent ``{}`` fallback in
+    ``MetricsManager._read_json``.
+    """
+
+    def test_basic_roundtrip(self, tmp_path):
+        from scripts.paper_state_lock import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"foo": "bar"})
+        with open(path) as f:
+            assert json.load(f) == {"foo": "bar"}
+
+    def test_overwrites_existing_file(self, tmp_path):
+        from scripts.paper_state_lock import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"v": 1})
+        atomic_write_json(path, {"v": 2})
+        with open(path) as f:
+            assert json.load(f) == {"v": 2}
+
+    def test_kwargs_forwarded(self, tmp_path):
+        from scripts.paper_state_lock import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"a": 1}, indent=2, default=str)
+        content = open(path).read()
+        assert "\n" in content  # indented
+
+    def test_tmp_cleaned_on_error(self, tmp_path):
+        from scripts.paper_state_lock import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        bad_data = object()  # json.dump will raise TypeError
+        with pytest.raises(TypeError):
+            atomic_write_json(path, bad_data)
+        # No leftover .tmp files
+        tmp_files = [f for f in os.listdir(tmp_path) if f.endswith(".json.tmp")]
+        assert tmp_files == []
+
+    def test_atomicity_under_concurrent_read_write(self, tmp_path):
+        """Simulate a reader thread calling json.load while the writer
+        repeatedly calls atomic_write_json.  The reader must never see
+        a truncated file (json.JSONDecodeError)."""
+        from scripts.paper_state_lock import atomic_write_json
+
+        path = str(tmp_path / "state.json")
+        atomic_write_json(path, {"balance": 0.0, "positions": {}})
+
+        errors: list[str] = []
+        stop = threading.Event()
+
+        def writer():
+            for i in range(200):
+                atomic_write_json(
+                    path, {"balance": float(i), "positions": {"X": i}},
+                )
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    with open(path) as f:
+                        data = json.load(f)
+                    assert "balance" in data
+                except json.JSONDecodeError as exc:
+                    errors.append(str(exc))
+
+        t_w = threading.Thread(target=writer)
+        t_r = threading.Thread(target=reader)
+        t_w.start()
+        t_r.start()
+        t_w.join()
+        stop.set()
+        t_r.join(timeout=2.0)
+
+        assert errors == [], f"reader saw truncated JSON: {errors[:5]}"

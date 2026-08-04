@@ -49,9 +49,8 @@ def _read_json(path: str) -> dict[str, Any]:
 
 
 def _write_json(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, default=str)
+    from scripts.paper_state_lock import atomic_write_json as _awj
+    _awj(path, data, indent=2, default=str)
 
 
 def reconcile(

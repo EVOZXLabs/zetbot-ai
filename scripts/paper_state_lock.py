@@ -35,10 +35,50 @@ from __future__ import annotations
 import functools
 import json
 import os
+import tempfile
 import threading
 from typing import Any, Callable, TypeVar, cast
 
 PAPER_STATE_LOCK = threading.RLock()
+
+
+# -----------------------------------------------------------------------
+#  Atomic JSON writer (BUG B: prevents partial-read by Telegram commands)
+# -----------------------------------------------------------------------
+
+def atomic_write_json(path: str, data: Any, **kwargs: Any) -> None:
+    """Atomically write *data* as JSON to *path* via temp-file + ``os.replace``.
+
+    On POSIX (Linux), ``os.replace`` is atomic at the filesystem level so
+    concurrent readers (Telegram command threads) see either the complete
+    **old** file or the complete **new** file — never a truncated/
+    partially-written version that causes ``json.JSONDecodeError``.
+
+    A temp file in the same directory is written first (with ``fsync``),
+    then atomically renamed on top of the target path.  The temp file is
+    cleaned up on failure.
+
+    Extra keyword arguments (e.g. ``indent=2``, ``default=str``) are
+    forwarded to ``json.dump``.
+    """
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=dir_name, suffix=".json.tmp", prefix=".atomic_",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, **kwargs)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -94,7 +134,6 @@ def merge_positions(positions: list[dict[str, Any]]) -> None:
         )
         try:
             os.makedirs(os.path.dirname(POSITIONS_PATH) or ".", exist_ok=True)
-            with open(POSITIONS_PATH, "w") as f:
-                json.dump(data, f, indent=2, default=str)
+            atomic_write_json(POSITIONS_PATH, data, indent=2, default=str)
         except OSError:
             pass

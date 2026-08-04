@@ -886,8 +886,8 @@ class Pipeline:
                 pb = json.load(f)
             pb["final_balance"] = round(balance, 2)
             pb["final_equity"] = round(balance, 2)
-            with open(bal_path, "w") as f:
-                json.dump(pb, f, indent=2)
+            from scripts.paper_state_lock import atomic_write_json as _awj
+            _awj(bal_path, pb, indent=2)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pb = {
                 "initial_balance": self.config.account_balance,
@@ -895,7 +895,7 @@ class Pipeline:
                 "final_equity": round(balance, 2),
             }
             try:
-                with open(bal_path, "w") as f:
-                    json.dump(pb, f, indent=2)
+                from scripts.paper_state_lock import atomic_write_json as _awj
+                _awj(bal_path, pb, indent=2)
             except OSError:
                 pass
