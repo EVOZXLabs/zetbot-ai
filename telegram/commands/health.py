@@ -27,15 +27,24 @@ class HealthCommand(BaseCommand):
         scanner_status_raw = snapshot.get("scanner_status", "no_data")
         scanner_ok = scanner_status_raw in ("healthy",)
 
-        # Telegram thread check
+        # Telegram link status — reported by the polling loop via
+        # data/telegram_status.json (OK / DEGRADED / OFFLINE).  Falls back
+        # to a thread-alive check when the loop has not reported yet.
         has_creds = bool(ctx.config.telegram_token and ctx.config.telegram_chat_id)
-        tg_alive = False
-        if has_creds:
+        tg_status = snapshot.get("telegram_status", "")
+        if tg_status in ("OK", "DEGRADED", "OFFLINE") and has_creds:
+            tg_ok = tg_status == "OK"
+            tg_icon = "🟢" if tg_ok else ("🟡" if tg_status == "DEGRADED" else "🔴")
+            tg_line = f"{tg_icon} Telegram — {tg_status}"
+        else:
+            tg_alive = False
             for t in threading.enumerate():
                 if t.name == "TelegramCmd" and t.is_alive():
                     tg_alive = True
                     break
-        tg_ok = has_creds and tg_alive
+            tg_ok = has_creds and tg_alive
+            tg_icon = "🟢" if tg_ok else "🔴"
+            tg_line = f"{tg_icon} Telegram — {'Connected' if tg_ok else 'Disconnected'}"
 
         pipeline_ok = True
         if ctx.services is not None and ctx.services.scheduler is not None:
@@ -45,19 +54,19 @@ class HealthCommand(BaseCommand):
         checks = [
             ("Bot", True, "Running", "Down"),
             ("Exchange", exchange_ok, "Connected", "Disconnected"),
-            ("Telegram", tg_ok, "Connected", "Disconnected"),
             ("Scanner", scanner_ok, "Healthy", "Unhealthy"),
             ("Pipeline", pipeline_ok, "Healthy", "Unhealthy"),
         ]
-        all_ok = all(ok for _, ok, _, _ in checks)
-
         # Headline answers the one question people actually ask ("is
         # anything broken?"); the per-component grid is the secondary
         # detail for anyone troubleshooting.
         lines = "\n".join(
             f"{'🟢' if ok else '🔴'} {label} — {good if ok else bad}"
             for label, ok, good, bad in checks
-        )
+        ).splitlines()
+        lines.insert(2, tg_line)
+        lines = "\n".join(lines)
+        all_ok = all(ok for _, ok, _, _ in checks) and tg_ok
 
         scanner_time = snapshot.get("scanner_time", "N/A")
         last_scan_line = ""

@@ -100,6 +100,7 @@ class HealthMonitor:
         exchange_ok, exchange_name = _check_exchange(self._config.exchange)
 
         d = self._config.data_dir
+        telegram_status = _read_telegram_status(f"{d}/telegram_status.json")
         scanner_time, scanner_age = _file_timestamp(f"{d}/scanner_results.json", now)
         api_time, api_age = _file_timestamp(f"{d}/paper_balance.json", now)
 
@@ -142,6 +143,7 @@ class HealthMonitor:
             "internet_latency_ms": internet_latency,
             "exchange_ok": exchange_ok,
             "exchange_name": exchange_name,
+            "telegram_status": telegram_status,
             "scanner_time": scanner_time,
             "scanner_age": scanner_age,
             "scanner_status": scanner_status,
@@ -233,6 +235,17 @@ def _read_json(path: str) -> dict[str, Any]:
         return {}
 
 
+def _read_telegram_status(path: str) -> str:
+    """Read the Telegram link health written by the polling loop.
+
+    Returns ``OK``/``DEGRADED``/``OFFLINE``, or ``UNKNOWN`` when the
+    Telegram command center is not running or has not reported yet.
+    """
+    data = _read_json(path)
+    status = data.get("status", "")
+    return status if status in ("OK", "DEGRADED", "OFFLINE") else "UNKNOWN"
+
+
 # ---------------------------------------------------------------------------
 #  /proc helpers (Linux only)
 # ---------------------------------------------------------------------------
@@ -303,6 +316,7 @@ def _format_metrics(m: dict[str, Any]) -> str:
     threads = m["thread_count"]
     internet = "OK" if m["internet_ok"] else "FAIL"
     exchange = "OK" if m["exchange_ok"] else "FAIL"
+    telegram = m.get("telegram_status", "UNKNOWN")
     net_pnl = m.get("net_pnl", 0.0)
     return (
         f"uptime={hours:02.0f}h{minutes:02.0f}m{seconds:02.0f}s"
@@ -311,5 +325,6 @@ def _format_metrics(m: dict[str, Any]) -> str:
         f"  threads={threads}"
         f"  internet={internet}"
         f"  exchange={exchange}"
+        f"  telegram={telegram}"
         f"  net_pnl={net_pnl:+.2f}"
     )
