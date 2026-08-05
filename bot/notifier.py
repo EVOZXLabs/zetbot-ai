@@ -133,6 +133,23 @@ class Notifier:
                 logger.info("[TG] Sent successfully")
                 return True
             except requests.RequestException as exc:
+                # Telegram rejects Markdown text containing unescaped
+                # special characters (e.g. from AI insight lines or error
+                # messages) with a 400 "can't parse entities" error.
+                # Resend the same text WITHOUT parse_mode so the message
+                # still arrives (markup shown literally) instead of being
+                # lost. Dynamic values are also escaped at the call sites
+                # (md_escape) — this is the safety net for anything missed.
+                resp = getattr(exc, "response", None)
+                if (
+                    parse_mode
+                    and resp is not None
+                    and resp.status_code == 400
+                    and "parse" in (getattr(resp, "text", "") or "").lower()
+                ):
+                    logger.warning("[TG] Markdown rejected — resending as plain text")
+                    payload.pop("parse_mode", None)
+                    parse_mode = ""
                 logger.warning(
                     "[TG] Failed (attempt %d/%d): %s",
                     attempt, self._max_retry, exc,
@@ -175,7 +192,7 @@ class Notifier:
                 compact_header, wib_now, ai_insight,
                 detail_block, build_message,
             )
-            from telegram.formatter import fmt_price as fp
+            from telegram.formatter import fmt_price as fp, md_escape
 
             sl_pct = ((stop_loss - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
 
@@ -198,9 +215,9 @@ class Notifier:
 
             text = build_message(
                 compact_header(),
-                f"🟢 *BUY OPENED — {symbol}*"
-                + (f"\n{where}" if where else ""),
-                f"Entry {fp(entry_price)}\n🧠 {ai_insight(reasons=reasons, is_buy=True)}",
+                f"🟢 *BUY OPENED — {md_escape(symbol)}*"
+                + (f"\n{md_escape(where)}" if where else ""),
+                f"Entry {fp(entry_price)}\n🧠 {md_escape(ai_insight(reasons=reasons, is_buy=True))}",
                 detail_block(lines, label="Trade plan"),
                 wib_now().replace("\n", ", "),
             )
@@ -232,7 +249,7 @@ class Notifier:
                 compact_header, wib_now, pnl_emoji,
                 ai_insight, detail_block, build_message,
             )
-            from telegram.formatter import fmt_price as fp, fmt_holding
+            from telegram.formatter import fmt_price as fp, fmt_holding, md_escape
 
             if holding_time is None:
                 holding_time = timedelta()
@@ -260,9 +277,9 @@ class Notifier:
 
             text = build_message(
                 compact_header(),
-                f"{result_emoji} *POSITION CLOSED — {title}*\n"
+                f"{result_emoji} *POSITION CLOSED — {md_escape(title)}*\n"
                 f"{pnl_label} {abs(pnl):,.2f} {quote} ({roi_pct:+.2f}%) · Held {holding_str}",
-                f"🧠 AI Insight: {insight}\nBalance now {balance:,.2f} {quote}",
+                f"🧠 AI Insight: {md_escape(insight)}\nBalance now {balance:,.2f} {quote}",
                 detail_block(
                     [
                         f"Entry  {fp(entry_price)}",
@@ -290,7 +307,7 @@ class Notifier:
         logger.info("[TG] Sending notification: TAKE_PROFIT %s", symbol)
         try:
             from telegram.ui import compact_header, wib_now, detail_block, build_message
-            from telegram.formatter import fmt_price as fp, fmt_holding
+            from telegram.formatter import fmt_price as fp, fmt_holding, md_escape
 
             quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
             if holding_time is None:
@@ -299,7 +316,7 @@ class Notifier:
 
             text = build_message(
                 compact_header(),
-                f"🎯 *TAKE PROFIT HIT — {symbol}*\n"
+                f"🎯 *TAKE PROFIT HIT — {md_escape(symbol)}*\n"
                 f"Profit {profit:+,.2f} {quote} · Held {holding_str}",
                 detail_block(
                     [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],
@@ -325,7 +342,7 @@ class Notifier:
         logger.info("[TG] Sending notification: STOP_LOSS %s", symbol)
         try:
             from telegram.ui import compact_header, wib_now, detail_block, build_message
-            from telegram.formatter import fmt_price as fp, fmt_holding
+            from telegram.formatter import fmt_price as fp, fmt_holding, md_escape
 
             quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
             if holding_time is None:
@@ -334,7 +351,7 @@ class Notifier:
 
             text = build_message(
                 compact_header(),
-                f"🛑 *STOP LOSS HIT — {symbol}*\n"
+                f"🛑 *STOP LOSS HIT — {md_escape(symbol)}*\n"
                 f"Loss {loss:+,.2f} {quote} · Held {holding_str}",
                 detail_block(
                     [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],
@@ -357,10 +374,11 @@ class Notifier:
         logger.info("[TG] Sending notification: TRADE_REJECTED %s — %s", symbol, reason)
         try:
             from telegram.ui import compact_header, wib_now, build_message
+            from telegram.formatter import md_escape
 
             text = build_message(
                 compact_header(),
-                f"⚠️ *TRADE REJECTED — {symbol}*\n{reason}",
+                f"⚠️ *TRADE REJECTED — {md_escape(symbol)}*\n{md_escape(reason)}",
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -384,12 +402,13 @@ class Notifier:
         logger.info("[TG] Sending notification: BOT_STARTED")
         try:
             from telegram.ui import compact_header, wib_now, build_message
+            from telegram.formatter import md_escape
 
             where = " • ".join(p for p in (symbol, exchange, timeframe) if p)
             bal_line = f"\nTotal {equity:,.2f} {self._quote_currency} · Cash {balance:,.2f} {self._quote_currency}" if equity > 0 else ""
             text = build_message(
                 compact_header(),
-                "🟢 *BOT STARTED*" + (f"\n{where}" if where else "") + bal_line,
+                "🟢 *BOT STARTED*" + (f"\n{md_escape(where)}" if where else "") + bal_line,
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -424,10 +443,11 @@ class Notifier:
         logger.info("[TG] Sending notification: ERROR — %s", message[:80])
         try:
             from telegram.ui import compact_header, wib_now, build_message
+            from telegram.formatter import md_escape
 
             text = build_message(
                 compact_header(),
-                f"⚠️ *ERROR*\n`{message}`",
+                f"⚠️ *ERROR*\n`{md_escape(message)}`",
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)
@@ -440,10 +460,11 @@ class Notifier:
         logger.info("[TG] Sending notification: SYSTEM")
         try:
             from telegram.ui import compact_header, wib_now, build_message
+            from telegram.formatter import md_escape
 
             text = build_message(
                 compact_header(),
-                f"ℹ️ *SYSTEM*\n{message}",
+                f"ℹ️ *SYSTEM*\n{md_escape(message)}",
                 wib_now().replace("\n", ", "),
             )
             return self._send(text)

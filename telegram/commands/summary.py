@@ -2,7 +2,9 @@ import csv
 from datetime import datetime, timezone
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number, fmt_holding, fmt_pf
+from telegram.formatter import (
+    fmt_compact_number, fmt_holding, fmt_pf, order_hold_seconds,
+)
 from telegram.ui import (
     compact_header, confidence_bar, build_message,
 )
@@ -67,32 +69,30 @@ class SummaryCommand(BaseCommand):
                 "No trades completed today.",
             )
 
+        quote = getattr(ctx.config, "quote_currency", "USDT") or "USDT"
+
         blocks = [
             compact_header(),
             f"📅 *Daily Summary* — {today_str}",
             f"📊 Positions: {positions_closed}\n"
             f"✅ Wins: {win_count}  ❌ Losses: {loss_count}\n"
             f"📈 Win Rate: {confidence_bar(win_rate)}",
-            f"💰 PnL: {fmt_compact_number(today_pnl)}\n"
+            f"💰 PnL: {fmt_compact_number(today_pnl, quote)}\n"
             f"📐 Profit Factor: {fmt_pf(pf)}",
         ]
 
-        if avg_hold := self._avg_holding(executions):
+        if avg_hold := self._avg_holding(executions, ctx.entry_time_map()):
             blocks.append(f"🕒 Avg Hold: {avg_hold}")
 
         return build_message(*blocks)
 
     @staticmethod
-    def _avg_holding(executions: list) -> str:
+    def _avg_holding(executions: list, entry_map: dict) -> str:
         holding_times = []
         for t in executions:
-            if t.get("filled_at") and t.get("closed_at"):
-                try:
-                    filled = datetime.fromisoformat(t["filled_at"].replace("Z", "+00:00"))
-                    closed = datetime.fromisoformat(t["closed_at"].replace("Z", "+00:00"))
-                    holding_times.append((closed - filled).total_seconds())
-                except (ValueError, TypeError):
-                    pass
+            hold = order_hold_seconds(t, entry_map)
+            if hold is not None:
+                holding_times.append(hold)
         if not holding_times:
             return ""
         avg = sum(holding_times) / len(holding_times)

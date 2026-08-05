@@ -1,7 +1,7 @@
-from datetime import datetime, timezone
-
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_price, fmt_holding, time_ago, fmt_pnl
+from telegram.formatter import (
+    fmt_price, fmt_holding, fmt_pnl, order_hold_seconds,
+)
 from telegram.ui import compact_header, pnl_emoji, build_message
 
 
@@ -50,6 +50,8 @@ class HistoryCommand(BaseCommand):
         closed_orders.sort(key=lambda o: o.get("closed_at", "") or "", reverse=True)
         shown = closed_orders[:limit]
 
+        entry_map = ctx.entry_time_map()
+
         blocks = [compact_header(), f"📋 *Trade History* (last {len(shown)})"]
 
         for o in shown:
@@ -59,16 +61,11 @@ class HistoryCommand(BaseCommand):
             pnl = o.get("net_pnl", 0)
             reason = o.get("exit_reason", "?")
             closed_at = o.get("closed_at", "")
-            filled = o.get("filled_at", "")
 
             hold = ""
-            if filled and closed_at:
-                try:
-                    fdt = datetime.fromisoformat(filled.replace("Z", "+00:00"))
-                    cdt = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
-                    hold = fmt_holding((cdt - fdt).total_seconds())
-                except (ValueError, TypeError):
-                    pass
+            hold_sec = order_hold_seconds(o, entry_map)
+            if hold_sec is not None:
+                hold = fmt_holding(hold_sec)
 
             quote = symbol.split("/")[1] if "/" in symbol else "USDT"
             block = (

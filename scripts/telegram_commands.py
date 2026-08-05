@@ -461,9 +461,23 @@ class TelegramCommandCenter:
                     f"{self._config.telegram_retry}): {exc}"
                 )
             except requests.RequestException as exc:
+                # Telegram rejects Markdown text with unescaped special
+                # characters (400 "can't parse entities").  Resend the
+                # same text without parse_mode so the reply always
+                # arrives instead of being lost.
+                resp = getattr(exc, "response", None)
+                if (
+                    parse_mode
+                    and resp is not None
+                    and resp.status_code == 400
+                    and "parse" in (getattr(resp, "text", "") or "").lower()
+                ):
+                    _log("Markdown rejected — resending as plain text")
+                    payload.pop("parse_mode", None)
+                    parse_mode = ""
                 resp_body = (
-                    exc.response.text[:300]
-                    if getattr(exc, 'response', None) is not None
+                    resp.text[:300]
+                    if resp is not None
                     else "no response"
                 )
                 _log(

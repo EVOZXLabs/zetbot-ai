@@ -1,6 +1,25 @@
 import datetime
 from typing import Any, Optional
 
+# Characters with special meaning in Telegram's legacy Markdown parse
+# mode. Any one of them inside DYNAMIC text (symbols, AI insight lines,
+# error messages) makes the API reject the whole message with
+# "can't parse entities" — so dynamic values are escaped via
+# ``md_escape`` before interpolation.
+_MD_SPECIALS = frozenset(r"\`*_{}[]()~#+-.=!|>")
+
+
+def md_escape(s: Any) -> str:
+    """Escape Telegram Markdown specials in *dynamic* text.
+
+    Applies ONLY to dynamic values — never to strings that already
+    contain our own Markdown markup (``*bold*``, ```code``, links).
+    Over-escaping is harmless: a backslash-escaped special renders as
+    the literal character, so this can never change what the user reads
+    and can never trigger a parse rejection.
+    """
+    return "".join(f"\\{c}" if c in _MD_SPECIALS else c for c in str(s))
+
 
 def bold(s: str) -> str:
     return f"*{s}*"
@@ -133,3 +152,50 @@ def fmt_pf(value: float) -> str:
     if math.isnan(value):
         return "N/A"
     return f"{value:.2f}"
+
+
+# ---------------------------------------------------------------------------
+#  Hold-time helpers (shared by /summary, /performance, /history)
+# ---------------------------------------------------------------------------
+
+
+def parse_ts(s: Optional[str]) -> Optional[datetime.datetime]:
+    """Parse an ISO-8601 timestamp (``Z`` suffix tolerated), else None."""
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def order_hold_seconds(
+    order: dict[str, Any],
+    entry_time_by_symbol: Optional[dict[str, dict[str, Any]]] = None,
+) -> Optional[float]:
+    """Hold duration of a closed order, or None when it cannot be known.
+
+    A closing SELL order's own ``filled_at`` is the *exit* moment, not
+    the entry — using it directly yields a meaningless "0s" hold.  The
+    real entry time comes from the position record (``entry_time`` /
+    ``opened_at``), looked up on the order itself first, then in the
+    ``entry_time_by_symbol`` map (symbol → position record) supplied by
+    the caller.  Returns None (no hold shown) when no entry record
+    exists — better than a fabricated "0s".
+    """
+    exit_raw = order.get("exit_time") or order.get("closed_at") or ""
+    exit_dt = parse_ts(exit_raw)
+    if exit_dt is None:
+        return None
+
+    entry_raw = (
+        order.get("entry_time")
+        or order.get("opened_at")
+        or (entry_time_by_symbol or {}).get(order.get("symbol", ""), {}).get("opened_at")
+        or ""
+    )
+    entry_dt = parse_ts(entry_raw)
+    if entry_dt is None:
+        return None
+
+    return max(0.0, (exit_dt - entry_dt).total_seconds())

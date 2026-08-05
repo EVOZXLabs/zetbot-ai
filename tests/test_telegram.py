@@ -235,7 +235,9 @@ class TestNotificationMethods:
         assert "50000" in text
         assert "-1.50%" in text
         assert "+2.50%" in text
-        assert "EMA200_BULLISH" in text
+        # Markdown-special characters in dynamic content are escaped so
+        # the API never rejects the message (renders identically).
+        assert "EMA200\\_BULLISH" in text
         assert "Stop Loss" in text
         assert "Take Profit" in text
 

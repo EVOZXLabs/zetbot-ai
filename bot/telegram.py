@@ -83,6 +83,20 @@ class TelegramNotifier:
                 resp.raise_for_status()
                 return True
             except requests.RequestException as exc:
+                # Telegram rejects Markdown text with unescaped special
+                # characters (400 "can't parse entities").  Resend the
+                # same text without parse_mode so the message always
+                # arrives instead of being lost.
+                resp = getattr(exc, "response", None)
+                if (
+                    parse_mode
+                    and resp is not None
+                    and resp.status_code == 400
+                    and "parse" in (getattr(resp, "text", "") or "").lower()
+                ):
+                    logger.warning("Markdown rejected — resending as plain text")
+                    payload.pop("parse_mode", None)
+                    parse_mode = ""
                 logger.warning(
                     "Telegram send attempt %d/%d failed: %s",
                     attempt, self._max_retry, exc,
@@ -112,10 +126,11 @@ class TelegramNotifier:
     ) -> None:
         """Notify that the trading bot has started."""
         from telegram.ui import compact_header, wib_now, build_message
+        from telegram.formatter import md_escape
         where = " • ".join(p for p in (symbol, exchange, timeframe) if p)
         text = build_message(
             compact_header(),
-            "🟢 *BOT STARTED*" + (f"\n{where}" if where else ""),
+            "🟢 *BOT STARTED*" + (f"\n{md_escape(where)}" if where else ""),
             wib_now().replace("\n", ", "),
         )
         self._send(text)
@@ -152,7 +167,7 @@ class TelegramNotifier:
             compact_header, wib_now, ai_insight,
             detail_block, build_message,
         )
-        from telegram.formatter import fmt_price as fp
+        from telegram.formatter import fmt_price as fp, md_escape
 
         sl_pct = ((stop_loss - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
         tp_pct = ((take_profit - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
@@ -160,8 +175,8 @@ class TelegramNotifier:
 
         text = build_message(
             compact_header(),
-            f"🟢 *BUY OPENED — {symbol}*" + (f"\n{where}" if where else ""),
-            f"Entry {fp(entry_price)}\n🧠 {ai_insight(reasons=reasons, is_buy=True)}",
+            f"🟢 *BUY OPENED — {md_escape(symbol)}*" + (f"\n{md_escape(where)}" if where else ""),
+            f"Entry {fp(entry_price)}\n🧠 {md_escape(ai_insight(reasons=reasons, is_buy=True))}",
             detail_block(
                 [
                     f"Stop Loss    {fp(stop_loss)}  ({sl_pct:+.2f}%)",
@@ -194,7 +209,7 @@ class TelegramNotifier:
             compact_header, wib_now, pnl_emoji,
             ai_insight, detail_block, build_message,
         )
-        from telegram.formatter import fmt_price as fp, fmt_holding
+        from telegram.formatter import fmt_price as fp, fmt_holding, md_escape
 
         holding_str = fmt_holding(holding_time.total_seconds())
 
@@ -217,9 +232,9 @@ class TelegramNotifier:
         quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
         text = build_message(
             compact_header(),
-            f"{pnl_emoji(pnl_usd)} *POSITION CLOSED — {title}*\n"
+            f"{pnl_emoji(pnl_usd)} *POSITION CLOSED — {md_escape(title)}*\n"
             f"Profit {pnl_usd:+,.2f} {quote} ({roi_pct:+.2f}%) · Held {holding_str}",
-            f"🧠 AI Insight: {insight}\nBalance now {balance:,.2f} {quote}",
+            f"🧠 AI Insight: {md_escape(insight)}\nBalance now {balance:,.2f} {quote}",
             detail_block(
                 [
                     f"Entry  {fp(entry_price)}",
@@ -255,9 +270,10 @@ class TelegramNotifier:
     ) -> None:
         """Notify that an error occurred."""
         from telegram.ui import compact_header, wib_now, build_message
+        from telegram.formatter import md_escape
         text = build_message(
             compact_header(),
-            f"⚠️ *ERROR*\n`{message}`",
+            f"⚠️ *ERROR*\n`{md_escape(message)}`",
             wib_now().replace("\n", ", "),
         )
         self._send(text)

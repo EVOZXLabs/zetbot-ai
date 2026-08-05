@@ -150,16 +150,33 @@ def _build_summary(
     lines.append(f"Open positions      : {open_positions}")
     lines.append(f"Closed positions    : {closed_positions}")
 
-    # Paper trading
-    balance = paper_balance.get("final_balance", 0.0)
-    equity = paper_balance.get("final_equity", 0.0)
-    realized = paper_balance.get("realized_pnl", 0.0)
-    unrealized = paper_balance.get("unrealized_pnl", 0.0)
-    net_pnl = paper_balance.get("net_pnl", 0.0)
-    win_rate = paper_balance.get("win_rate", 0.0)
-    total_trades = paper_balance.get("total_trades", 0)
-    wins = paper_balance.get("winning_trades", 0)
-    losses = paper_balance.get("losing_trades", 0)
+    # Paper trading — canonical MetricsManager snapshot (same source as
+    # HEALTH and the Telegram wallet/portfolio/status commands), never
+    # the raw paper_balance.json keys: net_pnl/equity are only refreshed
+    # on position closure and sit stale (or absent) between closures,
+    # which made the pipeline report disagree with every other view.
+    try:
+        from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+        snap = MetricsManager(config.data_dir).account()
+        balance = snap.balance
+        equity = snap.equity
+        realized = snap.realized_pnl
+        unrealized = snap.unrealized_pnl
+        net_pnl = snap.net_pnl
+        total_trades = snap.total_trades
+        wins = snap.winning_trades
+        losses = snap.losing_trades
+        win_rate = snap.win_rate
+    except Exception:
+        balance = paper_balance.get("final_balance", 0.0)
+        equity = paper_balance.get("final_equity", 0.0)
+        realized = paper_balance.get("realized_pnl", 0.0)
+        unrealized = paper_balance.get("unrealized_pnl", 0.0)
+        net_pnl = paper_balance.get("net_pnl", 0.0)
+        win_rate = paper_balance.get("win_rate", 0.0)
+        total_trades = paper_balance.get("total_trades", 0)
+        wins = paper_balance.get("winning_trades", 0)
+        losses = paper_balance.get("losing_trades", 0)
     lines.append(f"Today's trades      : {total_trades}  (W:{wins} L:{losses})")
     lines.append(f"Win rate            : {win_rate:.1f}%")
     lines.append(f"Realized PnL        : {realized:>+10,.2f} {config.quote_currency}")
@@ -212,8 +229,9 @@ def _start_worker(
 def _send_telegram(notifier: Any, lines: list[str]) -> None:
     """Send summary via Telegram using the centralized Notifier."""
     try:
+        from telegram.formatter import md_escape  # noqa: PLC0415
         msg = "\n".join(line for line in lines[:25])
-        notifier.send(f"\U0001f4ca *Pipeline Report*\n{msg}")
+        notifier.send(f"\U0001f4ca *Pipeline Report*\n{md_escape(msg)}")
     except Exception as exc:
         logger.error(f"Telegram notification failed: {exc}")
 
