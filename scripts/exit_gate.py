@@ -113,6 +113,7 @@ def save_position(symbol: str, position: dict[str, Any]) -> None:
     if not replaced:
         positions.append(position)
     data["positions"] = positions
+    data["total_positions"] = len(positions)
     data["active_count"] = sum(
         1 for p in positions if p.get("status") in OPEN_STATUSES
     )

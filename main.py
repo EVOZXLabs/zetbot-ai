@@ -442,6 +442,7 @@ def _update_paper_on_closure(
                 pos_updated = True
                 break
         if pos_updated:
+            pos_data["total_positions"] = len(pos_data.get("positions", []))
             pos_data["active_count"] = sum(
                 1 for p in pos_data.get("positions", [])
                 if is_open(p.get("status"))
@@ -1313,6 +1314,23 @@ def main() -> None:
             logger.info("Paper engine state restored — positions recovered, TP/SL checked")
         except Exception as exc:
             logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
+
+        # Strictly reconcile positions.json against paper_state.json.
+        # Every positions.json writer merges by symbol and never removes,
+        # so a record whose symbol is absent from paper_state.json (legacy
+        # leftover, or the survivor of a partial state reset) would stay
+        # visible to /positions forever. Drop those ghosts here, on every
+        # startup, so Telegram only ever shows positions the paper engine
+        # actually knows about.
+        try:
+            from scripts.paper_state_lock import sync_positions_from_state
+            if sync_positions_from_state():
+                logger.info(
+                    "Reconciled positions.json with paper_state.json "
+                    "(ghost positions removed / counters refreshed)"
+                )
+        except Exception as exc:
+            logger.debug(f"Position state sync failed (non-fatal): {exc}")
 
         # Reconcile accounting files: detect stale equity, mismatched
         # initial_balance, invalid profit_factor, and repair in-place.

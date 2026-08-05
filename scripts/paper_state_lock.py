@@ -126,6 +126,7 @@ def merge_positions(positions: list[dict[str, Any]]) -> None:
                 by_symbol[pos["symbol"]] = pos
         merged = list(by_symbol.values())
         data["positions"] = merged
+        data["total_positions"] = len(merged)
         data["active_count"] = sum(
             1 for p in merged if is_open(p.get("status"))
         )
@@ -137,6 +138,94 @@ def merge_positions(positions: list[dict[str, Any]]) -> None:
             atomic_write_json(POSITIONS_PATH, data, indent=2, default=str)
         except OSError:
             pass
+
+
+def sync_positions_from_state(
+    state_path: str = "data/paper_state.json",
+    positions_path: str = "data/positions.json",
+) -> bool:
+    """Strictly reconcile ``positions.json`` against ``paper_state.json``.
+
+    ``paper_state.json`` is the authoritative record of every position the
+    paper engine knows about (OPEN and CLOSED).  Every ``positions.json``
+    writer (engine ``_save_state``, pipeline write-ahead, monitor, exit
+    gate, order manager) MERGES by symbol and never removes, so a record
+    whose symbol no longer exists in ``paper_state.json`` — a legacy or
+    test leftover, or the survivor of a partial state reset — stays
+    visible to Telegram ``/positions`` forever (ghost position).
+
+    This function is the ONE removal path: under ``PAPER_STATE_LOCK`` it
+    keeps only symbols present in ``paper_state.json``, adds any engine
+    positions that are missing from ``positions.json``, and recomputes
+    ``total_positions`` / ``active_count`` / ``closed_count`` so the
+    counters always match the list.
+
+    Returns True when the file was rewritten, False when nothing changed.
+    """
+    from scripts.position_status import is_open, OPEN_STATUSES  # noqa: PLC0415
+
+    with PAPER_STATE_LOCK:
+        try:
+            with open(state_path) as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            state = {}
+
+        state_positions = state.get("positions") or {}
+
+        try:
+            with open(positions_path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            data = {"positions": []}
+
+        merged: dict[str, dict[str, Any]] = {}
+        for pos in data.get("positions", []):
+            sym = pos.get("symbol")
+            if sym:
+                merged[sym] = pos
+
+        # Drop ghosts: symbols in positions.json that paper_state.json
+        # does not know about.
+        dropped = [sym for sym in merged if sym not in state_positions]
+        for sym in dropped:
+            merged.pop(sym)
+
+        # Add engine positions missing from positions.json so the file
+        # mirrors paper_state.json exactly.
+        added: list[str] = []
+        for sym, vp in state_positions.items():
+            if sym not in merged:
+                merged[sym] = dict(vp)
+                added.append(sym)
+
+        if not dropped and not added:
+            # Verify counters while we are here — keep the file consistent
+            # even when the symbol set already matches.
+            positions = list(merged.values())
+            expected = {
+                "total_positions": len(positions),
+                "active_count": sum(1 for p in positions if is_open(p.get("status"))),
+                "closed_count": sum(
+                    1 for p in positions if p.get("status") not in OPEN_STATUSES
+                ),
+            }
+            if all(data.get(k) == v for k, v in expected.items()):
+                return False
+
+        positions = list(merged.values())
+        data["positions"] = positions
+        data["total_positions"] = len(positions)
+        data["active_count"] = sum(1 for p in positions if is_open(p.get("status")))
+        data["closed_count"] = sum(
+            1 for p in positions if p.get("status") not in OPEN_STATUSES
+        )
+        try:
+            os.makedirs(os.path.dirname(positions_path) or ".", exist_ok=True)
+            atomic_write_json(positions_path, data, indent=2, default=str)
+        except OSError:
+            return False
+        return True
 
 
 def prune_closed_positions(

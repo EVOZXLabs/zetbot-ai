@@ -1093,6 +1093,7 @@ def _close_paper_position_on_sell(
                 p["total_pnl"] = round(pnl, 2)
                 p["closed_at"] = now_ts
                 break
+        pos_data["total_positions"] = len(pos_data.get("positions", []))
         pos_data["active_count"] = sum(
             1 for p in pos_data.get("positions", [])
             if is_open(p.get("status"))
