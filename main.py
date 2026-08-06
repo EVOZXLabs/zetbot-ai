@@ -1400,6 +1400,22 @@ def main() -> None:
         scheduler.start()
 
     # ------------------------------------------------------------------
+    #  Daily report scheduler — sends Telegram summary at 00:00 WIB
+    # ------------------------------------------------------------------
+    daily_report_scheduler: Any = None
+    if _notifier is not None and getattr(_notifier, "enabled", False):
+        try:
+            from scripts.daily_report import DailyReportScheduler  # noqa: PLC0415
+            daily_report_scheduler = DailyReportScheduler(
+                notifier=_notifier,
+                data_dir=config.data_dir,
+                shutdown_event=shutdown,
+            )
+            daily_report_scheduler.start()
+        except Exception as exc:
+            logger.warning("DailyReportScheduler failed to start: %s", exc)
+
+    # ------------------------------------------------------------------
     #  Protection reconciliation scheduler — LIVE mode only.
     #
     #  This is what actually makes the synthetic-OCO in
@@ -1470,6 +1486,12 @@ def main() -> None:
             if _monitor_interval >= 60:
                 _monitor_interval = 0
                 _monitor_positions(logger, _notifier, center, container=container)
+                # Write heartbeat so watchdog knows the bot is alive+responsive.
+                try:
+                    from scripts.pipeline_scheduler import write_heartbeat  # noqa: PLC0415
+                    write_heartbeat()
+                except Exception:
+                    pass
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():
@@ -1549,6 +1571,12 @@ def main() -> None:
     if protection_scheduler:
         logger.info("Stopping Protection Scheduler...")
         protection_scheduler.stop()
+
+    if daily_report_scheduler:
+        try:
+            daily_report_scheduler.stop()
+        except Exception:
+            pass
 
     health.stop()
 

@@ -12,9 +12,95 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, runtime_checkable
+import logging
+import random
+import time
+from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
 
 import ccxt  # noqa: PLC0415
+
+_log = logging.getLogger("ZetBot")
+
+T = TypeVar("T")
+
+# ---------------------------------------------------------------------------
+#  Exchange API retry helper
+# ---------------------------------------------------------------------------
+
+_MAX_EXCHANGE_RETRIES = 3
+_RETRY_BASE_DELAY = 2.0    # seconds; doubles each attempt (2s, 4s, 8s)
+_RETRY_MAX_DELAY = 30.0    # cap backoff at 30s
+
+
+def exchange_call_with_retry(
+    fn: Callable[[], T],
+    label: str = "",
+    retries: int = _MAX_EXCHANGE_RETRIES,
+    record_failure: Optional[Callable[[], None]] = None,
+) -> T:
+    """Call ``fn()`` with exponential-backoff retry on transient exchange errors.
+
+    Retries up to ``retries`` times on ``ccxt.NetworkError``,
+    ``ccxt.RequestTimeout``, and ``ccxt.ExchangeNotAvailable``.
+    Permanent errors (``ccxt.AuthenticationError``, bad-symbol, etc.)
+    are re-raised immediately without retrying.
+
+    Args:
+        fn: Zero-argument callable that performs the exchange call.
+        label: Human-readable label for log messages.
+        retries: Maximum retry attempts (default 3).
+        record_failure: Optional callback called on every failed attempt
+            so callers can drive ``SafeGuard.record_exchange_failure()``.
+            When all retries are exhausted this callback is invoked once
+            more and then the exception is re-raised.
+
+    Raises:
+        The last exception from ``fn`` when all retries are exhausted.
+    """
+    TRANSIENT = (
+        ccxt.NetworkError,
+        ccxt.RequestTimeout,
+        ccxt.ExchangeNotAvailable,
+    )
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except ccxt.AuthenticationError:
+            # Permanent — don't retry, bubble up immediately.
+            raise
+        except TRANSIENT as exc:
+            last_exc = exc
+            if record_failure is not None:
+                try:
+                    record_failure()
+                except Exception:
+                    pass
+            _log.warning(
+                "Exchange call %r failed (attempt %d/%d): %s",
+                label or fn.__name__, attempt, retries, exc,
+            )
+            if attempt < retries:
+                delay = min(
+                    _RETRY_MAX_DELAY,
+                    _RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1),
+                )
+                time.sleep(delay)
+        except Exception as exc:
+            # Non-transient exchange error — log and re-raise immediately.
+            _log.warning(
+                "Exchange call %r non-transient error: %s", label or fn.__name__, exc,
+            )
+            raise
+
+    # All retries exhausted — notify caller one final time and raise.
+    if record_failure is not None:
+        try:
+            record_failure()
+        except Exception:
+            pass
+    assert last_exc is not None
+    raise last_exc
 
 
 class ExchangeAuthError(Exception):
@@ -230,7 +316,10 @@ class BaseProvider:
 
     def get_ticker(self, symbol: str) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_ticker(symbol))
+            return exchange_call_with_retry(
+                lambda: dict(self._get_exchange().fetch_ticker(symbol)),
+                label=f"get_ticker({symbol})",
+            )
         except Exception:
             return {}
 
@@ -238,8 +327,11 @@ class BaseProvider:
         self, symbol: str, timeframe: str = "1h", limit: int = 200,
     ) -> list[list[float]]:
         try:
-            result = self._get_exchange().fetch_ohlcv(
-                symbol, timeframe, limit=limit,
+            result = exchange_call_with_retry(
+                lambda: self._get_exchange().fetch_ohlcv(
+                    symbol, timeframe, limit=limit,
+                ),
+                label=f"fetch_ohlcv({symbol})",
             )
             return [list(map(float, r)) for r in result]
         except Exception:
@@ -247,7 +339,10 @@ class BaseProvider:
 
     def fetch_balance(self) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_balance())
+            return exchange_call_with_retry(
+                lambda: dict(self._get_exchange().fetch_balance()),
+                label="fetch_balance",
+            )
         except Exception as exc:
             if self.has_credentials():
                 # We have API keys — a failure here means auth, permissions,

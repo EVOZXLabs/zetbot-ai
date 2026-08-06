@@ -198,6 +198,30 @@ TELEGRAM_CHAT_ID=
 
 ---
 
+## API Key Security
+
+**Required permissions (trading-only key):**
+
+| Permission | Required | Notes |
+|---|---|---|
+| Read / View | ✅ Yes | Balance, positions, order status |
+| Spot Trading | ✅ Yes | Place and cancel orders |
+| Withdrawal | ❌ **Never** | Must be disabled — a leaked key cannot drain funds |
+| Margin / Futures | ❌ Never | ZetBot is spot-only |
+| Transfer | ❌ Never | Not needed |
+
+Never create an API key with Withdrawal permission.
+Even a leaked key can only trade — it cannot move funds out of the exchange.
+
+**Credential safety:**
+
+- `.env` is in `.gitignore` — credentials are never committed.
+- Use `.env.example` as the template; never put real values in it.
+- Rotate your API key immediately if you suspect a leak.
+- Store the raw key+secret only in `.env` on the server — never in code, logs, or Telegram.
+
+---
+
 ## Production Health Check
 
 Run:

@@ -48,6 +48,7 @@ def safeguard(monkeypatch: pytest.MonkeyPatch) -> SafeGuard:
         exchange_failure_window=60,
         exchange_max_failures=3,
         atr_spike_multiplier=3.0,
+        max_open_positions=999,   # never block in these unit tests
     )
     sg.set_account_balance(10000.0)
     yield sg
@@ -157,7 +158,7 @@ class TestDailyLossLimit:
         assert allowed
 
     def test_resets_on_new_day(self) -> None:
-        sg = SafeGuard(max_daily_loss_pct=5.0)
+        sg = SafeGuard(max_daily_loss_pct=5.0, max_open_positions=999)
         sg.set_account_balance(10000.0)
         # Manually set tracking for yesterday
         from datetime import timedelta

@@ -39,10 +39,11 @@ class SafeGuard:
     Checks in order:
         1. Pause file
         2. Exchange cooldown
-        3. Daily loss limit
-        4. Max consecutive losses
-        5. Max daily trades
-        6. Volatility protection
+        3. Max open positions (from .env MAX_POSITIONS)
+        4. Daily loss limit
+        5. Max consecutive losses
+        6. Max daily trades
+        7. Volatility protection
     """
 
     def __init__(
@@ -53,6 +54,7 @@ class SafeGuard:
         exchange_failure_window: int = 300,
         exchange_max_failures: int = 3,
         atr_spike_multiplier: float = 3.0,
+        max_open_positions: int | None = None,
     ) -> None:
         self._max_daily_loss_pct = max_daily_loss_pct
         self._max_consecutive_losses = max_consecutive_losses
@@ -61,9 +63,27 @@ class SafeGuard:
         self._exchange_max_failures = exchange_max_failures
         self._atr_spike_multiplier = atr_spike_multiplier
         self._account_balance: float = float(os.getenv("ACCOUNT_BALANCE", "10000"))
+        # max_open_positions: read from .env MAX_POSITIONS if not provided.
+        # SafeGuard enforces this as a hard gate so no new BUY is ever
+        # submitted when the portfolio is at or above the configured ceiling.
+        if max_open_positions is not None:
+            self._max_open_positions = max_open_positions
+        else:
+            try:
+                self._max_open_positions = int(os.getenv("MAX_POSITIONS", "1"))
+            except (ValueError, TypeError):
+                self._max_open_positions = 1
+        # Positions file path — overridable in tests via set_positions_path()
+        # so the check never reads the real bot's live positions.json when
+        # running in an isolated test environment.
+        self._positions_path: str = "data/positions.json"
 
     def set_account_balance(self, balance: float) -> None:
         self._account_balance = balance
+
+    def set_positions_path(self, path: str) -> None:
+        """Override the positions.json path (used in tests)."""
+        self._positions_path = path
 
     @staticmethod
     def _live_balance() -> float:
@@ -89,27 +109,62 @@ class SafeGuard:
         if not ok:
             return False, reason
 
-        # 3. Daily loss limit
+        # 3. Max open positions (hard gate from MAX_POSITIONS env var)
+        ok, reason = self._check_max_open_positions()
+        if not ok:
+            return False, reason
+
+        # 4. Daily loss limit
         ok, reason = self._check_daily_loss()
         if not ok:
             return False, reason
 
-        # 4. Max consecutive losses
+        # 5. Max consecutive losses
         ok, reason = self._check_consecutive_losses()
         if not ok:
             return False, reason
 
-        # 5. Max daily trades
+        # 6. Max daily trades
         ok, reason = self._check_daily_trades()
         if not ok:
             return False, reason
 
-        # 6. Volatility protection
+        # 7. Volatility protection
         if symbol and atr_pct > 0 and normal_atr_pct > 0:
             ok, reason = self._check_volatility(atr_pct, normal_atr_pct)
             if not ok:
                 return False, reason
 
+        return True, ""
+
+    # ------------------------------------------------------------------
+    #  Max open positions
+    # ------------------------------------------------------------------
+
+    def _check_max_open_positions(self) -> tuple[bool, str]:
+        """Reject new BUY when open positions >= MAX_POSITIONS (.env).
+
+        Reads the authoritative position count from positions.json so the
+        check is always against the current live state, not a stale
+        in-memory count.
+        """
+        try:
+            with open(self._positions_path) as f:
+                pos_data = json.load(f)
+            from scripts.position_status import is_open  # noqa: PLC0415
+            open_count = sum(
+                1 for p in pos_data.get("positions", [])
+                if is_open(p.get("status"))
+            )
+        except (FileNotFoundError, json.JSONDecodeError, ImportError):
+            open_count = 0
+
+        limit = self._max_open_positions
+        if open_count >= limit:
+            return False, (
+                f"Max open positions reached: {open_count}/{limit} "
+                f"(set MAX_POSITIONS in .env to raise this limit)"
+            )
         return True, ""
 
     # ------------------------------------------------------------------

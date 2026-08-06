@@ -76,6 +76,18 @@ CRASH_FILE = "data/.watchdog_crashes.json"
 BOT_PID_FILE = "data/zetbot.pid"
 WATCHDOG_PID_FILE = "data/zetbot-watchdog.pid"
 
+# Heartbeat / pipeline-staleness thresholds
+# The bot writes data/watchdog_heartbeat.json every ~60s via main.py;
+# if the file hasn't been updated for HEARTBEAT_STALE_SECONDS the bot is
+# considered hung (alive by PID but unresponsive).
+HEARTBEAT_FILE = "data/watchdog_heartbeat.json"
+HEARTBEAT_STALE_SECONDS = int(os.getenv("WATCHDOG_HEARTBEAT_STALE", "300"))   # 5 min
+
+# The pipeline scheduler writes data/pipeline_last_run.json on every cycle.
+# If it goes quiet for PIPELINE_STALE_SECONDS the bot may be stuck.
+PIPELINE_LAST_RUN_FILE = "data/pipeline_last_run.json"
+PIPELINE_STALE_SECONDS = int(os.getenv("WATCHDOG_PIPELINE_STALE", "1800"))    # 30 min
+
 
 def _ts() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -303,13 +315,60 @@ class Watchdog:
         return len(self._recent_crashes()) > self.max_restarts
 
     # ------------------------------------------------------------------
+    #  Heartbeat / pipeline-staleness helpers
+    # ------------------------------------------------------------------
+
+    def _heartbeat_age(self) -> Optional[float]:
+        """Seconds since the bot last wrote its heartbeat file, or None
+        if the file doesn't exist (bot hasn't started yet — not stale)."""
+        path = os.path.join(self.project_root, HEARTBEAT_FILE)
+        try:
+            return time.time() - os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def _pipeline_age(self) -> Optional[float]:
+        """Seconds since the pipeline last completed a cycle, or None
+        if the file doesn't exist."""
+        path = os.path.join(self.project_root, PIPELINE_LAST_RUN_FILE)
+        try:
+            return time.time() - os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def _kill_bot(self) -> None:
+        """Force-stop the supervised bot (child or external PID)."""
+        if self.child is not None:
+            try:
+                self.child.terminate()
+                self.child.wait(timeout=5)
+            except Exception:
+                try:
+                    self.child.kill()
+                except Exception:
+                    pass
+            self.last_returncode = self.child.poll()
+            self.child = None
+            return
+        ext_pid = self._external_bot_pid()
+        if ext_pid is not None:
+            try:
+                import signal as _signal
+                os.kill(ext_pid, _signal.SIGTERM)
+                time.sleep(3)
+                if self._pid_alive(ext_pid):
+                    os.kill(ext_pid, _signal.SIGKILL)
+            except OSError:
+                pass
+
+    # ------------------------------------------------------------------
     #  Decision logic
     # ------------------------------------------------------------------
 
     def check_and_act(self) -> str:
         """One supervision iteration. Returns the action taken:
-        ``"paused"``, ``"running"``, ``"stopped_manual"``, ``"halted"`` or
-        ``"restarted"``."""
+        ``"paused"``, ``"running"``, ``"stopped_manual"``, ``"halted"``,
+        ``"restarted"``, or ``"heartbeat_stale"``."""
         if self._file_exists(HALT_FILE):
             self.logger.warning(
                 "auto-restart halted (%s) — waiting for manual intervention",
@@ -323,6 +382,46 @@ class Watchdog:
 
         if self._bot_running():
             self._manual_stop_notified = False
+
+            # --- Heartbeat check ---
+            hb_age = self._heartbeat_age()
+            if hb_age is not None and hb_age > HEARTBEAT_STALE_SECONDS:
+                self.logger.warning(
+                    "bot heartbeat stale for %.0fs (threshold %ds) — "
+                    "process alive but unresponsive; restarting",
+                    hb_age, HEARTBEAT_STALE_SECONDS,
+                )
+                self._notify(
+                    f"⚠️ *WATCHDOG* — BOT HEARTBEAT STALE\n\n"
+                    f"Bot process is alive (PID active) but has not written a "
+                    f"heartbeat for {int(hb_age)}s (threshold {HEARTBEAT_STALE_SECONDS}s).\n"
+                    f"Killing and restarting the bot now.",
+                    error=True,
+                )
+                self._kill_bot()
+                self._register_crash()
+                if self._crash_rate_exceeded():
+                    self._halt()
+                    return "halted"
+                self._do_restart()
+                return "heartbeat_stale"
+
+            # --- Pipeline staleness check (informational only) ---
+            pl_age = self._pipeline_age()
+            if pl_age is not None and pl_age > PIPELINE_STALE_SECONDS:
+                self.logger.warning(
+                    "pipeline last run %.0fs ago (threshold %ds) — "
+                    "may be stuck; check logs",
+                    pl_age, PIPELINE_STALE_SECONDS,
+                )
+                self._notify(
+                    f"⚠️ *WATCHDOG* — PIPELINE STALE\n\n"
+                    f"No pipeline run recorded for {int(pl_age // 60)} min "
+                    f"(threshold {PIPELINE_STALE_SECONDS // 60} min).\n"
+                    f"Bot is alive — check logs for errors.",
+                    error=True,
+                )
+
             return "running"
 
         # Bot is down. Was the stop deliberate?

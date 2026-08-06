@@ -62,6 +62,20 @@ class ExecutionPipeline:
 
         This is the shared entry point for both paper and live BUY orders.
         The provider handles the actual submission (simulated or real).
+
+        Safety guards applied here (before reaching the provider):
+
+        1. Balance pre-flight — the estimated order cost (qty × price +
+           conservative fee buffer) must not exceed the provider's
+           available balance.  This is a pipeline-level guard so rejection
+           is logged and reported as an OrderResult regardless of which
+           provider (paper or live) is in use.
+
+        2. Per-symbol BUY lock — reuses the same per-symbol RLock that
+           ``exit_gate`` uses for SELL paths.  A BUY for a symbol whose
+           SELL is in progress (or vice-versa) is serialized rather than
+           racing; if the symbol already has an active SELL leg the BUY is
+           rejected with a clear message.
         """
         symbol = plan.get("symbol", "")
         if not symbol:
@@ -78,35 +92,76 @@ class ExecutionPipeline:
             emit_event(PipelineEvent("ORDER_REJECTED", symbol, reason="invalid plan"))
             return None
 
-        request = OrderRequest(
-            symbol=symbol,
-            side="BUY",
-            type="MARKET",
-            amount=qty,
-            price=entry_price,
-            stop_loss=plan.get("stop_loss"),
-            take_profit=plan.get("tp1"),
-            metadata={
-                "tp1": plan.get("tp1", 0),
-                "tp2": plan.get("tp2", 0),
-                "tp3": plan.get("tp3", 0),
-                "stop_loss": plan.get("stop_loss", 0),
-                "position_size_usdt": plan.get("position_size_usdt", 0),
-                "signal_time": plan.get("signal_time", ""),
-            },
-        )
+        # ------------------------------------------------------------------
+        #  GUARD 1 — Balance pre-flight check (pipeline level)
+        # ------------------------------------------------------------------
+        # Estimate total cost including a 0.15 % fee buffer so we never
+        # attempt a BUY we already know will fail due to insufficient funds.
+        estimated_cost = qty * entry_price * 1.0015
+        available = self._provider.get_balance()
+        if available is not None and estimated_cost > available:
+            reason = (
+                f"Insufficient balance: need ~{estimated_cost:.2f} "
+                f"{self._quote}, have {available:.2f} {self._quote}"
+            )
+            _log.warning("BUY rejected (balance preflight) for %s: %s", symbol, reason)
+            emit_event(PipelineEvent("ORDER_REJECTED", symbol, reason=reason))
+            dummy = OrderRequest(symbol=symbol, side="BUY", amount=qty, price=entry_price)
+            return OrderResult.rejected(dummy, reason, executor="pipeline")
 
-        emit_event(PipelineEvent("ORDER_VALIDATED", symbol, request=request.to_dict()))
-        result = self._provider.execute_buy(request)
+        # ------------------------------------------------------------------
+        #  GUARD 2 — Per-symbol trading lock
+        # ------------------------------------------------------------------
+        # The lock ensures a BUY for a symbol cannot run concurrently with a
+        # SELL (or another BUY) for the same symbol.  We acquire
+        # non-blocking; if the lock is held by an ongoing SELL we reject
+        # immediately rather than queuing an order whose preconditions may
+        # have changed by the time the lock is released.
+        from scripts.exit_gate import lock_for  # noqa: PLC0415
+        sym_lock = lock_for(symbol)
+        acquired = sym_lock.acquire(blocking=False)
+        if not acquired:
+            reason = (
+                f"Trading locked for {symbol}: another BUY/SELL is in progress. "
+                "Order rejected to prevent race condition."
+            )
+            _log.warning("BUY rejected (symbol lock) for %s", symbol)
+            emit_event(PipelineEvent("ORDER_REJECTED", symbol, reason=reason))
+            dummy = OrderRequest(symbol=symbol, side="BUY", amount=qty, price=entry_price)
+            return OrderResult.rejected(dummy, reason, executor="pipeline")
 
-        if result.status == "FILLED":
-            emit_event(PipelineEvent("ORDER_FILLED", symbol, result=result.to_dict()))
-        elif result.status == "REJECTED":
-            emit_event(PipelineEvent("ORDER_REJECTED", symbol, reason=result.error))
-        else:
-            emit_event(PipelineEvent("ORDER_SUBMITTED", symbol, status=result.status))
+        try:
+            request = OrderRequest(
+                symbol=symbol,
+                side="BUY",
+                type="MARKET",
+                amount=qty,
+                price=entry_price,
+                stop_loss=plan.get("stop_loss"),
+                take_profit=plan.get("tp1"),
+                metadata={
+                    "tp1": plan.get("tp1", 0),
+                    "tp2": plan.get("tp2", 0),
+                    "tp3": plan.get("tp3", 0),
+                    "stop_loss": plan.get("stop_loss", 0),
+                    "position_size_usdt": plan.get("position_size_usdt", 0),
+                    "signal_time": plan.get("signal_time", ""),
+                },
+            )
 
-        return result
+            emit_event(PipelineEvent("ORDER_VALIDATED", symbol, request=request.to_dict()))
+            result = self._provider.execute_buy(request)
+
+            if result.status == "FILLED":
+                emit_event(PipelineEvent("ORDER_FILLED", symbol, result=result.to_dict()))
+            elif result.status == "REJECTED":
+                emit_event(PipelineEvent("ORDER_REJECTED", symbol, reason=result.error))
+            else:
+                emit_event(PipelineEvent("ORDER_SUBMITTED", symbol, status=result.status))
+
+            return result
+        finally:
+            sym_lock.release()
 
     def reconcile_position(
         self,

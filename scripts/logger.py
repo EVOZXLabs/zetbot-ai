@@ -27,12 +27,27 @@ from scripts.app_config import AppConfig
 
 
 class PipelineLogger:
-    """Log pipeline stage execution to console and a structured log file."""
+    """Log pipeline stage execution to console and a structured log file.
+
+    Log rotation:
+        A new log file is created each UTC day (``YYYY-MM-DD.log``).
+        On startup (and on each ``_write_log`` call when the date has
+        rolled over) old log files beyond ``LOG_KEEP_DAYS`` are deleted
+        automatically so the logs/ directory never grows unbounded.
+    """
+
+    LOG_KEEP_DAYS: int = 14  # keep the last N daily log files
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._ensure_log_dir()
         self._log_path = self._log_path_for_today()
+        self._log_date: str = self._today_str()
+        # Prune old logs at startup (non-fatal).
+        try:
+            self._prune_old_logs()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     #  Public API
@@ -142,9 +157,40 @@ class PipelineLogger:
     def _ensure_log_dir(self) -> None:
         os.makedirs(self.config.logs_dir, exist_ok=True)
 
+    @staticmethod
+    def _today_str() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     def _log_path_for_today(self) -> str:
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return os.path.join(self.config.logs_dir, f"{date_str}.log")
+        return os.path.join(self.config.logs_dir, f"{self._today_str()}.log")
+
+    def _maybe_rotate(self) -> None:
+        """Roll over to a new log file when the UTC date changes."""
+        today = self._today_str()
+        if today != self._log_date:
+            self._log_date = today
+            self._log_path = self._log_path_for_today()
+            try:
+                self._prune_old_logs()
+            except Exception:
+                pass
+
+    def _prune_old_logs(self) -> None:
+        """Delete log files older than LOG_KEEP_DAYS days."""
+        logs_dir = self.config.logs_dir
+        if not os.path.isdir(logs_dir):
+            return
+        import time as _t
+        cutoff = _t.time() - self.LOG_KEEP_DAYS * 86400
+        for fname in os.listdir(logs_dir):
+            if not fname.endswith(".log"):
+                continue
+            fpath = os.path.join(logs_dir, fname)
+            try:
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+            except OSError:
+                pass
 
     @staticmethod
     def _write_console(msg: str, **kwargs: Any) -> None:
@@ -152,6 +198,7 @@ class PipelineLogger:
         print(msg, **kwargs)
 
     def _write_log(self, msg: str) -> None:
+        self._maybe_rotate()
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with open(self._log_path, "a") as f:
             f.write(f"[{ts}] {msg}\n")

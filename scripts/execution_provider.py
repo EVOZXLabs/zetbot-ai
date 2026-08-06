@@ -314,15 +314,14 @@ class PaperBalance:
 
     @paper_state_writes
     def save(self) -> None:
-        import json
         os.makedirs("data", exist_ok=True)
         data = {
             "initial_balance": self.initial,
             "final_balance": round(self.balance, 2),
             "final_equity": round(self.balance, 2),
         }
-        with open(PAPER_BALANCE_PATH, "w") as f:
-            json.dump(data, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj  # noqa: PLC0415
+        _awj(PAPER_BALANCE_PATH, data, indent=2)
 
 
 def _paper_buy(price: float, qty: float) -> dict[str, float]:
@@ -421,8 +420,8 @@ class PaperExecutionProvider(ExecutionProvider):
             },
             "equity_history": equity_history,
         }
-        with open(PAPER_STATE_PATH, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj  # noqa: PLC0415
+        _awj(PAPER_STATE_PATH, state, indent=2, default=str)
 
     def get_exchange_name(self) -> str:
         return os.getenv("EXCHANGE", "binance")
