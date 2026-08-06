@@ -103,11 +103,46 @@ class Notifier:
     #  Internal send
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Strip Telegram Markdown v1 markup to produce safe plain text.
+
+        Removes paired ``*bold*``, ``_italic_``, `` `code` `` and
+        `` ```block``` `` markers so the resulting string contains no
+        Markdown syntax that could cause a parse rejection when
+        ``parse_mode`` is absent.  Back-slash escapes added by
+        ``md_escape`` are also unwound (``\\X`` → ``X``).
+
+        Applied only when Telegram rejects the Markdown message — the
+        plain-text fallback must not carry any residual markup.
+        """
+        import re
+        # Unescape backslash-escaped specials (md_escape output) first
+        # so they don't get double-processed by the regex passes.
+        result = re.sub(r"\\(.)", r"\1", text)
+        # Triple-backtick code blocks (``` ... ```) — strip fences + label
+        result = re.sub(r"```[^\n]*\n?(.*?)```", r"\1", result, flags=re.DOTALL)
+        # Inline code (`...`)
+        result = re.sub(r"`([^`]*)`", r"\1", result)
+        # Bold (*...*)
+        result = re.sub(r"\*([^*]+)\*", r"\1", result)
+        # Italic (_..._)
+        result = re.sub(r"_([^_]+)_", r"\1", result)
+        # Links [text](url) — keep text, drop url
+        result = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", result)
+        return result
+
     def _send(self, text: str, parse_mode: str = "Markdown") -> bool:
         """Send *text* to the configured Telegram chat.
 
         Retries on failure up to ``_max_retry`` times.
         Returns ``True`` on success, ``False`` otherwise.
+
+        When Telegram rejects the message with a 400 "can't parse
+        entities" error (malformed Markdown), the message is retried
+        **once** with ``parse_mode`` removed AND with Markdown markup
+        stripped from the text itself so the plain-text copy cannot
+        trigger the same rejection.
         """
         if not self._enabled:
             logger.debug("[TG] Disabled — skipping send")
@@ -136,20 +171,30 @@ class Notifier:
                 # Telegram rejects Markdown text containing unescaped
                 # special characters (e.g. from AI insight lines or error
                 # messages) with a 400 "can't parse entities" error.
-                # Resend the same text WITHOUT parse_mode so the message
-                # still arrives (markup shown literally) instead of being
-                # lost. Dynamic values are also escaped at the call sites
-                # (md_escape) — this is the safety net for anything missed.
-                resp = getattr(exc, "response", None)
+                # Retry with parse_mode entirely removed AND with all
+                # Markdown markup stripped from the text — the plain-text
+                # copy must be free of Markdown syntax characters so a
+                # second rejection cannot occur.
+                resp_obj = getattr(exc, "response", None)
                 if (
                     parse_mode
-                    and resp is not None
-                    and resp.status_code == 400
-                    and "parse" in (getattr(resp, "text", "") or "").lower()
+                    and resp_obj is not None
+                    and getattr(resp_obj, "status_code", None) == 400
+                    and "parse" in (getattr(resp_obj, "text", "") or "").lower()
                 ):
-                    logger.warning("[TG] Markdown rejected — resending as plain text")
+                    logger.warning("[TG] Markdown rejected — retrying as plain text (parse_mode disabled)")
                     payload.pop("parse_mode", None)
+                    payload["text"] = self._strip_markdown(payload["text"])
                     parse_mode = ""
+                    # Retry immediately without counting as a failed attempt
+                    # so the user sees the message despite the Markdown error.
+                    try:
+                        resp2 = requests.post(url, json=payload, timeout=self._timeout)
+                        resp2.raise_for_status()
+                        logger.info("[TG] Sent successfully as plain text")
+                        return True
+                    except requests.RequestException as exc2:
+                        logger.warning("[TG] Plain-text retry also failed: %s", exc2)
                 logger.warning(
                     "[TG] Failed (attempt %d/%d): %s",
                     attempt, self._max_retry, exc,
@@ -242,8 +287,8 @@ class Notifier:
 
         Returns True on success, False otherwise.
         """
-        quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
-        logger.info("[TG] Sending notification: POSITION_CLOSED %s (PnL: %.2f USDT)", symbol, pnl)
+        quote = symbol.split("/")[1] if symbol and "/" in symbol else self._quote_currency
+        logger.info("[TG] Sending notification: POSITION_CLOSED %s (PnL: %.2f %s)", symbol, pnl, quote)
         try:
             from telegram.ui import (
                 compact_header, wib_now, pnl_emoji,

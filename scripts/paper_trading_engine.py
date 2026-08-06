@@ -1159,17 +1159,26 @@ class PaperExport:
                 data[k] = metrics[k]
 
         # However, if the monitor increased realized_pnl beyond what
-        # the engine knows, use the higher value (monitor PnL is
-        # cumulative and includes closures the engine hasn't processed).
+        # the engine knows, use the monitor's value.  The guard must
+        # compare absolute magnitude, not raw sign: a loss written by
+        # the monitor (e.g. -2066.46) has a SMALLER raw value than the
+        # engine's 0.0, so ``file_realized > engine_realized`` is False
+        # and the engine's 0.0 incorrectly wins — resetting net_pnl to
+        # +0.00 on the next cycle and making HEALTH show the PnL as zero
+        # after a losing close (BUG-3).
+        #
+        # The authoritative source is whichever side has processed more
+        # trades: if the file has more total_trades, it has the correct
+        # cumulative realized_pnl; otherwise defer to the engine (which
+        # has just recomputed from its full order list).
         file_realized = existing.get("realized_pnl", 0.0)
         engine_realized = metrics.get("realized_pnl", 0.0)
-        if file_realized > engine_realized:
-            data["realized_pnl"] = file_realized
-
-        # Same for trade counts — monitor may have added closures
         file_trades = existing.get("total_trades", 0)
         engine_trades = metrics.get("total_trades", 0)
         if file_trades > engine_trades:
+            # Monitor has closed a trade the engine has not yet seen —
+            # keep the monitor's cumulative figures.
+            data["realized_pnl"] = file_realized
             data["total_trades"] = file_trades
             data["winning_trades"] = max(
                 existing.get("winning_trades", 0),

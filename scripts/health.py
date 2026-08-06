@@ -159,6 +159,7 @@ class HealthMonitor:
             "balance": balance,
             "equity": equity,
             "net_pnl": net_pnl,
+            "quote_currency": self._config.quote_currency,
             "open_positions": sum(
                 1 for p in _read_json(f"{d}/positions.json").get("positions", [])
                 if is_open(p.get("status"))
@@ -323,6 +324,7 @@ def _format_metrics(m: dict[str, Any]) -> str:
     exchange = "OK" if m["exchange_ok"] else "FAIL"
     telegram = m.get("telegram_status", "UNKNOWN")
     net_pnl = m.get("net_pnl", 0.0)
+    quote = m.get("quote_currency", "USDT")
     return (
         f"uptime={hours:02.0f}h{minutes:02.0f}m{seconds:02.0f}s"
         f"  rss={rss_mb:.1f}MB"
@@ -331,5 +333,5 @@ def _format_metrics(m: dict[str, Any]) -> str:
         f"  internet={internet}"
         f"  exchange={exchange}"
         f"  telegram={telegram}"
-        f"  net_pnl={net_pnl:+.2f}"
+        f"  net_pnl={net_pnl:+.2f} {quote}"
     )
