@@ -121,11 +121,13 @@ class DailyReportScheduler:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
-        # Today's trades via MetricsManager
+        # Today's trades via MetricsManager — WIB day boundary (00:00 WIB,
+        # UTC+7), matching when this report actually fires. The UTC-based
+        # today_summary() would drop every trade closed 00:00-07:00 WIB.
         try:
             from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
             mm = MetricsManager(self._data_dir)
-            today = mm.today_summary()
+            today = mm.today_summary_wib()
             return {
                 "total_trades": today.get("total_trades", 0),
                 "win_count": today.get("wins", 0),

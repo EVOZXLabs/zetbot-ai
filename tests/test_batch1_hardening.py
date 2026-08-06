@@ -467,7 +467,7 @@ class TestExchangeRetry:
                     retries=3,
                 )
 
-    def test_record_failure_called_on_each_retry(self) -> None:
+    def test_record_failure_called_once_per_failed_attempt(self) -> None:
         import ccxt
         from scripts.exchange_providers import exchange_call_with_retry
 
@@ -480,7 +480,36 @@ class TestExchangeRetry:
                     retries=3,
                     record_failure=lambda: failures.append(1),
                 )
-        assert len(failures) >= 3
+        # Exactly one callback per executed failed attempt — never a
+        # redundant extra call on the final attempt (BUG-1 regression).
+        assert len(failures) == 3, "record_failure() count must equal retries"
+
+    def test_record_failure_count_equals_failed_attempts_on_success(self) -> None:
+        """When fn() eventually succeeds, record_failure() must be called
+        exactly once for each failed attempt (not retries, not retries+1)."""
+        import ccxt
+        from scripts.exchange_providers import exchange_call_with_retry
+
+        calls: list[int] = []
+        failures: list[int] = []
+
+        def _fn() -> str:
+            calls.append(1)
+            if len(calls) < 3:
+                raise ccxt.NetworkError("connection reset")
+            return "ok"
+
+        with patch("scripts.exchange_providers.time.sleep"):
+            result = exchange_call_with_retry(
+                _fn, retries=5,
+                record_failure=lambda: failures.append(1),
+            )
+        assert result == "ok"
+        assert len(calls) == 3, "3 attempts executed"
+        assert len(failures) == 2, (
+            "record_failure() must count failed attempts only — "
+            f"got {len(failures)}"
+        )
 
     def test_success_on_first_try_no_sleep(self) -> None:
         from scripts.exchange_providers import exchange_call_with_retry

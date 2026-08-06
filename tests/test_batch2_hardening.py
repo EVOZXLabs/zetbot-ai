@@ -518,6 +518,103 @@ class TestDailyReportScheduler:
         assert isinstance(stats, dict)
         assert balance == pytest.approx(50_000.0)
 
+    def test_gather_stats_uses_wib_day_boundary(self) -> None:
+        """The 00:00 WIB report must read WIB-based stats, never the
+        UTC-based today_summary() (BUG-2 regression guard)."""
+        from scripts.daily_report import DailyReportScheduler
+
+        _write_json("data/paper_balance.json", {"final_balance": 100.0})
+
+        mgr = MagicMock()
+        mgr.today_summary_wib.return_value = {
+            "total_trades": 4, "wins": 3, "losses": 1,
+            "win_rate": 75.0, "pnl": 12.5,
+        }
+        with patch("scripts.metrics_manager.MetricsManager", return_value=mgr):
+            sched = DailyReportScheduler(notifier=MagicMock(), data_dir="data")
+            stats, balance = sched._gather_stats()
+
+        assert stats["total_trades"] == 4
+        assert stats["win_count"] == 3
+        assert stats["loss_count"] == 1
+        assert stats["win_rate"] == 75.0
+        assert stats["total_profit"] == 12.5
+        mgr.today_summary_wib.assert_called_once()
+        mgr.today_summary.assert_not_called()
+
+
+# ===========================================================================
+#  3.2b — WIB day boundary (BUG-2): trades 00:00-07:00 WIB must count
+# ===========================================================================
+
+
+class TestMetricsWibDayBoundary:
+
+    def test_wib_boundary_includes_early_morning_wib_trades(
+        self, tmp_path: Any,
+    ) -> None:
+        import datetime as _dt
+        from scripts import metrics_manager as mm_mod
+        from scripts.metrics_manager import MetricsManager
+
+        # Fixed "now": 2026-08-06 02:00 UTC == 09:00 WIB (same WIB day).
+        fixed_utc = _dt.datetime(2026, 8, 6, 2, 0, 0, tzinfo=_dt.timezone.utc)
+
+        class _FakeDatetime(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fixed_utc
+                return fixed_utc.astimezone(tz)
+
+        def _order(side: str, ts: str, pnl: float) -> dict[str, Any]:
+            return {
+                "symbol": "BTC/USDT", "side": side, "status": "CLOSED",
+                "quantity": 1.0, "filled_quantity": 1.0, "fill_price": 100.0,
+                "net_pnl": pnl, "net_pnl_pct": 1.0, "holding_hours": 1.0,
+                "created_at": ts, "filled_at": ts, "closed_at": ts,
+            }
+
+        # 01:00 WIB Aug 6 == 18:00 UTC Aug 5 — BEFORE UTC midnight, so the
+        # UTC day excludes it; AFTER WIB midnight (17:00 UTC Aug 5), so the
+        # WIB day includes it. This is exactly the window the daily report
+        # used to drop.
+        early_wib = "2026-08-05T18:00:00.000000+00:00"
+        # 08:30 WIB Aug 6 == 01:30 UTC Aug 6 — inside both boundaries.
+        mid_wib = "2026-08-06T01:30:00.000000+00:00"
+        # 10:00 UTC Aug 5 — inside neither.
+        old_utc = "2026-08-05T10:00:00.000000+00:00"
+
+        _write_json(
+            os.path.join(str(tmp_path), "paper_orders.json"),
+            {"orders": [
+                _order("BUY", early_wib, 0.0),
+                _order("SELL", early_wib, 25.0),
+                _order("BUY", mid_wib, 0.0),
+                _order("SELL", mid_wib, 10.0),
+                _order("BUY", old_utc, 0.0),
+                _order("SELL", old_utc, -5.0),
+            ]},
+        )
+
+        with patch.object(mm_mod, "datetime", _FakeDatetime):
+            mm = MetricsManager(data_dir=str(tmp_path))
+            utc_trades = mm.today_trades()
+            wib_trades = mm.trades_since_wib_midnight()
+            utc_summary = mm.today_summary()
+            wib_summary = mm.today_summary_wib()
+
+        assert [t["exit_time"] for t in utc_trades] == [mid_wib]
+        assert sorted(t["exit_time"] for t in wib_trades) == [early_wib, mid_wib]
+        # UTC-based methods are unchanged (BUG-2: must not move their base).
+        assert utc_summary["total_trades"] == 1
+        assert utc_summary["pnl"] == 10.0
+        # WIB-based methods pick up the 01:00 WIB trade.
+        assert wib_summary["total_trades"] == 2
+        assert wib_summary["wins"] == 2
+        assert wib_summary["losses"] == 0
+        assert wib_summary["pnl"] == 35.0
+
 
 # ===========================================================================
 #  3.3 — Crash recovery docs exist
@@ -555,3 +652,61 @@ class TestCrashRecoveryDocs:
             content = f.read()
         assert "Checklist" in content
         assert "PAPER_MODE=false" in content
+
+
+# ===========================================================================
+#  3.4 — BackupScheduler is wired into main.py startup (BUG-3)
+# ===========================================================================
+
+
+class TestMainBackupWiring:
+
+    def test_daemon_auto_starts_backup_scheduler(self) -> None:
+        """BUG-3 regression: main.py must start BackupScheduler by itself,
+        producing a backup archive without any manual /backup or --backup."""
+        import glob
+        import subprocess
+        import sys
+
+        root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+        backups_dir = os.path.join(root, "backups")
+        os.makedirs(backups_dir, exist_ok=True)
+        for f in glob.glob(os.path.join(backups_dir, "*.zip")):
+            os.remove(f)
+
+        env = {**os.environ, "TEST_MODE": "true"}
+        proc = subprocess.Popen(
+            [sys.executable, "main.py"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
+        )
+        try:
+            deadline = time.time() + 30
+            backup_seen: str | None = None
+            while time.time() < deadline and proc.poll() is None:
+                zips = glob.glob(os.path.join(backups_dir, "*.zip"))
+                if zips:
+                    backup_seen = zips[0]
+                    break
+                time.sleep(0.5)
+            assert backup_seen is not None, (
+                "main.py must auto-create a backup on startup (BUG-3)"
+            )
+            assert os.path.getsize(backup_seen) > 0
+        finally:
+            if proc.poll() is None:
+                with open(os.path.join(root, "data", ".shutdown_requested"), "w") as f:
+                    f.write("shutdown test")
+                try:
+                    proc.communicate(timeout=25)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            else:
+                proc.wait()
+            try:
+                os.remove(os.path.join(root, "data", ".shutdown_requested"))
+            except OSError:
+                pass

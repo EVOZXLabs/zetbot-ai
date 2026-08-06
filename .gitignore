@@ -15,6 +15,7 @@ data/
 
 # Runtime backups (snapshots of auto-saved state)
 backup/
+backups/
 
 # VSCode
 .vscode/

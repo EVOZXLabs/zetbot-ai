@@ -49,10 +49,10 @@ def exchange_call_with_retry(
         fn: Zero-argument callable that performs the exchange call.
         label: Human-readable label for log messages.
         retries: Maximum retry attempts (default 3).
-        record_failure: Optional callback called on every failed attempt
-            so callers can drive ``SafeGuard.record_exchange_failure()``.
-            When all retries are exhausted this callback is invoked once
-            more and then the exception is re-raised.
+        record_failure: Optional callback called exactly once per failed
+            attempt so callers can drive ``SafeGuard.record_exchange_failure()``.
+            Total calls == number of attempts that actually raised an exception
+            (never more).
 
     Raises:
         The last exception from ``fn`` when all retries are exhausted.
@@ -93,12 +93,10 @@ def exchange_call_with_retry(
             )
             raise
 
-    # All retries exhausted — notify caller one final time and raise.
-    if record_failure is not None:
-        try:
-            record_failure()
-        except Exception:
-            pass
+    # All retries exhausted — re-raise the last transient exception.
+    # record_failure() was already called inside the loop for every failed
+    # attempt; do NOT call it again here to avoid a double-count on the
+    # final attempt.
     assert last_exc is not None
     raise last_exc
 

@@ -12,11 +12,14 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from scripts.balance_resolver import resolve_initial_balance
 from scripts.position_status import is_open
+
+
+_WIB_TZ = timezone(timedelta(hours=7))
 
 
 @dataclass
@@ -521,8 +524,8 @@ class MetricsManager:
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return self.trades_since(today_start)
 
-    def today_summary(self) -> dict[str, Any]:
-        trades = self.today_trades()
+    @staticmethod
+    def _summarize_trades(trades: list[dict[str, Any]]) -> dict[str, Any]:
         total = len(trades)
         wins = sum(1 for t in trades if t.get("net_pnl", 0) > 0)
         losses = sum(1 for t in trades if t.get("net_pnl", 0) <= 0)
@@ -538,6 +541,35 @@ class MetricsManager:
             "roi": roi,
             "avg_holding_hours": avg_hold,
         }
+
+    def today_summary(self) -> dict[str, Any]:
+        return self._summarize_trades(self.today_trades())
+
+    def trades_since_wib_midnight(self) -> list[dict[str, Any]]:
+        """Trades closed since the most recent 00:00 WIB (Asia/Jakarta, UTC+7).
+
+        The daily report fires at 00:00 WIB, but ``today_trades()`` cuts
+        off at 00:00 UTC — a trade closed between 00:00 and 07:00 WIB
+        (= 17:00-24:00 UTC the previous day) would be missing from that
+        report. This variant shifts the day boundary so a full WIB day
+        maps to its correct UTC instants.
+
+        ``today_trades()``/``today_summary()`` keep the UTC boundary on
+        purpose: /wallet, /status and the service-container adapter use
+        them, and swapping their base would silently change what those
+        commands report as "today".
+        """
+        now_wib = datetime.now(_WIB_TZ)
+        wib_midnight = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+        return self.trades_since(wib_midnight.astimezone(timezone.utc))
+
+    def today_summary_wib(self) -> dict[str, Any]:
+        """Today's trade summary using the WIB (UTC+7) day boundary.
+
+        Mirror of ``today_summary()`` for the 00:00 WIB daily report —
+        includes every trade closed during the current WIB calendar day.
+        """
+        return self._summarize_trades(self.trades_since_wib_midnight())
 
     # ------------------------------------------------------------------
     #  Scanner / market helpers

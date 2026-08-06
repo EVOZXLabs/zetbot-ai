@@ -1416,6 +1416,33 @@ def main() -> None:
             logger.warning("DailyReportScheduler failed to start: %s", exc)
 
     # ------------------------------------------------------------------
+    #  Backup scheduler — automatic hourly backups (P1 Reliability).
+    #
+    #  Previously the hourly BackupScheduler was never wired into the
+    #  daemon, so backups only ran when an operator triggered the manual
+    #  Telegram /backup (or `python main.py --backup`). Start it on every
+    #  run so config/data/log snapshots are taken automatically, pruning
+    #  archives older than BACKUP_RETENTION_DAYS. Honors the existing
+    #  BACKUP_INTERVAL_SECONDS / BACKUP_RETENTION_DAYS env vars via the
+    #  module defaults. A failure here must never block startup.
+    # ------------------------------------------------------------------
+    backup_scheduler: Any = None
+    try:
+        from scripts.backup_restore import (  # noqa: PLC0415
+            BackupScheduler,
+            BACKUP_INTERVAL_SECONDS,
+            BACKUP_RETENTION_DAYS,
+        )
+        backup_scheduler = BackupScheduler(
+            interval_seconds=BACKUP_INTERVAL_SECONDS,
+            retention_days=BACKUP_RETENTION_DAYS,
+            shutdown_event=shutdown,
+        )
+        backup_scheduler.start()
+    except Exception as exc:
+        logger.warning("BackupScheduler failed to start: %s", exc)
+
+    # ------------------------------------------------------------------
     #  Protection reconciliation scheduler — LIVE mode only.
     #
     #  This is what actually makes the synthetic-OCO in
@@ -1575,6 +1602,13 @@ def main() -> None:
     if daily_report_scheduler:
         try:
             daily_report_scheduler.stop()
+        except Exception:
+            pass
+
+    if backup_scheduler:
+        try:
+            logger.info("Stopping Backup Scheduler...")
+            backup_scheduler.stop()
         except Exception:
             pass
 
