@@ -80,6 +80,55 @@ def atomic_write_json(path: str, data: Any, **kwargs: Any) -> None:
             pass
         raise
 
+
+def _atomic_write_lines(path: str, lines: list[str]) -> None:
+    """Atomically write plain-text *lines* (one per line) to *path*.
+
+    Same temp-file + ``os.replace`` pattern as ``atomic_write_json`` so a
+    concurrent reader never sees a partially-written file.
+    """
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=dir_name, suffix=".tmp", prefix=".atomic_",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            for line in lines:
+                f.write(f"{line}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def add_notified_buy(symbol: str, notified_path: str = "data/.notified_buys") -> None:
+    """Atomically record *symbol* in the BUY_OPENED dedup file.
+
+    The file is line-per-symbol plain text. The read-modify-write runs
+    under ``PAPER_STATE_LOCK`` and the write is atomic (temp file +
+    ``os.replace``), so a concurrent writer (the paper-engine startup
+    daemon thread vs. the pipeline scheduler — BUG-4) can never clobber a
+    symbol added by the other thread, and a concurrent reader never sees a
+    half-written dedup file.
+    """
+    with PAPER_STATE_LOCK:
+        notified: set[str] = set()
+        try:
+            with open(notified_path) as nf:
+                notified = set(line.strip() for line in nf if line.strip())
+        except (FileNotFoundError, OSError):
+            notified = set()
+        notified.add(symbol)
+        _atomic_write_lines(notified_path, sorted(notified))
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 

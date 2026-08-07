@@ -245,6 +245,16 @@ Does **not** overwrite your existing `.env` or trading data.
   writes `data/.watchdog_halt`, alerts via Telegram ("MANUAL INTERVENTION
   NEEDED") and exits non-zero. The halt is sticky — the watchdog keeps
   standing by until you remove `data/.watchdog_halt`.
+- Treats an alive-but-unresponsive bot as hung via its heartbeat file
+  (`data/watchdog_heartbeat.json`, written by the bot every ~60s). When the
+  heartbeat is older than `WATCHDOG_HEARTBEAT_STALE` (default `300`) seconds
+  the watchdog waits one check interval and re-checks before acting — a bot
+  that merely resumed from device suspend refreshes the heartbeat and is
+  left running. A bot that is **still** stale is killed and restarted (this
+  is *not* a crash and never feeds the crash-loop rate limit). If the bot
+  stays stale across more than `WATCHDOG_MAX_HEARTBEAT_STALE_RESTARTS`
+  (default `3`) consecutive checks, auto-restart is halted with its own
+  sticky `data/.watchdog_halt` instead of looping forever.
 - Sends Telegram alerts on restart / halt / manual stop, using the same
   `TELEGRAM_*` settings as the bot.
 
@@ -448,6 +458,8 @@ All settings are stored in `.env`. Key settings:
 | `WATCHDOG_INTERVAL` | `20` | Watchdog supervision interval (s) |
 | `WATCHDOG_MAX_RESTARTS` | `3` | Max bot restarts in `WATCHDOG_WINDOW` before auto-restart halts |
 | `WATCHDOG_WINDOW` | `600` | Rate-limit window for watchdog restarts (s) |
+| `WATCHDOG_HEARTBEAT_STALE` | `300` | Heartbeat file age (s) before the bot is treated as hung |
+| `WATCHDOG_MAX_HEARTBEAT_STALE_RESTARTS` | `3` | Max consecutive heartbeat-stale restarts before auto-restart halts |
 
 ---
 

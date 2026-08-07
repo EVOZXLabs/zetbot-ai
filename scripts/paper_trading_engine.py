@@ -22,7 +22,11 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
-from scripts.paper_state_lock import paper_state_writes, merge_positions
+from scripts.paper_state_lock import (
+    add_notified_buy,
+    merge_positions,
+    paper_state_writes,
+)
 
 # ---------------------------------------------------------------------------
 #  Config
@@ -424,7 +428,7 @@ class PaperTradingEngine:
             tp3 = plan.get("tp3", 0)
             reasons = plan.get("reasons", ["Paper trade executed"])
 
-            self._notifier.notify_buy_opened(
+            sent = self._notifier.notify_buy_opened(
                 symbol=symbol,
                 exchange=exchange,
                 timeframe=timeframe,
@@ -437,6 +441,17 @@ class PaperTradingEngine:
                 take_profit_3=tp3,
                 reasons=reasons,
             )
+            if sent:
+                # Record the symbol so restart recovery (main.py
+                # _notify_existing_positions) does NOT send a duplicate
+                # BUY_OPENED for the same open position. Same dedup file and
+                # format as scripts/pipeline.py run_execution. Only recorded
+                # on successful delivery — a failed send is retried on the
+                # next restart. Serialized + atomic via
+                # scripts/paper_state_lock.add_notified_buy so the startup
+                # daemon thread and the pipeline scheduler (BUG-4) can never
+                # clobber each other's dedup entry.
+                add_notified_buy(symbol)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send BUY notification: %s", exc

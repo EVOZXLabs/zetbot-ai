@@ -25,6 +25,16 @@ Behaviour
   watchdog restarts). The halt is STICKY: the watchdog exits non-zero and
   every restart keeps standing by until the operator removes
   ``data/.watchdog_halt``.
+* Treats an alive-but-unresponsive bot as hung via its heartbeat file
+  (``data/watchdog_heartbeat.json``, written by the bot every ~60s). When the
+  heartbeat is older than ``HEARTBEAT_STALE_SECONDS`` (default 300) the
+  watchdog re-checks after one interval before acting — a bot that merely
+  resumed from device suspend refreshes the heartbeat and is left running. A
+  bot that is STILL stale is killed and restarted (a "heartbeat-stale"
+  restart, which is NOT a crash and never feeds the crash rate limit). To
+  avoid an infinite restart loop, more than ``MAX_HEARTBEAT_STALE_RESTARTS``
+  (default 3) consecutive stale observations halts auto-restart with its own
+  ``.watchdog_halt``.
 * Notifies via the existing Telegram notifier (``bot/notifier.py``), which
   reads ``TELEGRAM_*`` from ``.env``.
 
@@ -35,10 +45,12 @@ Run (foreground — under systemd, tmux, screen or termux-services)::
 State files (all under ``data/``):
     zetbot.pid             bot's own PID lock file (written by main.py)
     zetbot-watchdog.pid    this watchdog's PID (used by ``--stop``)
+    watchdog_heartbeat.json bot liveness heartbeat (mtime-based staleness)
     .shutdown_requested    bot graceful-stop signal (respected; cleared only
                            right before an auto-restart of a crashed bot)
     .watchdog_paused       user pauses auto-restart (never restarts)
-    .watchdog_halt         set when the rate-limit halts auto-restart
+    .watchdog_halt         set when auto-restart is halted — crash rate limit
+                           or heartbeat-stale streak (see constants above)
     .watchdog_crashes.json persisted crash timestamps (rate-limit window)
 
 Exit codes: 0 on normal ``--stop``/signal, non-zero on rate-limit halt so a
@@ -82,6 +94,13 @@ WATCHDOG_PID_FILE = "data/zetbot-watchdog.pid"
 # considered hung (alive by PID but unresponsive).
 HEARTBEAT_FILE = "data/watchdog_heartbeat.json"
 HEARTBEAT_STALE_SECONDS = int(os.getenv("WATCHDOG_HEARTBEAT_STALE", "300"))   # 5 min
+
+# A genuinely hung bot (PID alive, heartbeat never refreshes) is restarted at
+# most this many times before the watchdog HALTS auto-restart. Kept separate
+# from the crash rate limit: heartbeat-stale restarts are NOT crashes and
+# must not feed ``_crash_times`` (or sleep/wake cycles would false-HALT), but
+# an endless stale loop still needs its own stopping condition.
+MAX_HEARTBEAT_STALE_RESTARTS = int(os.getenv("WATCHDOG_MAX_HEARTBEAT_STALE_RESTARTS", "3"))
 
 # The pipeline scheduler writes data/pipeline_last_run.json on every cycle.
 # If it goes quiet for PIPELINE_STALE_SECONDS the bot may be stuck.
@@ -167,6 +186,7 @@ class Watchdog:
         self.last_returncode: Optional[int] = None
         self._crash_times: list[float] = []
         self._manual_stop_notified: bool = False
+        self._heartbeat_stale_streak: int = 0
         self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------
@@ -386,11 +406,51 @@ class Watchdog:
             # --- Heartbeat check ---
             hb_age = self._heartbeat_age()
             if hb_age is not None and hb_age > HEARTBEAT_STALE_SECONDS:
+                # Re-check after one interval before killing. The heartbeat
+                # file mtime is wall-clock based, so after a device suspend
+                # (Android sleep) / power loss + reboot the file is stale
+                # even though the bot is healthy and will refresh it on its
+                # next ~60s heartbeat write. Killing immediately turned every
+                # reboot into a kill-loop + false crash-rate HALT. Only a bot
+                # that is STILL stale after the grace period is truly hung.
                 self.logger.warning(
                     "bot heartbeat stale for %.0fs (threshold %ds) — "
-                    "process alive but unresponsive; restarting",
+                    "re-checking after one interval before restarting",
                     hb_age, HEARTBEAT_STALE_SECONDS,
                 )
+                if self._sleep(self.interval):
+                    return "running"
+                refreshed_age = self._heartbeat_age()
+                if refreshed_age is not None and refreshed_age <= HEARTBEAT_STALE_SECONDS:
+                    self.logger.info(
+                        "heartbeat refreshed (age %.0fs) — bot resumed "
+                        "(e.g. device wake); no restart",
+                        refreshed_age,
+                    )
+                    self._heartbeat_stale_streak = 0
+                    return "running"
+                # Truly hung: STILL stale after the grace interval.
+                self.logger.warning(
+                    "bot heartbeat STILL stale after re-check "
+                    "(age %s) — restarting",
+                    refreshed_age if refreshed_age is not None else "n/a",
+                )
+                self._heartbeat_stale_streak += 1
+                if self._heartbeat_stale_streak >= MAX_HEARTBEAT_STALE_RESTARTS:
+                    # Heartbeat-stale restarts must NOT feed the crash rate
+                    # limit (sleep/wake cycles would otherwise false-HALT),
+                    # but a bot that stays stale across consecutive restarts
+                    # is genuinely hung — give it its own stopping condition
+                    # so the watchdog never loops forever.
+                    self._halt(
+                        reason=(
+                            f"The bot was restarted "
+                            f"{self._heartbeat_stale_streak - 1} times but "
+                            f"kept failing to write a heartbeat (still alive "
+                            f"by PID but unresponsive)."
+                        )
+                    )
+                    return "halted"
                 self._notify(
                     f"⚠️ *WATCHDOG* — BOT HEARTBEAT STALE\n\n"
                     f"Bot process is alive (PID active) but has not written a "
@@ -399,7 +459,6 @@ class Watchdog:
                     error=True,
                 )
                 self._kill_bot()
-                self._register_crash()
                 if self._crash_rate_exceeded():
                     self._halt()
                     return "halted"
@@ -422,6 +481,7 @@ class Watchdog:
                     error=True,
                 )
 
+            self._heartbeat_stale_streak = 0
             return "running"
 
         # Bot is down. Was the stop deliberate?
@@ -466,24 +526,38 @@ class Watchdog:
         )
         self.logger.warning("bot down (%s) — restarting", reason)
 
-    def _halt(self) -> None:
+    def _halt(self, reason: str = "") -> None:
         count = len(self._recent_crashes())
         minutes = int(self.window / 60)
-        self._notify(
-            f"🚨 *WATCHDOG* — MANUAL INTERVENTION NEEDED\n\n"
-            f"The bot has restarted more than {self.max_restarts} times in "
-            f"the last {minutes} min ({count} crashes) and keeps dying.\n"
-            f"Auto-restart has been HALTED to avoid a crash loop.\n\n"
-            f"Fix the bug, then restart the watchdog:\n"
-            f"  `{self.python_cmd} scripts/watchdog.py`\n\n"
-            f"⚠️ While the bot is down there is NO SL/TP protection on "
-            f"exchanges without native stop orders (e.g. indodax).",
-            error=True,
-        )
-        self.logger.error(
-            "rate limit exceeded (%d crashes in %ds) — halting auto-restart",
-            count, self.window,
-        )
+        if reason:
+            message = (
+                f"🚨 *WATCHDOG* — MANUAL INTERVENTION NEEDED\n\n"
+                f"{reason}\n"
+                f"Auto-restart has been HALTED to avoid a restart loop.\n\n"
+                f"Fix the issue, then restart the watchdog:\n"
+                f"  `{self.python_cmd} scripts/watchdog.py`\n\n"
+                f"⚠️ While the bot is down there is NO SL/TP protection on "
+                f"exchanges without native stop orders (e.g. indodax)."
+            )
+            self.logger.error(
+                "halting auto-restart: %s", reason,
+            )
+        else:
+            message = (
+                f"🚨 *WATCHDOG* — MANUAL INTERVENTION NEEDED\n\n"
+                f"The bot has restarted more than {self.max_restarts} times in "
+                f"the last {minutes} min ({count} crashes) and keeps dying.\n"
+                f"Auto-restart has been HALTED to avoid a crash loop.\n\n"
+                f"Fix the bug, then restart the watchdog:\n"
+                f"  `{self.python_cmd} scripts/watchdog.py`\n\n"
+                f"⚠️ While the bot is down there is NO SL/TP protection on "
+                f"exchanges without native stop orders (e.g. indodax)."
+            )
+            self.logger.error(
+                "rate limit exceeded (%d crashes in %ds) — halting auto-restart",
+                count, self.window,
+            )
+        self._notify(message, error=True)
         self._write_halt_file()
 
     def _write_halt_file(self) -> None:

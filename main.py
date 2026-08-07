@@ -575,11 +575,17 @@ def _notify_buy_opened(
     tp1: float,
     tp2: float = 0.0,
     tp3: float = 0.0,
-) -> None:
-    """Send Telegram notification when a buy is opened."""
+) -> bool:
+    """Send Telegram notification when a buy is opened.
+
+    Returns True only when the notification was actually delivered, so
+    callers can decide whether to mark the symbol as notified. A failed
+    send must NOT be recorded as notified, otherwise the BUY_OPENED for
+    that position is permanently lost (never retried on the next restart).
+    """
     try:
         cfg = getattr(logger, 'config', None) or getattr(logger, '_config', None)
-        notifier.notify_buy_opened(
+        return bool(notifier.notify_buy_opened(
             symbol=symbol,
             timeframe=getattr(cfg, 'timeframe', '') if cfg else "",
             exchange=getattr(cfg, 'exchange', '') if cfg else "",
@@ -591,9 +597,10 @@ def _notify_buy_opened(
             take_profit_2=tp2,
             take_profit_3=tp3,
             reasons=["Pipeline execution"],
-        )
+        ))
     except Exception as exc:
         logger.warning(f"Failed to send buy notification for {symbol}: {exc}")
+        return False
 
 
 def _notify_existing_positions(
@@ -611,7 +618,6 @@ def _notify_existing_positions(
         with open("data/positions.json") as f:
             data = json.load(f)
 
-        new_notified = False
         for pos in data.get("positions", []):
             sym = pos.get("symbol", "")
             if sym in notified:
@@ -619,7 +625,7 @@ def _notify_existing_positions(
             if not is_open(pos.get("status")):
                 continue
 
-            _notify_buy_opened(
+            sent = _notify_buy_opened(
                 logger, notifier,
                 symbol=sym,
                 entry_price=pos.get("entry_price", 0),
@@ -630,13 +636,26 @@ def _notify_existing_positions(
                 tp2=pos.get("tp2", 0),
                 tp3=pos.get("tp3", 0),
             )
+            if not sent:
+                # Delivery failed — do NOT record the symbol as notified,
+                # so the BUY_OPENED is retried on the next restart instead
+                # of being permanently lost.
+                logger.warning(
+                    f"BUY_OPENED delivery failed for {sym} — will retry "
+                    "on next restart"
+                )
+                continue
             notified.add(sym)
-            new_notified = True
-
-        if new_notified:
-            with open(NOTIFIED_FILE, "w") as f:
-                for sym in sorted(notified):
-                    f.write(f"{sym}\n")
+            # Record under PAPER_STATE_LOCK atomically so a concurrent
+            # writer (the pipeline scheduler — BUG-4) can never clobber
+            # this entry with a stale read-modify-write.
+            try:
+                from scripts.paper_state_lock import add_notified_buy
+                add_notified_buy(sym)
+            except Exception as exc:
+                logger.debug(
+                    f"Failed to record notified symbol {sym}: {exc}"
+                )
     except Exception as exc:
         logger.debug(f"Notify existing positions failed: {exc}")
 
@@ -1318,17 +1337,37 @@ def main() -> None:
     if config.paper_mode:
         try:
             from scripts.paper_trading_engine import main as paper_main
-            import concurrent.futures
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            fut = pool.submit(paper_main, notifier=_notifier, account_balance=config.account_balance)
-            try:
-                fut.result(timeout=10)
-            except concurrent.futures.TimeoutError:
-                logger.warning("Paper engine startup timed out — continuing")
-            except Exception as exc:
-                logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
-            pool.shutdown(wait=False, cancel_futures=True)
-            del pool
+
+            def _paper_startup_worker() -> None:
+                """Run the startup paper engine; failures are non-fatal."""
+                try:
+                    paper_main(
+                        notifier=_notifier,
+                        account_balance=config.account_balance,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Paper engine startup failed (non-fatal): {exc}"
+                    )
+
+            # Run the startup engine in a DAEMON thread. The previous
+            # ThreadPoolExecutor left a non-daemon worker alive past the 10s
+            # timeout (shutdown(wait=False, cancel_futures=True) cannot stop a
+            # running future), so it kept executing plans / reconciling TP/SL
+            # concurrently with the monitor AND blocked sys.exit(0) at
+            # shutdown. A daemon thread can never block interpreter exit.
+            startup_thread = threading.Thread(
+                target=_paper_startup_worker,
+                name="PaperStartup",
+                daemon=True,
+            )
+            startup_thread.start()
+            startup_thread.join(timeout=10)
+            if startup_thread.is_alive():
+                logger.warning(
+                    "Paper engine startup timed out — continuing "
+                    "(background daemon thread)"
+                )
             logger.info("Paper engine state restored — positions recovered, TP/SL checked")
         except Exception as exc:
             logger.warning(f"Paper engine startup failed (non-fatal): {exc}")

@@ -187,7 +187,10 @@ Within 20 seconds (watchdog interval):
 - [ ] Bot restarts within 20 seconds
 - [ ] Telegram notification: "BOT RESTARTED (auto)"
 - [ ] After restart, `/status` is responsive
-- [ ] If killed 4× in 10 minutes, watchdog halts and notifies "MANUAL INTERVENTION NEEDED"
+- [ ] Killed repeatedly: after more than `WATCHDOG_MAX_RESTARTS` (default `3`)
+      crashes inside `WATCHDOG_WINDOW` (default `600`) seconds, the watchdog
+      HALTS and notifies "MANUAL INTERVENTION NEEDED" — see **Halt paths**
+      below for the exact crash-rate message.
 
 ---
 
@@ -227,39 +230,143 @@ python main.py
 
 ---
 
-## Scenario 6 — Heartbeat Stale (Bot Hung)
+## Scenario 6 — Heartbeat Stale (Suspend Blip vs. Genuinely Hung Bot)
 
-**Goal:** Verify the watchdog kills and restarts a bot that is alive but
-unresponsive (e.g. deadlocked).
+**Goal:** Verify the watchdog does **not** kill a bot that merely resumed
+from device suspend (its heartbeat refreshes during the one-interval grace
+re-check), but does kill+restart a genuinely hung bot and finally **HALTS**
+after `WATCHDOG_MAX_HEARTBEAT_STALE_RESTARTS` (default `3`) consecutive
+stale observations instead of looping forever.
 
-### Setup
+The bot writes `data/watchdog_heartbeat.json` every ~60s. A stale heartbeat
+means "alive by PID but unresponsive". The watchdog never kills on the
+first stale detection alone — it always re-checks after one check interval
+(default `20` s). Heartbeat-stale restarts are **not** crashes and never
+feed the crash-rate limit; they have their own streak-based halt.
 
-Add a temporary deadlock to `main.py` for testing:
+> Faster test: shorten the threshold so the checklist runs quickly:
+> `WATCHDOG_HEARTBEAT_STALE=60 python scripts/watchdog.py` (default `300`).
 
-```python
-# In the keep-alive loop, after ~60s:
-import threading
-threading.Event().wait()  # block forever
+### 6a — Device suspend / wake blip (must NOT restart)
+
+Simulate Android Doze / laptop suspend: freeze the bot for longer than the
+stale threshold, then resume it. A stopped process is still alive by PID but
+cannot write heartbeats.
+
+```bash
+kill -STOP $(cat data/zetbot.pid)   # freeze (e.g. > WATCHDOG_HEARTBEAT_STALE s)
+kill -CONT $(cat data/zetbot.pid)   # wake the bot
 ```
 
-Run with watchdog:
+Observe (first stale detection + grace re-check + refresh):
+
+```
+[WARNING] bot heartbeat stale for 350s (threshold 300s) — re-checking after one interval before restarting
+[INFO]    heartbeat refreshed (age 30s) — bot resumed (e.g. device wake); no restart
+```
+
+Pass criteria:
+
+- [ ] Bot is **not** killed or restarted
+- [ ] No "BOT HEARTBEAT STALE" / "BOT RESTARTED (auto)" Telegram notification
+- [ ] Watchdog returns to `running` and the heartbeat streak is reset
+
+### 6b — Genuinely hung bot (kill/restart, then streak HALT)
+
+Add a temporary deadlock to `main.py` so the heartbeat is never written
+(every respawn hits it too — this is what makes the streak reach the halt):
+
+```python
+# At the top of the keep-alive loop, BEFORE write_heartbeat():
+import threading
+threading.Event().wait()  # block forever — alive but never heartbeats
+```
+
+Run with watchdog (default or shortened `WATCHDOG_HEARTBEAT_STALE`):
 
 ```bash
 python scripts/watchdog.py
 ```
 
-### Observe (after WATCHDOG_HEARTBEAT_STALE seconds, default 300s)
+Observe (first detection → re-check → streak kill/restart → halt):
 
 ```
-[WARNING] bot heartbeat stale for 305s — process alive but unresponsive; restarting
+[WARNING] bot heartbeat stale for 305s (threshold 300s) — re-checking after one interval before restarting
+[WARNING] bot heartbeat STILL stale after re-check (age 315s) — restarting
+[INFO]    spawning bot: .venv/bin/python main.py
+[WARNING] bot heartbeat STILL stale after re-check (age 320s) — restarting     # streak 2
+[INFO]    spawning bot: .venv/bin/python main.py
+[ERROR]   halting auto-restart: The bot was restarted 2 times but kept failing to write a heartbeat (still alive by PID but unresponsive).
 ```
 
-### Pass criteria
+Pass criteria:
 
-- [ ] Watchdog kills the hung process
-- [ ] Bot restarts cleanly
-- [ ] `data/watchdog_heartbeat.json` is refreshed after restart
-- [ ] Telegram notification: "BOT HEARTBEAT STALE"
+- [ ] No kill happens on the **first** stale detection — the re-check is observed first
+- [ ] Bot is killed and restarted **at most** `WATCHDOG_MAX_HEARTBEAT_STALE_RESTARTS - 1` (default 2) times, then halted on the final stale observation
+- [ ] `data/.watchdog_halt` is written; the halt is **sticky** across watchdog restarts until you `rm data/.watchdog_halt`
+- [ ] Telegram notification: "MANUAL INTERVENTION NEEDED" with the **heartbeat-streak reason** (not the crash-rate reason)
+- [ ] No infinite kill/restart loop
+
+---
+
+## Halt paths (the two ways the watchdog stops auto-restart)
+
+Both write the sticky `data/.watchdog_halt` and notify "MANUAL INTERVENTION
+NEEDED", but the reason text and log line differ — this is what an operator
+running the checklist will actually see.
+
+### 1. Crash-rate halt (Scenario 4)
+
+Trigger: more than `WATCHDOG_MAX_RESTARTS` (default `3`) **real crashes**
+inside `WATCHDOG_WINDOW` (default `600`) seconds. Heartbeat-stale restarts
+never count toward this.
+
+Log:
+
+```
+[ERROR] rate limit exceeded (4 crashes in 600s) — halting auto-restart
+```
+
+Notification:
+
+```
+🚨 *WATCHDOG* — MANUAL INTERVENTION NEEDED
+
+The bot has restarted more than 3 times in the last 10 min (4 crashes) and keeps dying.
+Auto-restart has been HALTED to avoid a crash loop.
+
+Fix the bug, then restart the watchdog:
+  `.venv/bin/python scripts/watchdog.py`
+
+⚠️ While the bot is down there is NO SL/TP protection on exchanges without native stop orders (e.g. indodax).
+```
+
+### 2. Heartbeat-streak halt (Scenario 6b)
+
+Trigger: `WATCHDOG_MAX_HEARTBEAT_STALE_RESTARTS` (default `3`) consecutive
+observations where the heartbeat is STILL stale after the one-interval grace
+re-check. Independent of the crash rate limit — a suspend/wake blip that
+refreshes the heartbeat within the grace never reaches it.
+
+Log:
+
+```
+[ERROR] halting auto-restart: The bot was restarted 2 times but kept failing to write a heartbeat (still alive by PID but unresponsive).
+```
+
+Notification:
+
+```
+🚨 *WATCHDOG* — MANUAL INTERVENTION NEEDED
+
+The bot was restarted 2 times but kept failing to write a heartbeat (still alive by PID but unresponsive).
+Auto-restart has been HALTED to avoid a restart loop.
+
+Fix the issue, then restart the watchdog:
+  `.venv/bin/python scripts/watchdog.py`
+
+⚠️ While the bot is down there is NO SL/TP protection on exchanges without native stop orders (e.g. indodax).
+```
 
 ---
 
@@ -272,6 +379,8 @@ tests/test_exit_crash_recovery.py   # TP/SL crash recovery
 tests/test_ghost_position_sync.py   # ghost position detection
 tests/test_paper_state_lock_concurrency.py  # concurrent write safety
 tests/test_batch1_hardening.py      # balance/lock/atomic write
+tests/test_batch2_hardening.py      # watchdog heartbeat/pipeline staleness
+tests/test_audit_repros.py          # watchdog stale-heartbeat grace/streak; notified_buys; daemon startup
 ```
 
 Run all:
@@ -289,7 +398,7 @@ pytest tests/ -v
 - [ ] Scenario 3 passed (internet down, no blind orders)
 - [ ] Scenario 4 passed (watchdog restarts in ≤20s)
 - [ ] Scenario 5 passed (power loss, state intact)
-- [ ] Scenario 6 passed (heartbeat stale → watchdog kills and restarts)
+- [ ] Scenario 6 passed (heartbeat stale: suspend/wake blip NOT restarted; hung bot halted after streak)
 - [ ] All automated tests passing: `pytest` → 0 failures
 - [ ] `.env` API key has **no Withdrawal permission**
 - [ ] `PAPER_MODE=false` only after all above are confirmed

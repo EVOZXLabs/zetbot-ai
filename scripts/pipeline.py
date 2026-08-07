@@ -30,7 +30,11 @@ from scripts.app_config import AppConfig
 from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
-from scripts.paper_state_lock import paper_state_writes, merge_positions
+from scripts.paper_state_lock import (
+    add_notified_buy,
+    merge_positions,
+    paper_state_writes,
+)
 
 
 STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
@@ -626,7 +630,7 @@ class Pipeline:
                         )
                         if status == "FILLED" and self._notifier is not None:
                             try:
-                                self._notifier.notify_buy_opened(
+                                sent = self._notifier.notify_buy_opened(
                                     symbol=symbol,
                                     exchange=getattr(self.config, "exchange", ""),
                                     timeframe=getattr(self.config, "timeframe", ""),
@@ -639,18 +643,20 @@ class Pipeline:
                                     take_profit_3=plan.get("tp3", 0),
                                     reasons=["Pipeline execution"],
                                 )
-                                try:
-                                    notified_path = "data/.notified_buys"
-                                    notified = set()
-                                    if os.path.exists(notified_path):
-                                        with open(notified_path) as nf:
-                                            notified = set(line.strip() for line in nf if line.strip())
-                                    notified.add(symbol)
-                                    with open(notified_path, "w") as nf:
-                                        for sym in sorted(notified):
-                                            nf.write(f"{sym}\n")
-                                except Exception:
-                                    pass
+                                if sent:
+                                    # Only record as notified when delivery
+                                    # actually succeeded, otherwise the
+                                    # BUY_OPENED is retried on the next
+                                    # restart instead of being lost.
+                                    # Serialized + atomic via
+                                    # scripts/paper_state_lock so a
+                                    # concurrent writer (startup daemon
+                                    # thread — BUG-4) can never clobber this
+                                    # entry.
+                                    try:
+                                        add_notified_buy(symbol)
+                                    except Exception:
+                                        pass
                             except Exception:
                                 self.logger.warning(f"BUY notification failed for {symbol}")
                 except Exception as exc:
