@@ -1,65 +1,95 @@
-import json
+"""/signals — top trading signals, recomputed live.
+
+Scans the top volume candidates on the ACTIVE exchange in realtime
+(ticker + OHLCV + indicators at call time), ranks them, and shows the
+strongest BUY/WATCHLIST signals. Never reads the stale scanner snapshot.
+"""
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number, fmt_price
-from telegram.ui import compact_header, confidence_bar, build_message
+from telegram.formatter import fmt_price
+from telegram.ui import compact_header, confidence_bar, build_message, wib_now
+from scripts.realtime_market import (
+    RealtimeMarketError,
+    data_footer,
+    fmt_age,
+    fmt_wib,
+    get_realtime_service,
+)
+
+_SIGNAL_POOL = ("STRONG BUY", "BUY", "WATCHLIST")
+_TOP_DISPLAY = 8
 
 
 class SignalsCommand(BaseCommand):
     meta = CommandMeta(
         name="signals",
         aliases=["signal"],
-        description="Show latest trading signals from scanner results",
+        description="Show live trading signals computed from the exchange now",
         usage="/signals",
         permission="user",
     )
 
     def execute(self, ctx, args: str) -> str:
         try:
-            with open("data/scanner_results.json") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return "No scanner data yet. Run /pipeline first."
+            rt = get_realtime_service(ctx)
+            symbols = rt.top_candidates()
+            results = rt.analyze_many(symbols)
+        except RealtimeMarketError as exc:
+            return build_message(
+                compact_header(),
+                f"\u26a0\ufe0f *Realtime error*",
+                str(exc),
+                f"🕐 {wib_now()}",
+            )
+        except Exception as exc:
+            return build_message(
+                compact_header(),
+                f"\u26a0\ufe0f *Realtime error*",
+                f"Unexpected error: {exc}",
+                f"🕐 {wib_now()}",
+            )
 
-        pairs = data.get("results", data.get("pairs", data.get("sorted", [])))
-        if not isinstance(pairs, list) or not pairs:
-            return "No pairs found in scanner results."
+        candidates = [
+            r for r in results if r.signal in _SIGNAL_POOL
+        ]
+        candidates.sort(key=lambda r: r.overall, reverse=True)
+        top = candidates[:_TOP_DISPLAY]
 
-        candidates = []
-        for p in pairs:
-            if not isinstance(p, dict):
-                continue
-            signal = (p.get("signal") or p.get("classification") or "").upper()
-            score = p.get("overall", 0) or 0
-            if signal in ("STRONG BUY", "BUY", "WATCHLIST"):
-                candidates.append({
-                    "symbol": p.get("symbol", "?"),
-                    "price": p.get("price", 0) or 0,
-                    "score": score,
-                    "trend": p.get("trend_alignment", "N/A"),
-                    "signal": signal,
-                    "rsi": p.get("rsi14", 0) or 0,
-                    "adx": p.get("adx14", 0) or 0,
-                    "atr": p.get("atr_pct", 0) or 0,
-                    "ema200": p.get("ema200", 0) or 0,
-                    "volume": p.get("volume_24h", 0) or 0,
-                })
-
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        top = candidates[:8]
+        footer_blocks = []
+        if results:
+            newest = max(r.fetched_at for r in results)
+            footer_blocks.append(
+                f"Data Time: {fmt_wib(newest)}\n"
+                f"Data Age: {fmt_age(newest)}"
+            )
 
         if not top:
-            return "No BUY/WATCHLIST signals found in latest scan."
+            blocks = [
+                compact_header(),
+                "📡 *Top Signals*",
+                f"No BUY/WATCHLIST signals found in the realtime scan of "
+                f"{len(results)} pairs on {rt.exchange_name}.",
+            ]
+            blocks.extend(footer_blocks)
+            return build_message(*blocks)
 
-        blocks = [compact_header(), "📡 *Top Signals*"]
+        blocks = [
+            compact_header(),
+            f"📡 *Top Signals* — {rt.exchange_name} "
+            f"(scanned {len(results)} pairs)",
+        ]
 
-        for i, c in enumerate(top, 1):
-            emoji = "🟢" if "BUY" in c["signal"] else "🟡"
-            block = (
-                f"{emoji} *{c['symbol']}* — {c['signal']}\n"
-                f"{confidence_bar(c['score'])}\n"
-                f"RSI: {c['rsi']:.0f}  ADX: {c['adx']:.0f}  Trend: {c['trend']}"
+        for i, r in enumerate(top, 1):
+            emoji = "🟢" if "BUY" in r.signal else "🟡"
+            blocks.append(
+                f"{emoji} *{r.symbol}* — {r.signal}\n"
+                f"💰 {fmt_price(r.price)}  ·  {r.change_24h:+.2f}%\n"
+                f"{confidence_bar(r.overall)}\n"
+                f"RSI: {r.rsi14:.0f}  ADX: {r.adx14:.0f}  "
+                f"Trend: {r.trend_alignment}"
             )
-            blocks.append(block)
+
+        if results:
+            blocks.append(data_footer(max(results, key=lambda r: r.fetched_at)))
 
         return build_message(*blocks)

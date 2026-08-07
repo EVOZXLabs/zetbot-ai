@@ -171,3 +171,129 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.skip(
                 reason=f"{ex.args[0]} API unavailable (network/SSL)",
             ))
+
+
+# ===========================================================================
+#  Realtime-market test doubles (offline)
+# ===========================================================================
+# Fake exchange provider + manager + services so the realtime Telegram
+# commands (/detail, /pair, /signals, /market) can be exercised fully
+# offline. The fakes mimic the surface of BaseProvider / ExchangeManager
+# that scripts.realtime_market.py uses.
+
+class FakeProvider:
+    """Canned market data provider. Deterministic uptrend OHLCV so the
+    scanner indicator path yields a BULLISH, BUY-classified analysis."""
+
+    def __init__(self, exchange: str = "binance", quote: str = "USDT",
+                 fail: bool = False, fail_markets: bool = False) -> None:
+        self.exchange = exchange
+        self.quote = quote
+        self.fail = fail
+        self.fail_markets = fail_markets
+        self.ticker_calls = 0
+        self.ohlcv_calls = 0
+        self.tickers_calls = 0
+        self.markets_calls = 0
+        self.base_price: dict[str, float] = {
+            "BTC": 60000.0,
+            "ETH": 3000.0,
+            "SOL": 150.0,
+        }
+
+    # -- helpers --------------------------------------------------------
+
+    def _symbol(self, base: str) -> str:
+        return f"{base}/{self.quote}"
+
+    def _ticker_row(self, symbol: str, base: str) -> dict:
+        return {
+            "symbol": symbol,
+            "last": self.base_price[base],
+            "quoteVolume": 50_000_000.0 if base == "BTC" else 20_000_000.0,
+            "percentage": 2.5,
+            "high": self.base_price[base] * 1.01,
+            "low": self.base_price[base] * 0.99,
+        }
+
+    def _candles(self, base: str, limit: int) -> list[list[float]]:
+        """250+ candles on a steady uptrend -> BULLISH, score >= 60 -> BUY."""
+        n = max(limit, 250)
+        step = 0.002
+        p0 = self.base_price[base] / (1 + step * (n - 1))
+        rows = []
+        t0 = 1_700_000_000_000
+        for i in range(n):
+            close = p0 * (1 + i * step)
+            rows.append([
+                t0 + i * 3_600_000,
+                close * 0.999, close * 1.001, close * 0.998,
+                close, 100_000.0 + i,
+            ])
+        return rows
+
+    # -- provider surface ----------------------------------------------
+
+    def load_markets(self) -> dict:
+        self.markets_calls += 1
+        if self.fail_markets:
+            return {}
+        return {
+            self._symbol(base): {
+                "symbol": self._symbol(base), "base": base,
+                "quote": self.quote, "spot": True, "active": True,
+            }
+            for base in self.base_price
+        }
+
+    def get_markets(self) -> list[dict]:
+        return list(self.load_markets().values())
+
+    def get_ticker(self, symbol: str) -> dict:
+        self.ticker_calls += 1
+        if self.fail:
+            return {}
+        base = symbol.split("/")[0]
+        return self._ticker_row(symbol, base)
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "1h",
+                    limit: int = 200) -> list[list[float]]:
+        self.ohlcv_calls += 1
+        if self.fail:
+            return []
+        base = symbol.split("/")[0]
+        return self._candles(base, limit)
+
+    def fetch_tickers(self, symbols=None) -> dict:
+        self.tickers_calls += 1
+        if self.fail:
+            return {}
+        return {
+            self._symbol(base): self._ticker_row(self._symbol(base), base)
+            for base in self.base_price
+        }
+
+
+class FakeExchangeManager:
+    """Minimal stand-in for scripts.exchange_manager.ExchangeManager."""
+
+    def __init__(self, provider: FakeProvider) -> None:
+        self._provider = provider
+        self.name = provider.exchange
+        self.quote_currency = provider.quote
+
+    def get_provider(self, name: str | None = None) -> FakeProvider:
+        return self._provider
+
+
+class FakeServices:
+    """Minimal stand-in for ServiceContainer (exchange + config +
+    realtime_market) — the only surface the realtime commands touch."""
+
+    def __init__(self, manager: FakeExchangeManager, config: Any) -> None:
+        from scripts.realtime_market import RealtimeMarketData  # noqa: PLC0415
+        self.exchange = manager
+        self.config = config
+        self.realtime_market = RealtimeMarketData(
+            manager, timeframe=getattr(config, "timeframe", "1h"),
+        )

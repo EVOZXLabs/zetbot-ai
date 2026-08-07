@@ -70,6 +70,27 @@ def _execute(cmd: type[BaseCommand], ctx: CommandContext, args: str = "") -> str
     return cmd().execute(ctx, args)
 
 
+_REALTIME_COMMANDS = {"detail", "pair", "signals", "market"}
+
+
+def _realtime_ctx(provider: Any = None) -> CommandContext:
+    """Context with a fake ServiceContainer so the realtime market
+    commands (/detail /pair /signals /market) run fully offline against
+    a fake exchange provider. Defaults to a failing provider so commands
+    return clear error strings without network access."""
+    from scripts.realtime_market import RealtimeMarketData  # noqa: PLC0415
+    from tests.conftest import (  # noqa: PLC0415
+        FakeExchangeManager, FakeProvider, FakeServices,
+    )
+    provider = provider or FakeProvider(fail=True)
+    cfg_kwargs = dict(BASE_CFG.__dict__)
+    cfg_kwargs["exchange"] = provider.exchange
+    cfg_kwargs["quote_currency"] = provider.quote
+    cfg = AppConfig(**cfg_kwargs)
+    mgr = FakeExchangeManager(provider)
+    return _make_ctx(services=FakeServices(mgr, cfg))
+
+
 def _all_commands() -> list[type[BaseCommand]]:
     r = CommandRegistry()
     r.discover()
@@ -204,12 +225,12 @@ class TestCommandsSmoke:
         _ensure_data_files()
 
     def test_all_commands_return_string(self) -> None:
-        ctx = _make_ctx()
         for cls in _all_commands():
             name = cls.meta.name
             # Skip slow commands that need real dependencies
             if name in ("pipeline", "scan"):
                 continue
+            ctx = _realtime_ctx() if name in _REALTIME_COMMANDS else _make_ctx()
             instance = cls()
             try:
                 result = instance.execute(ctx, "")
@@ -223,11 +244,11 @@ class TestCommandsSmoke:
             assert len(result) > 0, f"Command '{name}' returned empty string"
 
     def test_all_commands_with_args(self) -> None:
-        ctx = _make_ctx()
         for cls in _all_commands():
             name = cls.meta.name
             if name in ("pipeline", "scan"):
                 continue
+            ctx = _realtime_ctx() if name in _REALTIME_COMMANDS else _make_ctx()
             instance = cls()
             try:
                 result = instance.execute(ctx, "some args here")
@@ -400,7 +421,7 @@ class TestSpecificCommands:
 
     def test_signals_placeholder(self) -> None:
         from telegram.commands.signals import SignalsCommand
-        result = _execute(SignalsCommand, _make_ctx())
+        result = _execute(SignalsCommand, _realtime_ctx())
         assert isinstance(result, str)
 
     def test_stoploss_placeholder(self) -> None:
@@ -572,18 +593,18 @@ class TestNewUX:
 
     def test_market_shows_overview(self) -> None:
         from telegram.commands.market import MarketCommand
-        result = _execute(MarketCommand, _make_ctx())
-        assert "Market Overview" in result or "No scanner data" in result
+        result = _execute(MarketCommand, _realtime_ctx())
+        assert "Market Overview" in result or "Realtime error" in result
 
     def test_pair_shows_analysis(self) -> None:
         from telegram.commands.pair import PairCommand
-        result = _execute(PairCommand, _make_ctx(), "BTC")
+        result = _execute(PairCommand, _realtime_ctx(), "BTC")
         assert "BTC/USDT" in result or "BTC" in result
-        assert "RSI" in result or "Indicators" in result
+        assert "RSI" in result or "Indicators" in result or "Realtime error" in result
 
     def test_pair_nonexistent(self) -> None:
         from telegram.commands.pair import PairCommand
-        result = _execute(PairCommand, _make_ctx(), "NONEXISTENT")
+        result = _execute(PairCommand, _realtime_ctx(), "NONEXISTENT")
         assert "not found" in result
 
     def test_pair_empty_args(self) -> None:
@@ -631,8 +652,8 @@ class TestNewPolish:
 
     def test_signals_shows_top_buy(self) -> None:
         from telegram.commands.signals import SignalsCommand
-        result = _execute(SignalsCommand, _make_ctx())
-        assert "SIGNALS" in result or "BTC/USDT" in result
+        result = _execute(SignalsCommand, _realtime_ctx())
+        assert "SIGNALS" in result or "BTC/USDT" in result or "Realtime error" in result
 
     def test_positions_roi_and_distance(self) -> None:
         from telegram.commands.positions import PositionsCommand

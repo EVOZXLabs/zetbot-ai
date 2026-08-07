@@ -62,6 +62,8 @@ class ServiceContainer:
         self._health: Optional[IHealthMonitor] = None
         self._metrics: Optional[IMetricsManager] = None
         self._pipeline: Any = None
+        # Realtime market data for Telegram user-facing commands (lazy).
+        self._realtime_market: Any = None
 
     # ------------------------------------------------------------------
     #  Bootstrap
@@ -207,6 +209,22 @@ class ServiceContainer:
     def metrics(self) -> IMetricsManager:
         assert self._metrics is not None
         return self._metrics
+
+    @property
+    def realtime_market(self) -> Any:
+        """Realtime market service for user-facing market data commands.
+
+        Lazily created; its short TTL caches (per symbol) live as long as
+        the process so repeated Telegram commands don't hammer the
+        exchange while still never serving data older than the TTL.
+        """
+        if self._realtime_market is None:
+            from scripts.realtime_market import RealtimeMarketData  # noqa: PLC0415
+            self._realtime_market = RealtimeMarketData(
+                exchange_manager=self._exchange,
+                timeframe=self._config_service.timeframe,
+            )
+        return self._realtime_market
 
     # ------------------------------------------------------------------
     #  Convenience
