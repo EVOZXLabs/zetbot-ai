@@ -48,6 +48,17 @@ signal.signal(signal.SIGTERM, _early_shutdown_handler)
 # import phase (e.g. by a test or external tool).
 _PROCESS_LAUNCH_TIME: float = time.time()
 
+# Watchdog heartbeat cadence.  The dedicated heartbeat thread writes
+# data/watchdog_heartbeat.json every HEARTBEAT_INTERVAL_SECONDS while the
+# process runs.  The watchdog (scripts/watchdog.py) restarts the bot when
+# that file goes stale (default HEARTBEAT_STALE_SECONDS=300), so the write
+# interval must stay far below the staleness threshold.  The heartbeat
+# intentionally does NOT depend on position monitoring: monitoring can be
+# slow, raise, or hang on an exchange call without the bot being dead.
+HEARTBEAT_INTERVAL_SECONDS: float = max(
+    1.0, float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "30"))
+)
+
 from scripts.app_config import (
     AppConfig,
     ConfigError,
@@ -224,6 +235,49 @@ def _start_worker(
     t = threading.Thread(target=target, name=name, daemon=True)
     t.start()
     return t
+
+
+def _start_heartbeat_writer(
+    shutdown_event: threading.Event,
+    logger: Any,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    writer: Any = None,
+) -> threading.Thread:
+    """Start the watchdog heartbeat writer as a dedicated daemon thread.
+
+    Writes ``data/watchdog_heartbeat.json`` immediately (with the startup
+    log line ``[WATCHDOG] heartbeat updated``) and then every ``interval``
+    seconds until shutdown.  The heartbeat must NEVER be coupled to
+    ``_monitor_positions()``: monitoring can be slow, raise, or hang on an
+    exchange call, and none of that means the bot is dead — the Telegram
+    command center runs in its own thread and stays responsive.  A separate
+    thread keeps the heartbeat fresh for as long as the process runs, so
+    the watchdog (which restarts on stale heartbeats) cannot kill a
+    healthy bot just because position monitoring misbehaved.
+    """
+    if writer is None:
+        from scripts.pipeline_scheduler import write_heartbeat  # noqa: PLC0415
+        writer = write_heartbeat
+
+    def _writer_loop() -> None:
+        try:
+            writer()
+            logger.info("[WATCHDOG] heartbeat updated")
+        except Exception as exc:
+            logger.warning(f"[WATCHDOG] initial heartbeat write failed: {exc}")
+        while not shutdown_event.wait(interval):
+            try:
+                writer()
+            except Exception as exc:
+                logger.debug(f"[WATCHDOG] heartbeat write failed: {exc}")
+
+    thread = threading.Thread(
+        target=_writer_loop,
+        name="HeartbeatWriter",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def _send_telegram(notifier: Any, lines: list[str]) -> None:
@@ -1128,6 +1182,20 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown_handler)
 
     # ------------------------------------------------------------------
+    #  Watchdog heartbeat — dedicated daemon thread.
+    #
+    #  Started as early as possible (before the slow ServiceContainer /
+    #  paper-engine startup) so the heartbeat is fresh from the first
+    #  second.  It runs independently of position monitoring: a monitor
+    #  that is slow, raises, or hangs on an exchange call must NEVER stop
+    #  heartbeat updates, or the watchdog kills a healthy bot (Telegram
+    #  stays responsive in its own thread while the watchdog sees a stale
+    #  heartbeat file and restarts the process).
+    # ------------------------------------------------------------------
+    _heartbeat_thread = _start_heartbeat_writer(shutdown, logger)
+    logger.info(f"Watchdog heartbeat writer started (every {HEARTBEAT_INTERVAL_SECONDS:.0f}s)")
+
+    # ------------------------------------------------------------------
     #  Service Container — single source of all dependencies
     # ------------------------------------------------------------------
 
@@ -1551,13 +1619,16 @@ def main() -> None:
             _monitor_interval += 1
             if _monitor_interval >= 60:
                 _monitor_interval = 0
-                _monitor_positions(logger, _notifier, center, container=container)
-                # Write heartbeat so watchdog knows the bot is alive+responsive.
+                # Monitoring is best-effort: an exception here must never
+                # take down the keep-alive loop (a dead monitor used to
+                # stop heartbeat writes and make the watchdog kill a
+                # healthy bot).  The heartbeat is written by its own
+                # dedicated thread (_start_heartbeat_writer), so it stays
+                # fresh even while monitoring is failing or hung.
                 try:
-                    from scripts.pipeline_scheduler import write_heartbeat  # noqa: PLC0415
-                    write_heartbeat()
-                except Exception:
-                    pass
+                    _monitor_positions(logger, _notifier, center, container=container)
+                except Exception as exc:
+                    logger.warning(f"Position monitoring failed: {exc}")
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():

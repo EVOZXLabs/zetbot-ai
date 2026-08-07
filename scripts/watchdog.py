@@ -26,7 +26,8 @@ Behaviour
   every restart keeps standing by until the operator removes
   ``data/.watchdog_halt``.
 * Treats an alive-but-unresponsive bot as hung via its heartbeat file
-  (``data/watchdog_heartbeat.json``, written by the bot every ~60s). When the
+  (``data/watchdog_heartbeat.json``, written by the bot every ~30s from a
+  dedicated thread). When the
   heartbeat is older than ``HEARTBEAT_STALE_SECONDS`` (default 300) the
   watchdog re-checks after one interval before acting — a bot that merely
   resumed from device suspend refreshes the heartbeat and is left running. A
@@ -99,8 +100,9 @@ BOT_PID_FILE = "data/zetbot.pid"
 WATCHDOG_PID_FILE = "data/zetbot-watchdog.pid"
 
 # Heartbeat / pipeline-staleness thresholds
-# The bot writes data/watchdog_heartbeat.json every ~60s via main.py;
-# if the file hasn't been updated for HEARTBEAT_STALE_SECONDS the bot is
+# The bot writes data/watchdog_heartbeat.json every ~30s via a dedicated
+# thread in main.py; if the file hasn't been updated for
+# HEARTBEAT_STALE_SECONDS the bot is
 # considered hung (alive by PID but unresponsive).
 HEARTBEAT_FILE = "data/watchdog_heartbeat.json"
 HEARTBEAT_STALE_SECONDS = int(os.getenv("WATCHDOG_HEARTBEAT_STALE", "300"))   # 5 min
