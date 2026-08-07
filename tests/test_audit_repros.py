@@ -26,6 +26,11 @@ Repro 5 — two concurrent ``data/.notified_buys`` writers (startup daemon
     thread + pipeline scheduler) must not clobber each other's entry: every
     BUY_OPENED dedup write routes through
     ``scripts.paper_state_lock.add_notified_buy`` (serialized + atomic).
+
+Repro 6 — watchdog PIPELINE STALE must not spam: a freshly (re)started bot
+    with an old ``pipeline_last_run.json`` mtime is covered by a startup
+    grace period, and a genuinely stuck pipeline alerts at most once per
+    notification cooldown.
 """
 import json
 import os
@@ -401,3 +406,83 @@ class TestPaperStartupThreadLeak:
         done.set()
         startup_thread.join(timeout=5)
         assert not startup_thread.is_alive()
+
+
+# ============================================================================
+#  Repro 6 — watchdog PIPELINE STALE: startup grace + notify cooldown
+# ============================================================================
+
+class TestWatchdogPipelineStaleSpam:
+    def _make_wd(self, tmp_path: Any):
+        from scripts.watchdog import Watchdog
+        return Watchdog(project_root=str(tmp_path), interval=20.0)
+
+    def test_fresh_bot_with_old_pipeline_last_run_does_not_spam(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """FIXED: a bot that just (re)started must NOT emit PIPELINE STALE
+        alerts based on the OLD pipeline_last_run.json mtime from before the
+        downtime — the old behaviour alerted every interval until the first
+        cycle completed. The startup grace period suppresses the check; once
+        the grace elapses the check is re-armed."""
+        from scripts.watchdog import (
+            PIPELINE_STARTUP_GRACE_SECONDS,
+            PIPELINE_STALE_SECONDS,
+        )
+
+        wd = self._make_wd(tmp_path)
+        clock = {"t": 1_000_000.0}
+        wd._now = lambda: clock["t"]
+        # Bot started 60s ago (inside the grace window) and stays at that
+        # fixed start time while the clock advances.
+        started = clock["t"] - 60.0
+        wd._bot_start_time = lambda: started
+        wd._bot_running = lambda: True
+        wd._heartbeat_age = lambda: 30.0  # fresh — must not trigger heartbeat path
+        wd._pipeline_age = lambda: PIPELINE_STALE_SECONDS + 7200  # ancient mtime
+        wd._notify = MagicMock()
+
+        # Repeated checks across the first minutes: no PIPELINE STALE spam.
+        for _ in range(5):
+            assert wd.check_and_act() == "running"
+            clock["t"] += 20.0
+        wd._notify.assert_not_called()
+
+        # After the grace window the check is live again: a pipeline that is
+        # STILL stale alerts once.
+        clock["t"] += PIPELINE_STARTUP_GRACE_SECONDS + 60
+        assert wd.check_and_act() == "running"
+        assert wd._notify.call_count == 1
+
+    def test_stuck_pipeline_notifies_once_within_cooldown(self, tmp_path: Any) -> None:
+        """FIXED: a genuinely stuck pipeline must not re-alert on every
+        watchdog interval — after the first PIPELINE STALE notification,
+        further checks inside the cooldown only log, and the next alert
+        waits for the cooldown to elapse."""
+        from scripts.watchdog import (
+            PIPELINE_NOTIFY_COOLDOWN_SECONDS,
+            PIPELINE_STALE_SECONDS,
+        )
+
+        wd = self._make_wd(tmp_path)
+        clock = {"t": 1_000_000.0}
+        wd._now = lambda: clock["t"]
+        # Bot started long ago — well past the startup grace window.
+        wd._bot_start_time = lambda: clock["t"] - 3600.0
+        wd._bot_running = lambda: True
+        wd._heartbeat_age = lambda: 30.0  # fresh — must not trigger heartbeat path
+        wd._pipeline_age = lambda: PIPELINE_STALE_SECONDS + 60  # always stuck
+        wd._notify = MagicMock()
+
+        # First check alerts.
+        assert wd.check_and_act() == "running"
+        assert wd._notify.call_count == 1
+
+        # Many intervals within the cooldown: no repeated alerts.
+        for _ in range(5):
+            clock["t"] += 20.0
+            assert wd.check_and_act() == "running"
+        assert wd._notify.call_count == 1
+
+        # Cooldown elapsed -> the next check alerts again.
+        clock["t"] += PIPELINE_NOTIFY_COOLDOWN_SECONDS
+        assert wd.check_and_act() == "running"
+        assert wd._notify.call_count == 2

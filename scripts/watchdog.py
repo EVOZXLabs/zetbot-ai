@@ -37,6 +37,16 @@ Behaviour
   ``.watchdog_halt``.
 * Notifies via the existing Telegram notifier (``bot/notifier.py``), which
   reads ``TELEGRAM_*`` from ``.env``.
+* Watches pipeline progress via ``data/pipeline_last_run.json`` (written by
+  the scheduler every cycle). A pipeline quiet for more than
+  ``PIPELINE_STALE_SECONDS`` (default 1800) is reported as PIPELINE STALE —
+  informational only, the bot is NOT restarted for this. Two guards prevent
+  false/spammy alerts: a startup grace period
+  (``PIPELINE_STARTUP_GRACE_SECONDS``, default 600) suppresses the check for
+  a freshly (re)started bot whose old ``pipeline_last_run.json`` mtime
+  predates this run, and a notification cooldown
+  (``PIPELINE_NOTIFY_COOLDOWN_SECONDS``, default 3600) means a genuinely
+  stuck pipeline alerts at most once per hour, not every check interval.
 
 Run (foreground — under systemd, tmux, screen or termux-services)::
 
@@ -106,6 +116,17 @@ MAX_HEARTBEAT_STALE_RESTARTS = int(os.getenv("WATCHDOG_MAX_HEARTBEAT_STALE_RESTA
 # If it goes quiet for PIPELINE_STALE_SECONDS the bot may be stuck.
 PIPELINE_LAST_RUN_FILE = "data/pipeline_last_run.json"
 PIPELINE_STALE_SECONDS = int(os.getenv("WATCHDOG_PIPELINE_STALE", "1800"))    # 30 min
+
+# Pipeline-staleness is INFORMATIONAL, so two guards prevent false/spammy
+# alerts:
+#   * Startup grace — a bot that just (re)started must not be flagged as
+#     stale because pipeline_last_run.json still holds the OLD mtime from
+#     before the downtime. The check is suppressed for this long after the
+#     bot starts, giving the first pipeline cycle time to complete.
+#   * Notify cooldown — a genuinely stuck pipeline alerts at most once per
+#     this window, not once per watchdog interval (~20s).
+PIPELINE_STARTUP_GRACE_SECONDS = int(os.getenv("WATCHDOG_PIPELINE_STARTUP_GRACE", "600"))
+PIPELINE_NOTIFY_COOLDOWN_SECONDS = int(os.getenv("WATCHDOG_PIPELINE_NOTIFY_COOLDOWN", "3600"))
 
 
 def _ts() -> str:
@@ -187,6 +208,8 @@ class Watchdog:
         self._crash_times: list[float] = []
         self._manual_stop_notified: bool = False
         self._heartbeat_stale_streak: int = 0
+        self._bot_started_at: Optional[float] = None
+        self._last_pipeline_stale_notified_at: Optional[float] = None
         self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------
@@ -275,6 +298,7 @@ class Watchdog:
                 stderr=out,
             )
         self.last_returncode = None
+        self._bot_started_at = self._now()
 
     def _notify(self, text: str, error: bool = False) -> None:
         try:
@@ -355,6 +379,40 @@ class Watchdog:
             return time.time() - os.path.getmtime(path)
         except OSError:
             return None
+
+    def _bot_start_time(self) -> Optional[float]:
+        """Wall-clock time the bot (re)started, for the pipeline grace period.
+
+        When this watchdog spawned the bot, the spawn time is exact. When
+        attaching to an externally started bot, the mtime of its PID lock
+        file (``data/zetbot.pid``, written once at main.py startup) is a
+        close proxy. Returns None when unknown (no grace applied).
+        """
+        if self._bot_started_at is not None:
+            return self._bot_started_at
+        path = os.path.join(self.project_root, BOT_PID_FILE)
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def _in_pipeline_startup_grace(self) -> bool:
+        """True while the bot restarted too recently for the
+        ``pipeline_last_run.json`` mtime to be meaningful — it predates this
+        bot's lifetime, so a stale reading here is a false alarm."""
+        started = self._bot_start_time()
+        if started is None:
+            return False
+        return self._now() - started < PIPELINE_STARTUP_GRACE_SECONDS
+
+    def _pipeline_stale_notify_due(self) -> bool:
+        """True when a PIPELINE STALE notification is not on cooldown."""
+        if self._last_pipeline_stale_notified_at is None:
+            return True
+        return (
+            self._now() - self._last_pipeline_stale_notified_at
+            >= PIPELINE_NOTIFY_COOLDOWN_SECONDS
+        )
 
     def _kill_bot(self) -> None:
         """Force-stop the supervised bot (child or external PID)."""
@@ -466,20 +524,29 @@ class Watchdog:
                 return "heartbeat_stale"
 
             # --- Pipeline staleness check (informational only) ---
-            pl_age = self._pipeline_age()
-            if pl_age is not None and pl_age > PIPELINE_STALE_SECONDS:
-                self.logger.warning(
-                    "pipeline last run %.0fs ago (threshold %ds) — "
-                    "may be stuck; check logs",
-                    pl_age, PIPELINE_STALE_SECONDS,
-                )
-                self._notify(
-                    f"⚠️ *WATCHDOG* — PIPELINE STALE\n\n"
-                    f"No pipeline run recorded for {int(pl_age // 60)} min "
-                    f"(threshold {PIPELINE_STALE_SECONDS // 60} min).\n"
-                    f"Bot is alive — check logs for errors.",
-                    error=True,
-                )
+            # Suppressed during the startup grace period: right after a
+            # restart pipeline_last_run.json still holds the OLD mtime from
+            # before the downtime, so checking immediately would false-alert
+            # every interval until the first cycle completes. A genuinely
+            # stuck pipeline is additionally rate-limited by a notify
+            # cooldown — one alert per period, not one per check.
+            if not self._in_pipeline_startup_grace():
+                pl_age = self._pipeline_age()
+                if pl_age is not None and pl_age > PIPELINE_STALE_SECONDS:
+                    self.logger.warning(
+                        "pipeline last run %.0fs ago (threshold %ds) — "
+                        "may be stuck; check logs",
+                        pl_age, PIPELINE_STALE_SECONDS,
+                    )
+                    if self._pipeline_stale_notify_due():
+                        self._last_pipeline_stale_notified_at = self._now()
+                        self._notify(
+                            f"⚠️ *WATCHDOG* — PIPELINE STALE\n\n"
+                            f"No pipeline run recorded for {int(pl_age // 60)} min "
+                            f"(threshold {PIPELINE_STALE_SECONDS // 60} min).\n"
+                            f"Bot is alive — check logs for errors.",
+                            error=True,
+                        )
 
             self._heartbeat_stale_streak = 0
             return "running"
