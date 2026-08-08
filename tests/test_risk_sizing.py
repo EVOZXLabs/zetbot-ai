@@ -10,7 +10,9 @@ Covers:
 """
 
 import math
+import os
 from dataclasses import asdict
+from typing import Any
 
 import pytest
 
@@ -23,6 +25,28 @@ from scripts.risk_manager import (
     StopLossCalculator,
     TradeValidator,
 )
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    ``RiskManager.__init__`` reads existing open exposure from
+    ``data/paper_state.json`` / ``data/live_positions.json`` when
+    ``existing_exposure`` is not passed (the correct, safety-critical
+    portfolio-wide exposure-cap behaviour). Without isolation a RiskManager
+    built with ``existing_exposure=None`` inherits whatever OPEN positions
+    exist on disk -- e.g. a $5,100 BTC/USDT position -- which already exceeds
+    a 5% cap and collapses the remaining exposure budget to $0,
+    making position-size assertions non-deterministic. Redirecting
+    ``data/`` into ``tmp_path`` makes ``_existing_open_exposure()`` read an
+    empty state (0), so the sizing math is tested in isolation. The
+    production disk-read path is still exercised by the pipeline and by the
+    sibling tests that intentionally pass ``existing_exposure``.
+    """
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("data", exist_ok=True)
+    yield
 
 
 # ===================================================================
