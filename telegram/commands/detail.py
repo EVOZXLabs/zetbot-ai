@@ -39,7 +39,7 @@ class DetailCommand(BaseCommand):
 
         try:
             rt = get_realtime_service(ctx)
-            symbol = rt.resolve_symbol(symbol_query)
+            symbol = rt.resolve_symbol(symbol_query, chat_id=ctx.chat_id)
             a = rt.analyze(symbol)
         except RealtimeMarketError as exc:
             return build_message(

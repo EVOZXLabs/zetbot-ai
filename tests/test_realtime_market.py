@@ -16,19 +16,20 @@ uses (PairAnalyzer._from_ohlcv + _score_and_rank).
 
 import json
 import os
+import time
 from typing import Any
 
 import pytest
 
 from scripts.app_config import AppConfig
-from scripts.realtime_market import RealtimeMarketData
+from scripts.realtime_market import RealtimeMarketData, RealtimeMarketError
 from telegram.command_center import CommandCenter
 from telegram.commands.detail import DetailCommand
 from telegram.commands.market import MarketCommand
 from telegram.commands.pair import PairCommand
 from telegram.commands.signals import SignalsCommand
 from telegram.context import CommandContext
-from tests.conftest import FakeExchangeManager, FakeProvider, FakeServices
+from tests.conftest import FakeCCXTExchange, FakeExchangeManager, FakeProvider, FakeServices
 
 SENTINEL = "SENTINEL_STALE_SNAPSHOT"
 
@@ -186,6 +187,7 @@ class TestNoSnapshotReads:
             (SignalsCommand, ""),
             (MarketCommand, ""),
         ]:
+            ctx.services.realtime_market._chat_cooldown.pop(ctx.chat_id, None)
             result = _execute(cmd_cls, ctx, args)
             assert "BTC/USDT" in result or "Market Overview" in result or "Top Signals" in result
             assert "Realtime error" not in result
@@ -285,6 +287,7 @@ class TestCacheTTL:
         provider = FakeProvider(exchange="binance", quote="USDT")
         rt = RealtimeMarketData(
             FakeExchangeManager(provider), timeframe="1h", analysis_ttl=3600,
+            _public_exchange_factory=lambda name: FakeCCXTExchange(provider),
         )
 
         rt.analyze("BTC/USDT")
@@ -300,11 +303,36 @@ class TestCacheTTL:
         provider = FakeProvider(exchange="binance", quote="USDT")
         rt = RealtimeMarketData(
             FakeExchangeManager(provider), timeframe="1h", analysis_ttl=0,
+            _public_exchange_factory=lambda name: FakeCCXTExchange(provider),
         )
 
         rt.analyze("BTC/USDT")
         rt.analyze("BTC/USDT")
         assert provider.ohlcv_calls == 2  # TTL 0 -> every call refetches
+
+
+class TestChatCooldown:
+    def test_resolve_symbol_cooldown_blocks_rapid_calls(self) -> None:
+        provider = FakeProvider(exchange="binance", quote="USDT")
+        rt = RealtimeMarketData(
+            FakeExchangeManager(provider), timeframe="1h",
+            _public_exchange_factory=lambda name: FakeCCXTExchange(provider),
+        )
+        rt.resolve_symbol("BTC", chat_id="chat1")
+        with pytest.raises(RealtimeMarketError, match="wait a few seconds"):
+            rt.resolve_symbol("ETH", chat_id="chat1")
+        rt._chat_cooldown["chat1"] = time.time() - 4.0
+        rt.resolve_symbol("ETH", chat_id="chat1")
+
+    def test_top_candidates_cooldown_blocks_rapid_calls(self) -> None:
+        provider = FakeProvider(exchange="binance", quote="USDT")
+        rt = RealtimeMarketData(
+            FakeExchangeManager(provider), timeframe="1h",
+            _public_exchange_factory=lambda name: FakeCCXTExchange(provider),
+        )
+        rt.top_candidates(chat_id="chat1")
+        with pytest.raises(RealtimeMarketError, match="wait a few seconds"):
+            rt.top_candidates(chat_id="chat1")
 
 
 # ---------------------------------------------------------------------------

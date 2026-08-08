@@ -36,7 +36,7 @@ class PairCommand(BaseCommand):
 
         try:
             rt = get_realtime_service(ctx)
-            symbol = rt.resolve_symbol(query)
+            symbol = rt.resolve_symbol(query, chat_id=ctx.chat_id)
             a = rt.analyze(symbol)
         except RealtimeMarketError as exc:
             return build_message(

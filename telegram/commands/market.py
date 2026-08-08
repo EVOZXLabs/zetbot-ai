@@ -28,7 +28,7 @@ class MarketCommand(BaseCommand):
     def execute(self, ctx, args: str) -> str:
         try:
             rt = get_realtime_service(ctx)
-            symbols = rt.top_candidates(limit=_DEFAULT_TOP)
+            symbols = rt.top_candidates(limit=_DEFAULT_TOP, chat_id=ctx.chat_id)
             results = rt.analyze_many(symbols)
         except RealtimeMarketError as exc:
             return build_message(

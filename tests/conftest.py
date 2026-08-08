@@ -274,6 +274,28 @@ class FakeProvider:
         }
 
 
+class FakeCCXTExchange:
+    """Mimics a ccxt Exchange instance for tests, delegating to FakeProvider."""
+
+    def __init__(self, provider: FakeProvider) -> None:
+        self._provider = provider
+        self.markets: dict[str, Any] = {}
+
+    def load_markets(self) -> dict[str, Any]:
+        if not self.markets:
+            self.markets = self._provider.load_markets()
+        return self.markets
+
+    def fetch_ticker(self, symbol: str) -> dict[str, Any]:
+        return self._provider.get_ticker(symbol)
+
+    def fetch_tickers(self, symbols: list[str] | None = None) -> dict[str, Any]:
+        return self._provider.fetch_tickers(symbols)
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> list[list[float]]:
+        return self._provider.fetch_ohlcv(symbol, timeframe, limit)
+
+
 class FakeExchangeManager:
     """Minimal stand-in for scripts.exchange_manager.ExchangeManager."""
 
@@ -290,10 +312,14 @@ class FakeServices:
     """Minimal stand-in for ServiceContainer (exchange + config +
     realtime_market) — the only surface the realtime commands touch."""
 
-    def __init__(self, manager: FakeExchangeManager, config: Any) -> None:
+    def __init__(self, manager: FakeExchangeManager, config: Any, public_exchange_factory=None) -> None:
         from scripts.realtime_market import RealtimeMarketData  # noqa: PLC0415
         self.exchange = manager
         self.config = config
+        provider = manager.get_provider()
+        factory = public_exchange_factory or (lambda name: FakeCCXTExchange(provider))
         self.realtime_market = RealtimeMarketData(
-            manager, timeframe=getattr(config, "timeframe", "1h"),
+            manager,
+            timeframe=getattr(config, "timeframe", "1h"),
+            _public_exchange_factory=factory,
         )

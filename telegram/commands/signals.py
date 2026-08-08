@@ -32,7 +32,7 @@ class SignalsCommand(BaseCommand):
     def execute(self, ctx, args: str) -> str:
         try:
             rt = get_realtime_service(ctx)
-            symbols = rt.top_candidates()
+            symbols = rt.top_candidates(chat_id=ctx.chat_id)
             results = rt.analyze_many(symbols)
         except RealtimeMarketError as exc:
             return build_message(

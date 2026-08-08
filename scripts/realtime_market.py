@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from bot.data import get_cached_public_exchange
 from scripts.scanner import (
     MIN_CANDLES,
     OHLCV_LIMIT,
@@ -173,6 +174,7 @@ class RealtimeMarketData:
         analysis_ttl: float = ANALYSIS_TTL_SEC,
         ticker_ttl: float = TICKER_TTL_SEC,
         tickers_list_ttl: float = TICKERS_LIST_TTL_SEC,
+        _public_exchange_factory: Any = None,
     ) -> None:
         self._mgr = exchange_manager
         self._timeframe = timeframe or "1h"
@@ -183,6 +185,9 @@ class RealtimeMarketData:
         self._ticker_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._tickers_list_cache: tuple[float, dict[str, Any]] = (0.0, {})
         self._lock = threading.Lock()
+        self._public_exchange_factory = _public_exchange_factory or get_cached_public_exchange
+        self._chat_cooldown: dict[str, float] = {}
+        self._chat_cooldown_sec = 3.0
 
     # -- Active exchange context ------------------------------------------
 
@@ -207,25 +212,31 @@ class RealtimeMarketData:
         """
         return self._mgr.get_provider()
 
+    def _check_chat_cooldown(self, chat_id: str | None) -> None:
+        now = time.time()
+        if not chat_id:
+            return
+        last = self._chat_cooldown.get(chat_id, 0.0)
+        if now - last < self._chat_cooldown_sec:
+            raise RealtimeMarketError(
+                "Rate limit: please wait a few seconds before requesting "
+                "market data again."
+            )
+        self._chat_cooldown[chat_id] = now
+
     # -- Symbol resolution -------------------------------------------------
 
-    def resolve_symbol(self, query: str) -> str:
+    def resolve_symbol(self, query: str, chat_id: str | None = None) -> str:
         """Resolve a user query (``BTC``, ``BTC/USDT``) to a real market
         symbol on the ACTIVE exchange, quote-currency aware."""
+        self._check_chat_cooldown(chat_id)
         q = (query or "").strip().upper().replace(" ", "")
         if not q:
             raise RealtimeMarketError("No symbol provided.")
         quote = self.quote_currency
 
-        provider = self._provider()
-        markets = provider.load_markets()
-        if not markets:
-            raw_markets = provider.get_markets()
-            markets = {
-                m.get("symbol"): m
-                for m in raw_markets
-                if m.get("symbol")
-            }
+        exchange = self._public_exchange_factory(self.exchange_name)
+        markets = exchange.load_markets()
         if not markets:
             raise RealtimeMarketError(
                 f"Exchange '{self.exchange_name}': could not load market "
@@ -256,7 +267,7 @@ class RealtimeMarketData:
             if cached and now - cached[0] < self._ticker_ttl:
                 return cached[1]
 
-        ticker = self._provider().get_ticker(symbol)
+        ticker = self._public_exchange_factory(self.exchange_name).fetch_ticker(symbol)
         if not ticker or not ticker.get("last"):
             raise RealtimeMarketError(
                 f"Exchange '{self.exchange_name}': failed to fetch live "
@@ -285,8 +296,8 @@ class RealtimeMarketData:
         ticker = self.fetch_ticker(symbol)
         fetched_at = time.time()
 
-        provider = self._provider()
-        raw = provider.fetch_ohlcv(
+        exchange = self._public_exchange_factory(self.exchange_name)
+        raw = exchange.fetch_ohlcv(
             symbol, timeframe=self._timeframe, limit=OHLCV_LIMIT,
         )
         if not raw or len(raw) < MIN_CANDLES:
@@ -362,9 +373,10 @@ class RealtimeMarketData:
 
     # -- Candidate universe (for /signals, /market) ------------------------
 
-    def top_candidates(self, limit: int = DEFAULT_TOP_CANDIDATES) -> list[str]:
+    def top_candidates(self, limit: int = DEFAULT_TOP_CANDIDATES, chat_id: str | None = None) -> list[str]:
         """Top *limit* symbols by 24h quote volume on the active exchange,
         filtered to the active quote currency. Fully realtime."""
+        self._check_chat_cooldown(chat_id)
         now = time.time()
         with self._lock:
             cached_ts, cached = self._tickers_list_cache
@@ -373,7 +385,7 @@ class RealtimeMarketData:
             else:
                 tickers = {}
         if not tickers:
-            tickers = self._provider().fetch_tickers()
+            tickers = self._public_exchange_factory(self.exchange_name).fetch_tickers()
             if not tickers:
                 raise RealtimeMarketError(
                     f"Exchange '{self.exchange_name}': failed to fetch "
