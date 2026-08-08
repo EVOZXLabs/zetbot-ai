@@ -141,6 +141,9 @@ class _FakeSafeguard:
     def can_open_new_position(self) -> tuple[bool, str]:
         return True, "ok"
 
+    def set_planned_symbols(self, symbols: set[str]) -> None:
+        pass
+
 
 class _FakeContainer:
     def __init__(self, exchange: Any) -> None:

@@ -404,11 +404,53 @@ def _update_paper_on_closure(
 ) -> tuple[float, float]:
     """Update paper balance and order history when a position closes.
 
+    Idempotency guard (BUG-2): the pipeline's reconciliation AND the
+    monitor can close the same position in the same cycle (e.g. both
+    read positions.json as OPEN, both trigger the SL). If the pipeline's
+    provider already closed and credited the position (paper_state.json
+    shows it CLOSED), this function MUST NOT credit the wallet a second
+    time — it only keeps the positions.json/order-file bookkeeping in
+    sync and returns the pnl for notification.
+
+    Ghost positions (simulated by the Position stage but never executed
+    — absent from paper_state.json) must also never credit the wallet,
+    because their buy cost was never deducted.
+
     Returns:
         Tuple of (pnl, new_balance) for the caller to use in notifications.
     """
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
+
+    # ── Idempotency / ghost guard ────────────────────────────────────
+    # paper_state.json is the authoritative record of executed trades.
+    # A position that is CLOSED there was already credited by the
+    # provider's execute_sell; a position absent from there was never
+    # bought at all. In both cases skip every wallet mutation.
+    # When the ledger file does not exist at all (legacy/fresh setups)
+    # fall back to the old monitor-only accounting behavior.
+    try:
+        with open("data/paper_state.json") as f:
+            _state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _state = None
+    if _state is not None:
+        _vp = (_state.get("positions") or {}).get(symbol)
+        already_handled = _vp is None or _vp.get("status") == "CLOSED"
+    else:
+        _vp = None
+        already_handled = False
+    if already_handled:
+        pnl = (
+            new_pos.get("total_pnl", 0.0)
+            if isinstance(new_pos, dict)
+            else getattr(new_pos, "total_pnl", 0.0)
+        )
+        logger.debug(
+            f"Closure of {symbol} already handled by the pipeline "
+            f"(paper_state status={None if _vp is None else _vp.get('status')}) "
+            "— skipping wallet credit to avoid double-counting"
+        )
 
     remaining_qty = new_pos.get("remaining_qty", 0) if isinstance(new_pos, dict) else getattr(new_pos, "remaining_qty", 0)
     quantity = new_pos.get("quantity", 0) if isinstance(new_pos, dict) else getattr(new_pos, "quantity", 0)
@@ -418,17 +460,24 @@ def _update_paper_on_closure(
 
     qty = remaining_qty if remaining_qty > 0 else quantity
 
-    # Use ExecutionModel for accurate fee/slippage calculation
-    from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
-    sell_result = ExecutionModel.sell(exit_price, qty)
-    fill_price = sell_result["fill_price"]
-    fee = sell_result["fee"]
-    total_proceeds = sell_result["total_proceeds"]
+    if not already_handled:
+        # Use ExecutionModel for accurate fee/slippage calculation
+        from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
+        sell_result = ExecutionModel.sell(exit_price, qty)
+        fill_price = sell_result["fill_price"]
+        fee = sell_result["fee"]
+        total_proceeds = sell_result["total_proceeds"]
 
-    # Use same ExecutionModel for cost basis so both sides include slippage
-    buy_result = ExecutionModel.buy(entry_price_val, qty)
-    cost_basis = buy_result["total_cost"]
-    pnl = total_proceeds - cost_basis
+        # Use same ExecutionModel for cost basis so both sides include slippage
+        buy_result = ExecutionModel.buy(entry_price_val, qty)
+        cost_basis = buy_result["total_cost"]
+        pnl = total_proceeds - cost_basis
+    else:
+        fill_price = exit_price
+        fee = 0.0
+        total_proceeds = 0.0
+        cost_basis = 0.0
+        pnl = pnl
 
     # Update paper_balance.json
     try:
@@ -449,14 +498,15 @@ def _update_paper_on_closure(
         }
 
     pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) + total_proceeds, 2)
-    pb["total_trades"] = pb.get("total_trades", 0) + 1
-    if pnl > 0:
-        pb["winning_trades"] = pb.get("winning_trades", 0) + 1
-    else:
-        pb["losing_trades"] = pb.get("losing_trades", 0) + 1
-    total = pb.get("total_trades", 0)
-    pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
-    pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
+    if not already_handled:
+        pb["total_trades"] = pb.get("total_trades", 0) + 1
+        if pnl > 0:
+            pb["winning_trades"] = pb.get("winning_trades", 0) + 1
+        else:
+            pb["losing_trades"] = pb.get("losing_trades", 0) + 1
+        total = pb.get("total_trades", 0)
+        pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
+        pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
 
     # Use canonical MetricsManager.compute_snapshot() for ALL derived
     # accounting metrics (equity, unrealized_pnl, net_pnl, return_pct).
@@ -528,7 +578,12 @@ def _update_paper_on_closure(
     except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
         logger.warning(f"Failed to update positions.json: {exc}")
 
-    # Append closed order to paper_orders.json
+    # Append closed order to paper_orders.json (only for a closure this
+    # monitor actually executed — a pipeline-handled closure already has
+    # its SELL order recorded by the provider's execute_sell).
+    if already_handled:
+        return pnl, pb["final_balance"]
+
     order = {
         "id": f"monitor-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
         "symbol": symbol,
@@ -661,13 +716,29 @@ def _notify_existing_positions(
     logger: Any,
     notifier: Any,
 ) -> None:
-    """Send buy notifications for open positions not yet notified."""
+    """Send buy notifications for open positions not yet notified.
+
+    Only positions that actually exist in the paper ledger
+    (``paper_state.json``) are notified — a position that only exists in
+    ``positions.json`` (simulated by the Position stage but never
+    executed) is a ghost and must NOT generate a BUY_OPENED notification
+    (BUG-4: the smoke-test ghost THRESHOLD/IDR + BTC/USDT entries never
+    existed in the ledger yet still produced BUY_OPENED messages).
+    """
     NOTIFIED_FILE = "data/.notified_buys"
     try:
         notified: set[str] = set()
         if os.path.exists(NOTIFIED_FILE):
             with open(NOTIFIED_FILE) as f:
                 notified = set(line.strip() for line in f if line.strip())
+
+        # Authoritative ledger: only positions here were actually bought.
+        try:
+            with open("data/paper_state.json") as f:
+                _ledger = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _ledger = {}
+        ledger_positions = _ledger.get("positions") or {}
 
         with open("data/positions.json") as f:
             data = json.load(f)
@@ -677,6 +748,17 @@ def _notify_existing_positions(
             if sym in notified:
                 continue
             if not is_open(pos.get("status")):
+                continue
+
+            vp = ledger_positions.get(sym)
+            if vp is None or vp.get("status") != "OPEN":
+                # Ghost position — simulated by the Position stage but
+                # never executed in the paper ledger. No real BUY ever
+                # happened, so no BUY_OPENED notification may be sent.
+                logger.debug(
+                    f"Skipping BUY_OPENED for ghost position {sym} "
+                    "(not present as OPEN in paper_state.json)"
+                )
                 continue
 
             sent = _notify_buy_opened(

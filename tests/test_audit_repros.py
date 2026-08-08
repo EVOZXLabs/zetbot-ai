@@ -60,6 +60,22 @@ def _open_position(symbol: str) -> dict[str, Any]:
 # ============================================================================
 
 class TestNotifiedBuysMarkedOnFailure:
+    def _seed_ledger(self) -> None:
+        """The position must exist as OPEN in the authoritative paper
+        ledger — positions.json-only entries are simulated ghosts and are
+        intentionally never notified (BUG-4)."""
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "balance": 10000.0,
+                "positions": {
+                    "BTC/USDT": {
+                        "symbol": "BTC/USDT", "status": "OPEN",
+                        "quantity": 1.0, "remaining_qty": 1.0,
+                        "entry_price": 100.0, "current_price": 100.0,
+                    },
+                },
+            }, f)
+
     def test_failed_send_is_not_recorded_as_notified(self, tmp_path: Any, monkeypatch: Any) -> None:
         from main import _notify_existing_positions
 
@@ -67,6 +83,7 @@ class TestNotifiedBuysMarkedOnFailure:
         os.makedirs("data", exist_ok=True)
         with open("data/positions.json", "w") as f:
             json.dump({"positions": [_open_position("BTC/USDT")]}, f)
+        self._seed_ledger()
 
         notifier = MagicMock()
         notifier.notify_buy_opened.return_value = False  # send failed
@@ -84,6 +101,7 @@ class TestNotifiedBuysMarkedOnFailure:
         os.makedirs("data", exist_ok=True)
         with open("data/positions.json", "w") as f:
             json.dump({"positions": [_open_position("BTC/USDT")]}, f)
+        self._seed_ledger()
 
         failing = MagicMock()
         failing.notify_buy_opened.return_value = False
@@ -143,6 +161,17 @@ class TestEngineNotifyBuyNotDeduped:
         # Restart recovery re-runs for the same still-open position.
         with open("data/positions.json", "w") as f:
             json.dump({"positions": [_open_position("BTC/USDT")]}, f)
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "balance": 10000.0,
+                "positions": {
+                    "BTC/USDT": {
+                        "symbol": "BTC/USDT", "status": "OPEN",
+                        "quantity": 1.0, "remaining_qty": 1.0,
+                        "entry_price": 100.0, "current_price": 100.0,
+                    },
+                },
+            }, f)
         _notify_existing_positions(MagicMock(), notifier)
 
         # FIXED: no second BUY_OPENED for the same position -> no duplicate.
@@ -181,6 +210,17 @@ class TestEngineNotifyBuyNotDeduped:
         # Restart recovery re-sends it.
         with open("data/positions.json", "w") as f:
             json.dump({"positions": [_open_position("BTC/USDT")]}, f)
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "balance": 10000.0,
+                "positions": {
+                    "BTC/USDT": {
+                        "symbol": "BTC/USDT", "status": "OPEN",
+                        "quantity": 1.0, "remaining_qty": 1.0,
+                        "entry_price": 100.0, "current_price": 100.0,
+                    },
+                },
+            }, f)
         _notify_existing_positions(MagicMock(), notifier)
         assert notifier.notify_buy_opened.call_count == 2
 

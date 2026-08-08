@@ -77,6 +77,12 @@ class SafeGuard:
         # so the check never reads the real bot's live positions.json when
         # running in an isolated test environment.
         self._positions_path: str = "data/positions.json"
+        # Symbols for which a new position is being opened right now. The
+        # Position stage simulates READY plans into positions.json BEFORE the
+        # paper engine executes them; without this exclusion the guard would
+        # count the simulated position as already open and reject the real
+        # BUY of the same symbol (the smoke-test THRESHOLD/IDR incident).
+        self._planned_symbols: set[str] = set()
 
     def set_account_balance(self, balance: float) -> None:
         self._account_balance = balance
@@ -84,6 +90,12 @@ class SafeGuard:
     def set_positions_path(self, path: str) -> None:
         """Override the positions.json path (used in tests)."""
         self._positions_path = path
+
+    def set_planned_symbols(self, symbols: set[str]) -> None:
+        """Record which symbols are mid-open so the max-open-positions guard
+        does not treat their own simulated positions.json entries as a
+        blocking open position."""
+        self._planned_symbols = set(symbols)
 
     @staticmethod
     def _live_balance() -> float:
@@ -152,14 +164,29 @@ class SafeGuard:
             with open(self._positions_path) as f:
                 pos_data = json.load(f)
             from scripts.position_status import is_open  # noqa: PLC0415
-            open_count = sum(
-                1 for p in pos_data.get("positions", [])
-                if is_open(p.get("status"))
-            )
         except (FileNotFoundError, json.JSONDecodeError, ImportError):
-            open_count = 0
+            pos_data = {}
+            is_open = lambda status: False  # noqa: E731
 
         limit = self._max_open_positions
+        open_count = 0
+        not_open_symbols: list[str] = []
+        for p in pos_data.get("positions", []):
+            if not is_open(p.get("status")):
+                continue
+            symbol = p.get("symbol", "")
+            # A position simulated by the Position stage for a symbol that is
+            # being opened RIGHT NOW is not a blocking open position.
+            if symbol and symbol in self._planned_symbols:
+                not_open_symbols.append(symbol)
+                continue
+            open_count += 1
+        if not_open_symbols:
+            logger.debug(
+                "SafeGuard: excluding %d in-flight simulated position(s) "
+                "from max-open-positions check: %s",
+                len(not_open_symbols), ", ".join(sorted(not_open_symbols)),
+            )
         if open_count >= limit:
             return False, (
                 f"Max open positions reached: {open_count}/{limit} "

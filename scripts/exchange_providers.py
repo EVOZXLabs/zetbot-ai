@@ -37,6 +37,7 @@ def exchange_call_with_retry(
     label: str = "",
     retries: int = _MAX_EXCHANGE_RETRIES,
     record_failure: Optional[Callable[[], None]] = None,
+    exchange: str = "",
 ) -> T:
     """Call ``fn()`` with exponential-backoff retry on transient exchange errors.
 
@@ -45,14 +46,20 @@ def exchange_call_with_retry(
     Permanent errors (``ccxt.AuthenticationError``, bad-symbol, etc.)
     are re-raised immediately without retrying.
 
+    Every failure is logged with the exchange name, the method/symbol
+    label, and the CCXT exception CLASS (NetworkError / RequestTimeout /
+    ExchangeNotAvailable / …) so the root cause is visible in the log
+    without digging through tracebacks.
+
     Args:
         fn: Zero-argument callable that performs the exchange call.
-        label: Human-readable label for log messages.
+        label: Human-readable label for log messages (method + symbol).
         retries: Maximum retry attempts (default 3).
         record_failure: Optional callback called exactly once per failed
             attempt so callers can drive ``SafeGuard.record_exchange_failure()``.
             Total calls == number of attempts that actually raised an exception
             (never more).
+        exchange: Exchange name (e.g. ``"binance"``) for root-cause logging.
 
     Raises:
         The last exception from ``fn`` when all retries are exhausted.
@@ -62,6 +69,7 @@ def exchange_call_with_retry(
         ccxt.RequestTimeout,
         ccxt.ExchangeNotAvailable,
     )
+    where = f"{exchange + ': ' if exchange else ''}{label or fn.__name__}"
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
@@ -77,8 +85,9 @@ def exchange_call_with_retry(
                 except Exception:
                     pass
             _log.warning(
-                "Exchange call %r failed (attempt %d/%d): %s",
-                label or fn.__name__, attempt, retries, exc,
+                "Exchange call '%s' failed (attempt %d/%d): "
+                "%s — %s",
+                where, attempt, retries, type(exc).__name__, exc,
             )
             if attempt < retries:
                 delay = min(
@@ -89,7 +98,8 @@ def exchange_call_with_retry(
         except Exception as exc:
             # Non-transient exchange error — log and re-raise immediately.
             _log.warning(
-                "Exchange call %r non-transient error: %s", label or fn.__name__, exc,
+                "Exchange call '%s' non-transient error: %s — %s",
+                where, type(exc).__name__, exc,
             )
             raise
 
@@ -317,6 +327,7 @@ class BaseProvider:
             return exchange_call_with_retry(
                 lambda: dict(self._get_exchange().fetch_ticker(symbol)),
                 label=f"get_ticker({symbol})",
+                exchange=self.name,
             )
         except Exception:
             return {}
@@ -330,6 +341,7 @@ class BaseProvider:
                     symbol, timeframe, limit=limit,
                 ),
                 label=f"fetch_ohlcv({symbol})",
+                exchange=self.name,
             )
             return [list(map(float, r)) for r in result]
         except Exception:
@@ -340,6 +352,7 @@ class BaseProvider:
             return exchange_call_with_retry(
                 lambda: dict(self._get_exchange().fetch_balance()),
                 label="fetch_balance",
+                exchange=self.name,
             )
         except Exception as exc:
             if self.has_credentials():
@@ -383,7 +396,11 @@ class BaseProvider:
 
     def load_markets(self) -> dict[str, Any]:
         try:
-            self._markets_cache = dict(self._get_exchange().load_markets())
+            self._markets_cache = dict(exchange_call_with_retry(
+                lambda: self._get_exchange().load_markets(),
+                label="load_markets",
+                exchange=self.name,
+            ))
             return self._markets_cache
         except Exception:
             return {}
@@ -392,7 +409,11 @@ class BaseProvider:
         self, symbols: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_tickers(symbols))
+            return exchange_call_with_retry(
+                lambda: dict(self._get_exchange().fetch_tickers(symbols)),
+                label="fetch_tickers",
+                exchange=self.name,
+            )
         except Exception:
             return {}
 

@@ -29,7 +29,7 @@ from typing import Any, Callable, Optional
 from scripts.app_config import AppConfig
 from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
-from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES, is_open
 from scripts.paper_state_lock import (
     add_notified_buy,
     merge_positions,
@@ -572,29 +572,11 @@ class Pipeline:
             and self.container.order.is_live_enabled()
         )
 
-        allow_new = True
-        if self.container is not None:
-            ok, reason = self.container.safeguard.can_open_new_position()
-            if not ok:
-                self.logger.info(f"Pipeline new-order guard: {reason}")
-                allow_new = False
-
-        # Create the right provider for the mode
-        mode = "LIVE" if is_live else "PAPER"
-        if is_live:
-            provider = LiveExecutionProvider(
-                self.container.exchange,
-                self.config,
-            )
-        else:
-            provider = PaperExecutionProvider()
-
-        pipeline = ExecutionPipeline(
-            provider,
-            quote_currency=getattr(self.config, "quote_currency", "USDT"),
-        )
-
-        # Read READY plans
+        # Read READY plans (before the new-order guard so their symbols can
+        # be excluded from the max-open-positions count — the Position stage
+        # already simulated these into positions.json as OPEN, and counting
+        # them as blocking open positions would reject the very BUY that is
+        # about to execute them).
         import json, os  # noqa: PLC0415
 
         plan_path = "data/trade_plan.json"
@@ -609,6 +591,31 @@ class Pipeline:
                 ]
             except (json.JSONDecodeError, OSError):
                 pass
+
+        allow_new = True
+        if self.container is not None:
+            planned_symbols = {
+                p.get("symbol", "") for p in ready_plans if p.get("symbol")
+            }
+            self.container.safeguard.set_planned_symbols(planned_symbols)
+            ok, reason = self.container.safeguard.can_open_new_position()
+            if not ok:
+                self.logger.info(f"Pipeline new-order guard: {reason}")
+                allow_new = False
+
+        mode = "LIVE" if is_live else "PAPER"
+        if is_live:
+            provider = LiveExecutionProvider(
+                self.container.exchange,
+                self.config,
+            )
+        else:
+            provider = PaperExecutionProvider()
+
+        pipeline = ExecutionPipeline(
+            provider,
+            quote_currency=getattr(self.config, "quote_currency", "USDT"),
+        )
 
         # --- Unified BUY execution (paper or live) ---
         if allow_new:
@@ -670,6 +677,60 @@ class Pipeline:
         # --- Persist paper state (for Telegram / reporting) ---
         if not is_live:
             self._persist_paper_state(provider)
+            # Clean simulated-but-never-executed positions out of
+            # positions.json: any OPEN entry with no OPEN counterpart in
+            # the authoritative paper ledger is a ghost (the Position
+            # stage simulated it, execution rejected it). Ghosts must
+            # not keep producing BUY_OPENED notifications, inflating
+            # equity/exposure, or blocking new buys (BUG-4).
+            self._prune_ghost_positions(provider)
+
+    def _prune_ghost_positions(self, provider: Any) -> None:
+        """Close positions.json OPEN entries not backed by paper_state.
+
+        paper_state.json is the authoritative ledger of executed trades.
+        positions.json is written by the Position stage from READY plans
+        BEFORE execution; if the paper stage then rejects/skips a plan
+        (guard, insufficient balance, missing price), the simulated OPEN
+        entry would otherwise linger forever as a ghost.
+        """
+        import json, os  # noqa: PLC0415
+
+        try:
+            with open("data/paper_state.json") as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        ledger_positions = state.get("positions") or {}
+
+        pos_path = "data/positions.json"
+        try:
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+
+        pruned = False
+        for p in pos_data.get("positions", []):
+            if not is_open(p.get("status")):
+                continue
+            sym = p.get("symbol", "")
+            vp = ledger_positions.get(sym)
+            if vp is not None and vp.get("status") in OPEN_STATUSES:
+                continue
+            self.logger.warning(
+                f"Pruning ghost position {sym} from positions.json "
+                "(not present as OPEN in paper_state.json — simulated but "
+                "never executed)"
+            )
+            p["status"] = "CLOSED"
+            p["remaining_qty"] = 0.0
+            p["unrealized_pnl"] = 0.0
+            pruned = True
+
+        if pruned:
+            from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+            merge_positions(pos_data.get("positions", []))
 
     def _reconcile_positions(
         self,
@@ -883,23 +944,50 @@ class Pipeline:
 
     @paper_state_writes
     def _persist_paper_state(self, provider: Any) -> None:
-        """Persist paper provider state to balance/orders JSON files."""
+        """Persist paper provider state to balance/orders JSON files.
+
+        Equity is computed with the canonical ``MetricsManager.compute_snapshot``
+        so the invariant ``equity == cash + position_market_value`` always
+        holds: ``final_equity`` must NOT be set equal to ``final_balance``
+        while open positions exist (BUG-3 — the smoke-test /wallet report
+        showed Cash 997,663.60 / Open 49,883.18 / Total 1,047,546.78 while
+        ``paper_balance.json`` equity was stuck at 997,663.60).
+        """
         import json  # noqa: PLC0415
 
+        from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+
         balance = provider.get_balance()
+        # market value per open position: current_price × remaining_qty
+        open_positions: list[dict[str, Any]] = []
+        for vp in getattr(provider, "positions", {}).values():
+            if getattr(vp, "status", "") != "OPEN":
+                continue
+            open_positions.append({
+                "current_price": vp.current_price,
+                "remaining_qty": vp.remaining_qty,
+            })
+        snapshot = MetricsManager.compute_snapshot(
+            cash=balance,
+            realized_pnl=0.0,
+            initial_balance=0.0,
+            open_positions=open_positions,
+        )
+        equity = round(snapshot.equity, 2)
+
         bal_path = "data/paper_balance.json"
         try:
             with open(bal_path) as f:
                 pb = json.load(f)
             pb["final_balance"] = round(balance, 2)
-            pb["final_equity"] = round(balance, 2)
+            pb["final_equity"] = equity
             from scripts.paper_state_lock import atomic_write_json as _awj
             _awj(bal_path, pb, indent=2)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pb = {
                 "initial_balance": self.config.account_balance,
                 "final_balance": round(balance, 2),
-                "final_equity": round(balance, 2),
+                "final_equity": equity,
             }
             try:
                 from scripts.paper_state_lock import atomic_write_json as _awj

@@ -191,6 +191,24 @@ class TestBuyOpenedNotificationOnFill:
         with open("data/positions.json", "w") as f:
             json.dump(positions, f)
 
+        # The position must ALSO exist as OPEN in the authoritative paper
+        # ledger — a positions.json-only entry is a simulated ghost that
+        # never executed and must NOT produce a BUY_OPENED notification.
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "balance": 9900.0,
+                "positions": {
+                    "BTC/USDT": {
+                        "symbol": "BTC/USDT",
+                        "status": "OPEN",
+                        "quantity": 1.0,
+                        "remaining_qty": 1.0,
+                        "entry_price": 100.0,
+                        "current_price": 100.0,
+                    },
+                },
+            }, f)
+
         mock_logger = MagicMock()
         mock_notifier = MagicMock()
 
