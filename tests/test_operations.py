@@ -342,7 +342,7 @@ class TestConfigImportExport:
 
 
 class TestExchangeTest:
-    def test_test_exchange_returns_string(self) -> None:
+    def test_test_exchange_returns_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_cfg = MagicMock()
         mock_cfg.exchange = "binance"
         mock_cfg.api_key = ""
@@ -355,16 +355,12 @@ class TestExchangeTest:
         mock_ccxt_mod = MagicMock()
         mock_ccxt_mod.binance = lambda *a, **kw: mock_exchange
 
-        old_ccxt = sys.modules.pop("ccxt", None)
-        sys.modules["ccxt"] = mock_ccxt_mod
+        monkeypatch.setitem(sys.modules, "ccxt", mock_ccxt_mod)
 
         with patch("scripts.app_config.load_config", return_value=mock_cfg):
             from scripts.exchange_test import run_exchange_test
             result = run_exchange_test()
             assert isinstance(result, str)
-
-        if old_ccxt is not None:
-            sys.modules["ccxt"] = old_ccxt
 
 
 # ---------------------------------------------------------------------------

@@ -164,10 +164,22 @@ class TelegramCommandCenter:
         self._command_handlers: dict[str, Any] = {}
 
         _log("Telegram Command Center started (modular dispatch).")
+        try:
+            all_cmds = self._command_center.registry.get_all_commands()
+            public_count = sum(1 for m in all_cmds if not m.hidden)
+            admin_count = sum(1 for m in all_cmds if m.permission == "admin")
+            _log(f"Telegram commands registered: {public_count} public, {admin_count} admin")
+        except Exception:
+            pass
         if self._test_mode:
             _log(f"TEST MODE — simulating {len(_TEST_COMMANDS)} commands")
         else:
             _log(f"Listening for commands on chat {self._chat_id}")
+
+        # Register Telegram command menu (setMyCommands) so users see
+        # commands when typing "/" in the chat. Only call in non-test mode.
+        if not test_mode and self._token and self._chat_id:
+            self._register_telegram_menu()
 
     # ------------------------------------------------------------------
     #  Update ID persistence (prevents replay of old commands after restart)
@@ -188,6 +200,81 @@ class TelegramCommandCenter:
                 f.write(str(self._last_update_id))
         except OSError:
             pass
+
+    # ------------------------------------------------------------------
+    #  Telegram command menu (setMyCommands)
+    # ------------------------------------------------------------------
+
+    def _register_telegram_menu(self) -> None:
+        """Register the bot's command menu with Telegram so users see
+        commands when typing "/" in any chat.
+
+        Commands are grouped by category for the BotFather menu.  Hidden
+        and admin-only commands are excluded from the public menu but
+        remain functional for authorized users.
+        """
+        try:
+            meta_list = self._command_center.registry.get_all_commands()
+        except Exception as exc:
+            _log(f"Failed to enumerate commands for menu: {exc}")
+            return
+
+        trading = []
+        account = []
+        monitoring = []
+        system = []
+        admin = []
+
+        for meta in meta_list:
+            if meta.hidden:
+                continue
+            cmd = f"/{meta.name}"
+            entry: dict[str, str] = {
+                "command": cmd,
+                "description": meta.description[:100],
+            }
+            if meta.permission == "admin":
+                admin.append(entry)
+            else:
+                if meta.name in (
+                    "status", "positions", "signals", "signal", "detail",
+                    "buy", "sell", "portfolio", "performance", "wallet",
+                    "summary", "market",
+                ):
+                    trading.append(entry)
+                elif meta.name in ("balance", "exchange", "exchanges"):
+                    account.append(entry)
+                elif meta.name in ("health", "scan", "pipeline", "version", "logs"):
+                    monitoring.append(entry)
+                else:
+                    system.append(entry)
+
+        menu = []
+        menu.extend(trading)
+        menu.extend(account)
+        menu.extend(monitoring)
+        menu.extend(system)
+
+        if not menu:
+            _log("No public commands to register in Telegram menu")
+            return
+
+        url = API_BASE.format(token=self._token, method="setMyCommands")
+        payload: dict[str, Any] = {
+            "commands": menu,
+            "scope": {"type": "chat", "chat_id": int(self._chat_id)},
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=self._timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("ok"):
+                count = len(menu) + len(admin)
+                _log(f"Telegram command menu registered ({count} commands)")
+            else:
+                _log(f"setMyCommands returned ok=false: {data}")
+        except Exception as exc:
+            _log(f"Failed to register Telegram command menu: {exc}")
 
     # ------------------------------------------------------------------
     #  Public

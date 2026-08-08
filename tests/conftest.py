@@ -90,6 +90,22 @@ def _isolate_environ():
     os.environ.update(pytest_vars)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd():
+    """Safety net: no test may leak working-directory changes to others.
+
+    Some tests use ``os.chdir(tmp_path)`` directly instead of pytest's
+    ``monkeypatch.chdir``. This fixture guarantees the cwd is restored
+    after every test so later tests always start from the repo root.
+    """
+    original_cwd = os.getcwd()
+    yield
+    try:
+        os.chdir(original_cwd)
+    except OSError:
+        pass
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

@@ -346,6 +346,7 @@ class Notifier:
         exit_price: float = 0.0,
         profit: float = 0.0,
         holding_time: Optional[timedelta] = None,
+        level: str = "",
         **kwargs: Any,
     ) -> bool:
         """Send TAKE PROFIT HIT notification."""
@@ -359,9 +360,10 @@ class Notifier:
                 holding_time = timedelta()
             holding_str = fmt_holding(holding_time.total_seconds())
 
+            level_label = f" {level}" if level else ""
             text = build_message(
                 compact_header(),
-                f"🎯 *TAKE PROFIT HIT — {md_escape(symbol)}*\n"
+                f"🎯 *TAKE PROFIT{level_label} HIT — {md_escape(symbol)}*\n"
                 f"Profit {profit:+,.2f} {quote} · Held {holding_str}",
                 detail_block(
                     [f"Entry  {fp(entry_price)}", f"Exit   {fp(exit_price)}"],

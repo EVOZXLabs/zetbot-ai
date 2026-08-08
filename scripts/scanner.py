@@ -499,7 +499,13 @@ class MarketScanner:
         self.quote_currency: str = (
             getattr(config, "quote_currency", "") or "USDT"
         ).upper()
-        self.md = MarketData(exchange_name=self.exchange_name)
+
+        from bot.data import get_cached_public_exchange  # noqa: PLC0415
+        shared_exchange = get_cached_public_exchange(self.exchange_name)
+        self.md = MarketData(
+            exchange_name=self.exchange_name,
+            exchange=shared_exchange,
+        )
         self.threads = threads
         self.pair_raws: list[PairRaw] = []
 

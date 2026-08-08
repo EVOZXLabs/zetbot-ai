@@ -176,6 +176,7 @@ class MarketData:
         exchange_name: str = "binance",
         api_key: str = "",
         secret: str = "",
+        exchange: Any = None,
     ) -> None:
         """Initialize the market data fetcher.
 
@@ -184,9 +185,11 @@ class MarketData:
                 'tokocrypto', 'okx', 'gate', 'kucoin', 'mexc', 'indodax'.
             api_key: API key for authenticated endpoints.
             secret: API secret for authenticated endpoints.
-
-        Raises:
-            ValueError: If the exchange is not supported.
+            exchange: Pre-built ccxt exchange instance. When provided the
+                shared cached public client is used instead of building a
+                fresh instance — this collapses duplicate ``/api/pairs``
+                calls across the scanner, monitor, and pipeline into one
+                rate-limit budget per exchange.
         """
         import ccxt
         exchange_name = exchange_name.lower()
@@ -199,11 +202,14 @@ class MarketData:
             )
             raise ValueError(msg)
 
-        self.exchange: ccxt.Exchange = exchange_class({
-            "apiKey": api_key,
-            "secret": secret,
-            "enableRateLimit": True,
-        })
+        if exchange is not None:
+            self.exchange: ccxt.Exchange = exchange
+        else:
+            self.exchange = exchange_class({
+                "apiKey": api_key,
+                "secret": secret,
+                "enableRateLimit": True,
+            })
         self.exchange_name: str = exchange_name
 
         logger.info("MarketData initialized for %s", self.exchange_name)

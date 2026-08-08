@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -38,7 +38,7 @@ class TestMarketScannerExchangeResolution:
     def test_resolves_exchange_from_config(self, mock_md: Any) -> None:
         scanner = MarketScanner(config=_fake_config(exchange="okx"))
         assert scanner.exchange_name == "okx"
-        mock_md.assert_called_once_with(exchange_name="okx")
+        mock_md.assert_called_once_with(exchange_name="okx", exchange=ANY)
 
     @patch("scripts.scanner.MarketData")
     def test_resolves_each_supported_exchange(self, mock_md: Any) -> None:

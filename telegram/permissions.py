@@ -15,8 +15,9 @@ def configure(chat_id: str) -> None:
     global ALLOWED_CHAT_ID
     if not chat_id:
         return
+    ALLOWED_CHAT_IDS.clear()
     ALLOWED_CHAT_IDS.add(str(chat_id))
-    ALLOWED_CHAT_ID = str(chat_id)  # last-configured, kept for compat only
+    ALLOWED_CHAT_ID = str(chat_id)
 
 
 def is_authorized(ctx: Any) -> bool:

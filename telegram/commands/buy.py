@@ -21,8 +21,9 @@ class BuyCommand(BaseCommand):
 
         parts = args.strip().split()
         symbol = parts[0].upper()
-        if not symbol.endswith("/USDT"):
-            symbol = symbol.upper() + "/USDT"
+        qc = (getattr(ctx.config, "quote_currency", None) or "USDT").upper()
+        if not symbol.endswith(f"/{qc}"):
+            symbol = symbol.upper() + f"/{qc}"
 
         try:
             amount_usdt = float(parts[1]) if len(parts) > 1 else 0.0

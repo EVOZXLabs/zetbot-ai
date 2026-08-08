@@ -274,12 +274,14 @@ class ExecutionPipeline:
                                 holding = timedelta()
                         except (ValueError, TypeError):
                             pass
+                    level_label = hit_key.upper().replace("_HIT", "") if hit_key else ""
                     self._notifier.notify_take_profit(
                         symbol=symbol,
                         entry_price=entry,
                         exit_price=tp_price,
                         profit=pnl,
                         holding_time=holding,
+                        level=level_label,
                     )
                 except Exception:
                     pass
@@ -305,6 +307,29 @@ class ExecutionPipeline:
                     realized_pnl += close_pnl
                     remaining = 0
                     result["status"] = "STOPPED"
+
+                    if self._notifier is not None:
+                        try:
+                            from datetime import datetime, timezone, timedelta
+                            entry_time = position.get("entry_time") or position.get("opened_at", "")
+                            holding = timedelta()
+                            if entry_time:
+                                try:
+                                    dt = datetime.fromisoformat(entry_time.split("+")[0].split("Z")[0])
+                                    holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+                                    if holding.total_seconds() < 0:
+                                        holding = timedelta()
+                                except (ValueError, TypeError):
+                                    pass
+                            self._notifier.notify_stop_loss(
+                                symbol=symbol,
+                                entry_price=entry,
+                                exit_price=current_price,
+                                loss=close_pnl,
+                                holding_time=holding,
+                            )
+                        except Exception:
+                            pass
                 else:
                     _log.warning("SL sell failed for %s: %s — rolling back exit state", symbol, sl_result.error)
                     self._write_ahead(symbol, dict(result))
