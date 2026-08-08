@@ -615,6 +615,7 @@ class Pipeline:
         pipeline = ExecutionPipeline(
             provider,
             quote_currency=getattr(self.config, "quote_currency", "USDT"),
+            notifier=self._notifier,
         )
 
         # --- Unified BUY execution (paper or live) ---
@@ -826,6 +827,37 @@ class Pipeline:
                 old_status = pos.get("status")
                 new_status = reconciled.get("status")
                 if old_status != new_status and new_status in CLOSED_STATUSES:
+                    if not pos.get("closure_notified", False) and self._notifier is not None:
+                        try:
+                            from datetime import datetime, timedelta
+                            entry_time = reconciled.get("entry_time") or reconciled.get("opened_at", "")
+                            holding = timedelta()
+                            if entry_time:
+                                try:
+                                    dt = datetime.fromisoformat(entry_time.split("+")[0].split("Z")[0])
+                                    holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+                                    if holding.total_seconds() < 0:
+                                        holding = timedelta()
+                                except (ValueError, TypeError):
+                                    pass
+                            exit_reason = (
+                                "Stop Loss" if new_status == "STOPPED"
+                                else "Take Profit" if new_status == "CLOSED"
+                                else "Strategy Exit"
+                            )
+                            self._notifier.notify_position_closed(
+                                symbol=sym,
+                                entry_price=reconciled.get("entry_price", 0),
+                                exit_price=current_price,
+                                pnl=reconciled.get("total_pnl", 0),
+                                pnl_pct=reconciled.get("floating_pnl_pct", 0),
+                                balance=provider.get_balance(),
+                                exit_reason=exit_reason,
+                                holding_time=holding,
+                            )
+                            pos["closure_notified"] = True
+                        except Exception:
+                            pass
                     self.logger.info(
                         f"Position {sym}: {old_status} → {new_status} "
                         f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {qc})"
@@ -946,51 +978,88 @@ class Pipeline:
     def _persist_paper_state(self, provider: Any) -> None:
         """Persist paper provider state to balance/orders JSON files.
 
-        Equity is computed with the canonical ``MetricsManager.compute_snapshot``
-        so the invariant ``equity == cash + position_market_value`` always
-        holds: ``final_equity`` must NOT be set equal to ``final_balance``
-        while open positions exist (BUG-3 — the smoke-test /wallet report
-        showed Cash 997,663.60 / Open 49,883.18 / Total 1,047,546.78 while
-        ``paper_balance.json`` equity was stuck at 997,663.60).
+        ALL derived accounting metrics are recomputed from the canonical
+        ``MetricsManager.compute_snapshot()`` so ``paper_balance.json``
+        can never drift: ``net_pnl``, ``total_return_pct``,
+        ``realized_pnl``, ``unrealized_pnl``, trade counts, and win rate
+        are always consistent with the current balance and open positions.
         """
         import json  # noqa: PLC0415
 
         from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
 
         balance = provider.get_balance()
-        # market value per open position: current_price × remaining_qty
-        open_positions: list[dict[str, Any]] = []
-        for vp in getattr(provider, "positions", {}).values():
-            if getattr(vp, "status", "") != "OPEN":
-                continue
-            open_positions.append({
-                "current_price": vp.current_price,
-                "remaining_qty": vp.remaining_qty,
-            })
-        snapshot = MetricsManager.compute_snapshot(
-            cash=balance,
-            realized_pnl=0.0,
-            initial_balance=0.0,
-            open_positions=open_positions,
-        )
-        equity = round(snapshot.equity, 2)
 
+        realized_pnl = 0.0
+        closed_positions = []
+        open_positions = []
+        for vp in getattr(provider, "positions", {}).values():
+            status = getattr(vp, "status", "")
+            realized_pnl += getattr(vp, "realized_pnl", 0.0)
+            if status != "OPEN":
+                closed_positions.append(vp)
+            else:
+                open_positions.append({
+                    "current_price": getattr(vp, "current_price", 0.0),
+                    "remaining_qty": getattr(vp, "remaining_qty", 0.0),
+                    "unrealized_pnl": getattr(vp, "unrealized_pnl", 0.0),
+                })
+
+        total_trades = len(closed_positions)
+        winning_trades = sum(
+            1 for vp in closed_positions if getattr(vp, "total_pnl", 0) > 0
+        )
+        losing_trades = total_trades - winning_trades
+        win_rate = (winning_trades / total_trades * 100.0) if total_trades else 0.0
+        gross_profit = sum(
+            getattr(vp, "total_pnl", 0) for vp in closed_positions
+            if getattr(vp, "total_pnl", 0) > 0
+        )
+        gross_loss = abs(sum(
+            getattr(vp, "total_pnl", 0) for vp in closed_positions
+            if getattr(vp, "total_pnl", 0) <= 0
+        ))
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0
+            else (0.0 if gross_profit == 0 else 0.0)
+        )
+
+        initial = self.config.account_balance
         bal_path = "data/paper_balance.json"
         try:
             with open(bal_path) as f:
                 pb = json.load(f)
-            pb["final_balance"] = round(balance, 2)
-            pb["final_equity"] = equity
-            from scripts.paper_state_lock import atomic_write_json as _awj
-            _awj(bal_path, pb, indent=2)
+            initial = pb.get("initial_balance", initial)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pb = {
-                "initial_balance": self.config.account_balance,
-                "final_balance": round(balance, 2),
-                "final_equity": equity,
-            }
-            try:
-                from scripts.paper_state_lock import atomic_write_json as _awj
-                _awj(bal_path, pb, indent=2)
-            except OSError:
-                pass
+            pb = {}
+
+        snapshot = MetricsManager.compute_snapshot(
+            cash=balance,
+            realized_pnl=realized_pnl,
+            initial_balance=initial,
+            open_positions=open_positions,
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=win_rate,
+            profit_factor=profit_factor,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
+        )
+
+        pb["final_balance"] = round(balance, 2)
+        pb["final_equity"] = round(snapshot.equity, 2)
+        pb["realized_pnl"] = round(realized_pnl, 2)
+        pb["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
+        pb["net_pnl"] = round(snapshot.net_pnl, 2)
+        pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
+        pb["total_trades"] = total_trades
+        pb["winning_trades"] = winning_trades
+        pb["losing_trades"] = losing_trades
+        pb["win_rate"] = round(win_rate, 2)
+        pb["profit_factor"] = round(profit_factor, 2)
+        pb["gross_profit"] = round(gross_profit, 2)
+        pb["gross_loss"] = round(gross_loss, 2)
+
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(bal_path, pb, indent=2)

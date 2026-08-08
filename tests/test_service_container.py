@@ -539,11 +539,12 @@ class TestMetricsAccountSync:
         os.makedirs("data", exist_ok=True)
         with open("data/paper_balance.json", "w") as f:
             json.dump({
-                "final_balance": 10000.0,
-                "final_equity": 10500.0,
+                "initial_balance": 10000.0,
+                "final_balance": 10200.0,
+                "final_equity": 10200.0,
                 "realized_pnl": 200.0,
-                "unrealized_pnl": 500.0,
-                "net_pnl": 700.0,
+                "unrealized_pnl": 0.0,
+                "net_pnl": 200.0,
             }, f)
         with open("data/positions.json", "w") as f:
             json.dump({"positions": [{
@@ -556,5 +557,5 @@ class TestMetricsAccountSync:
         # No open positions (CLOSED doesn't count)
         assert s["open_positions"] == 0
         assert s["unrealized_pnl"] == 0.0
-        assert s["equity"] == 10000.0
-        assert s["net_pnl"] == 200.0  # only realized
+        assert s["equity"] == pytest.approx(10200.0)
+        assert s["net_pnl"] == pytest.approx(200.0)  # equity - initial_balance

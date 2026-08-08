@@ -43,15 +43,18 @@ class ExecutionPipeline:
     Args:
         provider: ExecutionProvider (Paper or Live)
         quote_currency: e.g. "USDT"
+        notifier: optional Notifier for Telegram TP/SL notifications
     """
 
     def __init__(
         self,
         provider: ExecutionProvider,
         quote_currency: str = "USDT",
+        notifier: Any = None,
     ) -> None:
         self._provider = provider
         self._quote = quote_currency
+        self._notifier = notifier
 
     # ------------------------------------------------------------------
     #  Public API
@@ -257,6 +260,29 @@ class ExecutionPipeline:
             realized_pnl += pnl
             remaining -= sell_qty
             result[hit_key] = True
+
+            if self._notifier is not None:
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    entry_time = position.get("entry_time") or position.get("opened_at", "")
+                    holding = timedelta()
+                    if entry_time:
+                        try:
+                            dt = datetime.fromisoformat(entry_time.split("+")[0].split("Z")[0])
+                            holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+                            if holding.total_seconds() < 0:
+                                holding = timedelta()
+                        except (ValueError, TypeError):
+                            pass
+                    self._notifier.notify_take_profit(
+                        symbol=symbol,
+                        entry_price=entry,
+                        exit_price=tp_price,
+                        profit=pnl,
+                        holding_time=holding,
+                    )
+                except Exception:
+                    pass
 
         # --- Process SL ---
         if sl_hit and remaining > 0:

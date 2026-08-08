@@ -263,9 +263,9 @@ class TestPipelineReportCanonical:
         from main import _build_summary
         lines = _build_summary([], _cfg())
         text = "\n".join(lines)
-        # net_pnl = realized + unrealized, computed from raw data — the
+        # net_pnl = equity - initial_balance, computed from raw data — the
         # raw file has no net_pnl key at all.
-        assert "Net PnL" in text and "+597.14" in text, text
+        assert "Net PnL" in text and "+363.97" in text, text
         assert "Unrealized PnL" in text and "+298.57" in text, text
         # equity = cash + market value of open positions.
         assert "Equity" in text and "1,000,363.97" in text, text
@@ -322,7 +322,7 @@ class TestHealthSnapshotCanonical:
             patch("scripts.health._check_exchange", return_value=(True, "binance")),
         ):
             snap = monitor._gather()
-        assert snap["net_pnl"] == pytest.approx(597.14, abs=0.01)
+        assert snap["net_pnl"] == pytest.approx(363.97, abs=0.01)
         assert snap["balance"] == pytest.approx(965253.18, abs=0.01)
         assert snap["equity"] == pytest.approx(1000363.97, abs=0.01)
 

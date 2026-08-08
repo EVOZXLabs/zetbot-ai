@@ -374,8 +374,8 @@ class TestHealthMonitor:
         with open(os.path.join(tmp_path, "paper_balance.json"), "w") as f:
             json.dump({
                 "initial_balance": 1_000_000.0,
-                "final_balance": 972_462.60,
-                "final_equity": 972_462.60,
+                "final_balance": 1_000_000.0,
+                "final_equity": 1_000_000.0,
                 "net_pnl": 250.00,  # stale leftover
             }, f)
         with open(os.path.join(tmp_path, "positions.json"), "w") as f:
@@ -387,7 +387,7 @@ class TestHealthMonitor:
         monitor = HealthMonitor(logger=_FakeLogger(), config=cfg, interval=60.0)
 
         net_pnl = monitor._gather()["net_pnl"]
-        # No open positions and no realized PnL recorded → 0.00, never the
+        # No open positions and balance == initial_balance → 0.00, never the
         # stale raw key (+250.00).
         assert net_pnl == pytest.approx(0.0)
         assert net_pnl != 250.00

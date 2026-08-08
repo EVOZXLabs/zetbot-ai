@@ -354,7 +354,8 @@ class TestEquityIncludesPositionValues:
         assert a.position_value == pytest.approx(8388.0, abs=0.01)
         assert a.equity == pytest.approx(9977.08, abs=0.01)
         assert a.unrealized_pnl == pytest.approx(-10.92)
-        assert a.net_pnl == pytest.approx(-10.92)
+        # net_pnl = equity - initial_balance = 9977.08 - 10000 = -22.92
+        assert a.net_pnl == pytest.approx(-22.92)
         assert a.total_return_pct == pytest.approx(-0.2292, abs=0.01)
         # Exposure = position_value / equity * 100
         expected_exposure = (8388.0 / 9977.08) * 100

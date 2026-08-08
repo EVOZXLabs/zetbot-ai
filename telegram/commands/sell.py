@@ -55,4 +55,33 @@ class SellCommand(BaseCommand):
         message, should_sync = format_order_outcome("Sell", symbol, result)
         if should_sync:
             ctx.services.order.sync_position(result)
+
+        if result.status in ("FILLED", "EXECUTED"):
+            try:
+                from datetime import datetime, timezone, timedelta
+                pos = next(
+                    (p for p in positions if p.get("symbol") == symbol),
+                    None,
+                )
+                if pos is not None:
+                    entry_time = pos.get("entry_time") or pos.get("opened_at", "")
+                    holding = timedelta()
+                    if entry_time:
+                        try:
+                            dt = datetime.fromisoformat(entry_time.split("+")[0].split("Z")[0])
+                            holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+                            if holding.total_seconds() < 0:
+                                holding = timedelta()
+                        except (ValueError, TypeError):
+                            pass
+                    exit_price = getattr(result, "filled_price", 0) or pos.get("current_price", 0)
+                    ctx.services.notification.notify_close(
+                        symbol=symbol,
+                        pnl=pos.get("total_pnl", 0),
+                        reason="Manual Close",
+                        exit_price=exit_price,
+                    )
+            except Exception:
+                pass
+
         return message

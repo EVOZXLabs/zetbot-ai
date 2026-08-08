@@ -204,12 +204,12 @@ class MetricsManager:
 
         Parameters are raw inputs — no pre-computed derived values.
 
-        Invariants (always true, by construction):
-            equity == cash + position_market_value
-            net_pnl == realized_pnl + unrealized_pnl
-            exposure_pct == (position_value / equity * 100) if equity > 0 else 0
-            total_return_pct == ((equity - initial_balance) / initial_balance) * 100
-        """
+    Invariants (always true, by construction):
+        equity == balance + position_market_value
+        net_pnl == equity - initial_balance
+        return_pct == ((equity - initial_balance) / initial_balance * 100)
+        exposure_pct == (position_value / equity * 100) if equity > 0 else 0
+    """
         open_count = len(open_positions)
 
         # Compute from raw position data
@@ -222,7 +222,7 @@ class MetricsManager:
         )
 
         equity = cash + position_market_value
-        net_pnl = realized_pnl + unrealized_pnl
+        net_pnl = equity - initial_balance
         position_value = equity - cash
         exposure_pct = (position_value / equity * 100.0) if equity > 0 else 0.0
         total_return_pct = (
