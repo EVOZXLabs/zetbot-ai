@@ -26,6 +26,12 @@ import requests
 logger = logging.getLogger("ZetBot")
 
 
+def _test_mode_enabled() -> bool:
+    """True when the process was started in TEST_MODE (daemon smoke runs)."""
+    import os
+    return os.getenv("TEST_MODE", "").lower() in ("1", "true", "yes")
+
+
 class Notifier:
     """Centralized Telegram notification sender.
 
@@ -150,6 +156,15 @@ class Notifier:
 
         if self._testing:
             logger.debug("[TG] Testing mode — send suppressed")
+            return True
+
+        if _test_mode_enabled():
+            # TEST_MODE=true (daemon test runs, subprocess smoke tests)
+            # must NEVER reach api.telegram.org: notifications are mocked
+            # as delivered so callers behave as if the message went out,
+            # but no network request is made and no retry can block
+            # startup or shutdown in an offline sandbox.
+            logger.debug("[TG] TEST_MODE — Telegram send suppressed")
             return True
 
         url = self.API_BASE.format(token=self._token)

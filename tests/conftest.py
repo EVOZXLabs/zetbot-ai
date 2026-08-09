@@ -106,6 +106,23 @@ def _isolate_cwd():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _no_cached_live_exchange():
+    """Safety net: never leak a live exchange client between tests.
+
+    ``bot.data`` keeps a process-global TTL cache of real ccxt clients
+    (``_client_cache``) behind ``get_cached_public_exchange()``. A test
+    that falls back to the real cache (instead of injecting a fake
+    factory) would then reuse a live client built by an earlier test —
+    silently reaching the network. Flush the cache around every test so
+    no live client survives across tests.
+    """
+    import bot.data as _bot_data  # noqa: PLC0415
+    _bot_data.clear_public_data_cache()
+    yield
+    _bot_data.clear_public_data_cache()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
