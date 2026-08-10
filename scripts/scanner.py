@@ -42,6 +42,16 @@ TOP_N = 50
 THREADS = 8
 MIN_VOLUME_24H = 50_000  # skip pairs below $50K daily volume
 
+# OHLCV cache — the scanner used to issue one fetch_ohlcv() HTTP request
+# per pair per cycle (~395 requests on Indodax), which tripped the
+# exchange's per-IP rate limit (HTTP 429) and knocked the whole pipeline
+# out for minutes. Candle data for a given timeframe only changes every
+# candle interval, so freshly fetched candles are cached (file-backed,
+# bounded) and reused across cycles instead of re-fetched.
+OHLCV_CACHE_PATH = "data/scanner_ohlcv_cache.json"
+OHLCV_CACHE_TTL = 900             # seconds: refetch candles after this (15 min)
+OHLCV_CACHE_MAX_ENTRIES = 500     # bound the cache file/memory (symbols)
+
 # Weights for overall score (must sum to 1.0)
 W_TREND = 0.30
 W_MOMENTUM = 0.25
@@ -71,6 +81,101 @@ def _is_leveraged(base: str) -> bool:
 
 def _is_stablecoin(base: str) -> bool:
     return base.upper() in STABLECOINS
+
+
+# ---------------------------------------------------------------------------
+#  OHLCV cache (rate-limit fix)
+# ---------------------------------------------------------------------------
+#  File-backed, bounded, thread-safe best-effort cache. Loaded once per
+#  process, refreshed whenever new candles are fetched. Entries are keyed
+#  by exchange+symbol so the same symbol on different exchanges can never
+#  share (wrong) candles.
+
+_ohlcv_cache: dict[str, Any] = {}
+_ohlcv_cache_loaded = False
+_ohlcv_cache_lock = threading.Lock()
+
+
+def _load_ohlcv_cache() -> dict[str, Any]:
+    """Load the OHLCV cache from disk exactly once (module state)."""
+    global _ohlcv_cache, _ohlcv_cache_loaded
+    if not _ohlcv_cache_loaded:
+        with _ohlcv_cache_lock:
+            if not _ohlcv_cache_loaded:
+                try:
+                    with open(OHLCV_CACHE_PATH) as f:
+                        _ohlcv_cache = json.load(f)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    _ohlcv_cache = {}
+                _ohlcv_cache_loaded = True
+    return _ohlcv_cache
+
+
+def _ohlcv_cache_key(exchange_name: str, symbol: str) -> str:
+    return f"{exchange_name.lower()}:{symbol}"
+
+
+def _cached_ohlcv(
+    exchange_name: str,
+    symbol: str,
+    timeframe: str = TIMEFRAME,
+) -> list | None:
+    """Return fresh cached candles for (exchange, symbol) or None."""
+    entry = _load_ohlcv_cache().get(_ohlcv_cache_key(exchange_name, symbol))
+    if entry is None:
+        return None
+    if entry.get("timeframe") != timeframe:
+        return None
+    fetched = entry.get("fetched_at", 0)
+    if time.time() - float(fetched) >= OHLCV_CACHE_TTL:
+        return None
+    candles = entry.get("candles")
+    return candles if isinstance(candles, list) else None
+
+
+def _cache_ohlcv(
+    exchange_name: str,
+    symbol: str,
+    timeframe: str,
+    candles: list,
+) -> None:
+    """Store candles in the cache (bounded + pruned). Fail-soft: a cache
+    write error must never break the scan."""
+    cache = _load_ohlcv_cache()
+    with _ohlcv_cache_lock:
+        cache[_ohlcv_cache_key(exchange_name, symbol)] = {
+            "fetched_at": time.time(),
+            "timeframe": timeframe,
+            "candles": candles,
+        }
+        # Bound the cache: drop the oldest entries when it overflows.
+        if len(cache) > OHLCV_CACHE_MAX_ENTRIES:
+            oldest = sorted(
+                cache.items(),
+                key=lambda kv: float(kv[1].get("fetched_at", 0)),
+            )
+            for key, _ in oldest[: len(cache) - OHLCV_CACHE_MAX_ENTRIES]:
+                cache.pop(key, None)
+        try:
+            os.makedirs(os.path.dirname(OHLCV_CACHE_PATH) or ".", exist_ok=True)
+            tmp_path = OHLCV_CACHE_PATH + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(cache, f)
+            os.replace(tmp_path, OHLCV_CACHE_PATH)
+        except OSError:
+            pass
+
+
+def clear_ohlcv_cache() -> None:
+    """Drop the in-memory OHLCV cache (used by tests).
+
+    Marks the cache as loaded so subsequent calls do NOT re-read a stale
+    ``data/scanner_ohlcv_cache.json`` from a previous run.
+    """
+    global _ohlcv_cache, _ohlcv_cache_loaded
+    with _ohlcv_cache_lock:
+        _ohlcv_cache = {}
+        _ohlcv_cache_loaded = True
 
 
 # ---------------------------------------------------------------------------
@@ -427,14 +532,23 @@ class PairAnalyzer:
 
     @classmethod
     def analyze(cls, pair: PairRaw, exchange_name: str) -> PairAnalysis:
-        """Fetch OHLCV from the CEX (ccxt), calculate indicators, return analysis."""
+        """Fetch OHLCV from the CEX (ccxt), calculate indicators, return analysis.
+
+        Serves fresh candles from the file-backed OHLCV cache when
+        possible so the exchange is not hit with one fetch per pair per
+        cycle (Indodax 429 rate-limit fix).
+        """
         try:
-            exchange = cls._get_exchange(exchange_name)
-            raw = exchange.fetch_ohlcv(
-                symbol=pair.symbol,
-                timeframe=TIMEFRAME,
-                limit=OHLCV_LIMIT,
-            )
+            raw = _cached_ohlcv(exchange_name, pair.symbol)
+            if raw is None:
+                exchange = cls._get_exchange(exchange_name)
+                raw = exchange.fetch_ohlcv(
+                    symbol=pair.symbol,
+                    timeframe=TIMEFRAME,
+                    limit=OHLCV_LIMIT,
+                )
+                if raw:
+                    _cache_ohlcv(exchange_name, pair.symbol, TIMEFRAME, raw)
             return cls._from_ohlcv(pair, raw)
         except Exception as e:
             return PairAnalysis(
@@ -654,11 +768,24 @@ class MarketScanner:
         stats["low_volume"] = len(valid_pairs) - len(liquid_pairs)
         print(f"        Low vol : {stats['low_volume']} (< {MIN_VOLUME_24H:,.0f} USDT/d)")
 
+        # Rate-limit guard: analyzing EVERY liquid pair means one
+        # fetch_ohlcv() request per pair per cycle (395 on Indodax), which
+        # trips the exchange's per-IP rate limit (HTTP 429) and fails the
+        # whole pipeline for minutes. Analyze only the TOP_N most liquid
+        # pairs by 24h volume — downstream decision/risk only consume the
+        # top DECISION_TOP_N of these anyway.
+        liquid_pairs.sort(key=lambda p: p.volume_24h, reverse=True)
+        analyze_pairs = liquid_pairs[:TOP_N]
+        stats["volume_capped"] = len(liquid_pairs) - len(analyze_pairs)
+        if stats["volume_capped"]:
+            print(f"        Capped  : {stats['volume_capped']} "
+                  f"(analyzing top {len(analyze_pairs)} by volume)")
+
         # 3. OHLCV & indicators
-        print(f"  [3/4] Analyzing {len(liquid_pairs)} pairs "
+        print(f"  [3/4] Analyzing {len(analyze_pairs)} pairs "
               f"({self.threads} threads) …", flush=True)
         t0 = time.time()
-        analyses = self.analyze_all(liquid_pairs)
+        analyses = self.analyze_all(analyze_pairs)
         ohlcv_elapsed = time.time() - t0
 
         ok = [a for a in analyses if a.status == "ok"]

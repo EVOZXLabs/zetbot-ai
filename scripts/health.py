@@ -31,6 +31,17 @@ BOT_VERSION = "v0.5.0"
 SCANNER_TIMEOUT = 7200        # seconds before scanner data is considered stale (default 2h)
 SCANNER_CRITICAL = 86400      # seconds before scanner data is considered critical (default 24h)
 
+# Internet probes — deliberately NOT api.binance.com: Binance is blocked
+# by Indonesian ISPs (Kominfo), so a binance-based probe reported FAIL on
+# a perfectly healthy connection and pushed users toward unnecessary VPNs.
+# These neutral endpoints are reachable in Indonesia (and everywhere else);
+# first success wins, so a single flaky probe never trips the health check.
+_INTERNET_PROBES = (
+    "https://www.gstatic.com/generate_204",
+    "https://1.1.1.1",
+    "https://www.google.com",
+)
+
 
 class HealthMonitor:
     """Periodically check real component health in a background thread."""
@@ -180,14 +191,23 @@ class HealthMonitor:
 
 
 def _check_internet() -> tuple[bool, float]:
-    """Check internet connectivity via a fast HTTPS HEAD request."""
+    """Check internet connectivity via fast HTTPS probes.
+
+    Probes a small list of neutral, exchange-independent endpoints
+    (Google generate_204, Cloudflare 1.1.1.1, google.com) instead of a
+    single exchange API — those are geo-blocked in several regions
+    (e.g. Binance in Indonesia), which made a working connection report
+    ``internet=FAIL`` and implied a VPN was needed when it wasn't.
+    """
     t0 = time.time()
-    try:
-        requests.get("https://api.binance.com/api/v3/ping", timeout=5)
-        latency = round((time.time() - t0) * 1000, 1)
-        return True, latency
-    except requests.RequestException:
-        return False, 0.0
+    for url in _INTERNET_PROBES:
+        try:
+            requests.get(url, timeout=5)
+            latency = round((time.time() - t0) * 1000, 1)
+            return True, latency
+        except requests.RequestException:
+            continue
+    return False, 0.0
 
 
 _exchange_check_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
