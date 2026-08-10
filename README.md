@@ -17,6 +17,15 @@ Supported Exchanges:
 
 ---
 
+> ## 👋 Baru di sini? Pengguna HP Android?
+>
+> Baca **[Panduan Instalasi 5 Menit (QUICKSTART.md)](QUICKSTART.md)** —
+> panduan langkah demi langkah untuk **Termux**, tanpa laptop dan tanpa
+> perlu tahu Python. Semua cukup disalin-tempel: `bash install.sh` →
+> `bash run.sh`.
+
+---
+
 # Features
 
 ## Trading Engine
@@ -164,6 +173,10 @@ Available commands:
 ---
 
 # Quick Start
+
+> **On a phone (Termux)?** Follow the 5-minute guide:
+> **[QUICKSTART.md](QUICKSTART.md)** — install, configure, run, stop,
+> update, logs, and uninstall with copy-paste commands.
 
 ## Install Dependencies
 
