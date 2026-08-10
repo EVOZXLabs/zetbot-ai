@@ -296,7 +296,8 @@ class TestSpecificCommands:
         """BUG-3 regression: a position missing ``cost_basis`` must not show
         its whole market value as profit (VEX/IDR showed "+586,941.66 IDR" —
         exactly the position size). When entry == current the derived cost
-        basis makes PnL ~0."""
+        basis makes PnL ~0. The card renders in the ACCOUNT quote currency
+        (VEX/IDR position on an IDR account)."""
         import json  # noqa: PLC0415
         from telegram.commands.positions import PositionsCommand
 
@@ -311,7 +312,10 @@ class TestSpecificCommands:
                 "stop_loss": 1000.0,
             }]}, f)
 
-        result = _execute(PositionsCommand, _make_ctx())
+        cfg_kwargs = dict(BASE_CFG.__dict__)
+        cfg_kwargs["quote_currency"] = "IDR"
+        ctx = _make_ctx(config=AppConfig(**cfg_kwargs))
+        result = _execute(PositionsCommand, ctx)
         assert "VEX/IDR" in result
         # The fake profit (position market value) must NOT appear.
         assert "+1,187,314.59 IDR" not in result

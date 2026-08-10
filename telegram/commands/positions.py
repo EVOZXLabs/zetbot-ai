@@ -114,6 +114,14 @@ class PositionsCommand(BaseCommand):
         if not open_positions:
             return build_message(compact_header(), "No open positions.")
 
+        # Account quote currency — never the symbol's own suffix: a
+        # normalized symbol like BTC/USDT on an Indodax/IDR account must
+        # display PnL in IDR (the units every number is actually in).
+        if ctx.services is not None:
+            quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+        else:
+            quote = getattr(ctx.config, "quote_currency", "USDT") or "USDT"
+
         cards = [compact_header()]
 
         for p in open_positions:
@@ -181,9 +189,9 @@ class PositionsCommand(BaseCommand):
                 bar = progress_bar(pct_to_tp, 100, 10)
                 progress_line = f"Entry → TP1  {bar} {pct_to_tp:.0f}%\n"
 
-            quote = symbol.split("/")[1] if "/" in symbol else "USDT"
+            quote_upper = quote.upper()
             card = (
-                f"{emoji} *{symbol}*  {fmt_pnl(pnl, quote)} ({pnl_pct:+.2f}%)\n"
+                f"{emoji} *{symbol}*  {fmt_pnl(pnl, quote_upper)} ({pnl_pct:+.2f}%)\n"
                 f"{progress_line}"
                 f"🕒 Held {holding_str}"
             )

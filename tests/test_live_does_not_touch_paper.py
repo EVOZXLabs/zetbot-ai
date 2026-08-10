@@ -315,6 +315,11 @@ class TestPaperMonitorStillUpdatesPaper:
         import ccxt  # noqa: PLC0415
         import bot.data as _bd  # noqa: PLC0415
 
+        # This test simulates a binance/USDT account (the fake exchange
+        # returns USDT balances) — pin the account quote so the currency
+        # guard in reconcile_position accepts the BTC/USDT position.
+        monkeypatch.setenv("QUOTE_CURRENCY", "USDT")
+
         notifier = _RecordingNotifier()
         monkeypatch.setattr(ccxt, "binance", _FakeBinance)
 

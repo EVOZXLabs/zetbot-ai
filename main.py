@@ -348,6 +348,45 @@ _exit_reason_map = {
 }
 
 
+def _holding_time_from_position(position: Any) -> "timedelta":
+    """Holding duration for a close notification, from the entry timestamp.
+
+    The reconciled position dict never carries ``holding_hours``
+    (``reconcile_position`` does not set it) and the paper engine's
+    ``VirtualPosition`` records do not persist it — so the close
+    notification used to report "0s" even for a position held for months,
+    while ``/positions`` (which reads ``opened_at``) showed the real
+    duration. Derive the duration from ``entry_time`` / ``opened_at`` the
+    same way the positions command does, falling back to ``holding_hours``
+    only when no timestamp exists.
+    """
+    from datetime import datetime, timezone, timedelta  # noqa: PLC0415
+
+    if isinstance(position, dict):
+        entry_raw = position.get("entry_time") or position.get("opened_at", "")
+        holding_hours = position.get("holding_hours", 0) or 0
+    else:
+        entry_raw = (
+            getattr(position, "entry_time", "")
+            or getattr(position, "opened_at", "")
+            or ""
+        )
+        holding_hours = getattr(position, "holding_hours", 0) or 0
+
+    if entry_raw:
+        try:
+            dt = datetime.fromisoformat(str(entry_raw).split("+")[0].split("Z")[0])
+            holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+            if holding.total_seconds() > 0:
+                return holding
+        except (ValueError, TypeError):
+            pass
+
+    if holding_hours:
+        return timedelta(hours=float(holding_hours))
+    return timedelta()
+
+
 def _notify_closure(
     logger: Any,
     notifier: Any,
@@ -378,8 +417,6 @@ def _notify_closure(
 
     # Send Telegram notification via centralized notifier
     try:
-        from datetime import timedelta  # noqa: PLC0415
-        holding_secs = new_pos.holding_hours * 3600
         notifier.notify_position_closed(
             symbol=symbol,
             entry_price=new_pos.entry_price,
@@ -388,7 +425,7 @@ def _notify_closure(
             pnl_pct=new_pos.floating_pnl_pct,
             balance=new_balance,
             exit_reason=exit_reason,
-            holding_time=timedelta(seconds=holding_secs),
+            holding_time=_holding_time_from_position(new_pos),
         )
     except Exception as exc:
         logger.warning(f"Failed to send close notification for {symbol}: {exc}")
@@ -446,6 +483,15 @@ def _update_paper_on_closure(
             if isinstance(new_pos, dict)
             else getattr(new_pos, "total_pnl", 0.0)
         )
+        # The paper-state ledger is the engine's finalized accounting. When
+        # the engine already closed + credited this position, its persisted
+        # total_pnl is authoritative — prefer it over the reconciled value
+        # so the Telegram notification shows the SAME pnl the engine booked.
+        if _vp is not None and _vp.get("total_pnl") is not None:
+            try:
+                pnl = float(_vp["total_pnl"])
+            except (TypeError, ValueError):
+                pass
         logger.debug(
             f"Closure of {symbol} already handled by the pipeline "
             f"(paper_state status={None if _vp is None else _vp.get('status')}) "
@@ -902,7 +948,25 @@ def _monitor_positions(
     else:
         provider = PaperExecutionProvider()
 
-    pipeline = ExecutionPipeline(provider)
+    # Account quote currency drives both the TP/SL currency guard in
+    # reconcile_position (mismatched-currency positions are never closed
+    # on stale prices) and any pipeline-side rejection message.
+    _monitor_quote = None
+    if container is not None:
+        try:
+            _monitor_quote = getattr(container, "_config", None).quote_currency
+        except Exception:
+            _monitor_quote = None
+    if not _monitor_quote:
+        try:
+            from scripts.app_config import load_config as _load_cfg  # noqa: PLC0415
+            _monitor_quote = _load_cfg().quote_currency
+        except Exception:
+            _monitor_quote = os.getenv("QUOTE_CURRENCY", "USDT")
+    pipeline = ExecutionPipeline(
+        provider,
+        quote_currency=(_monitor_quote or "USDT").upper(),
+    )
 
     if is_live:
         # LIVE exits go through the shared per-symbol gate so a TP/SL
@@ -971,8 +1035,6 @@ def _monitor_positions(
             )
 
             try:
-                from datetime import timedelta
-                holding_secs = float(reconciled.get("holding_hours", 0) * 3600)
                 notifier.notify_position_closed(
                     symbol=sym,
                     entry_price=reconciled.get("entry_price", 0),
@@ -981,7 +1043,7 @@ def _monitor_positions(
                     pnl_pct=reconciled.get("floating_pnl_pct", 0),
                     balance=new_balance,
                     exit_reason=exit_reason,
-                    holding_time=timedelta(seconds=holding_secs),
+                    holding_time=_holding_time_from_position(reconciled),
                 )
             except Exception as exc:
                 logger.warning(f"Failed to send close notification for {sym}: {exc}")
@@ -1116,7 +1178,6 @@ def _monitor_live_closure(
     the "Balance now ..." line comes from the real exchange balance, so
     no paper file is read or written here.
     """
-    from datetime import datetime, timedelta  # noqa: PLC0415
     from scripts.exit_gate import save_position  # noqa: PLC0415
 
     if reconciled is None:
@@ -1139,7 +1200,6 @@ def _monitor_live_closure(
         )
 
         try:
-            holding_secs = float(reconciled.get("holding_hours", 0) * 3600)
             notifier.notify_position_closed(
                 symbol=sym,
                 entry_price=reconciled.get("entry_price", 0),
@@ -1148,7 +1208,7 @@ def _monitor_live_closure(
                 pnl_pct=reconciled.get("floating_pnl_pct", 0),
                 balance=new_balance,
                 exit_reason=exit_reason,
-                holding_time=timedelta(seconds=holding_secs),
+                holding_time=_holding_time_from_position(reconciled),
             )
         except Exception as exc:
             logger.warning(f"Failed to send close notification for {sym}: {exc}")

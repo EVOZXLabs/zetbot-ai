@@ -302,7 +302,11 @@ class Notifier:
 
         Returns True on success, False otherwise.
         """
-        quote = symbol.split("/")[1] if symbol and "/" in symbol else self._quote_currency
+        # Currency label MUST come from the account's quote currency, never
+        # from the symbol string: a normalized universal symbol like
+        # ``BTC/USDT`` must not print "USDT" on an Indodax/IDR account (the
+        # PnL/balance numbers are always in the account quote currency).
+        quote = self._quote_currency
         logger.info("[TG] Sending notification: POSITION_CLOSED %s (PnL: %.2f %s)", symbol, pnl, quote)
         try:
             from telegram.ui import (
@@ -370,7 +374,7 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, detail_block, build_message
             from telegram.formatter import fmt_price as fp, fmt_holding, md_escape
 
-            quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
+            quote = self._quote_currency
             if holding_time is None:
                 holding_time = timedelta()
             holding_str = fmt_holding(holding_time.total_seconds())
@@ -406,7 +410,7 @@ class Notifier:
             from telegram.ui import compact_header, wib_now, detail_block, build_message
             from telegram.formatter import fmt_price as fp, fmt_holding, md_escape
 
-            quote = symbol.split("/")[1] if symbol and "/" in symbol else "USDT"
+            quote = self._quote_currency
             if holding_time is None:
                 holding_time = timedelta()
             holding_str = fmt_holding(holding_time.total_seconds())

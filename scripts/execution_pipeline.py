@@ -185,6 +185,23 @@ class ExecutionPipeline:
         if status not in OPEN_STATUSES:
             return position
 
+        # Currency guard: never TP/SL-reconcile a position whose symbol
+        # quote does not match the account quote currency. A restored
+        # legacy symbol like ``BTC/USDT`` on an Indodax/IDR account would
+        # otherwise be closed on prices fetched for a different market
+        # (or stale last-known prices), booking a bogus PnL in the wrong
+        # units. Log once and leave the position untouched — the operator
+        # can close it manually or correct the record.
+        if self._quote:
+            _sym_quote = symbol.split("/")[1].upper() if "/" in symbol else ""
+            if _sym_quote and _sym_quote != self._quote.upper():
+                _log.warning(
+                    "Skipping TP/SL for %s: symbol quote %s != account "
+                    "quote %s (mismatched/legacy position)",
+                    symbol, _sym_quote, self._quote.upper(),
+                )
+                return position
+
         entry = position.get("entry_price", 0)
         qty = position.get("quantity", 0)
         remaining = position.get("remaining_qty", qty)

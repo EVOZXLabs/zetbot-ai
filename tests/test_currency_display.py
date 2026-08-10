@@ -161,35 +161,58 @@ class TestNotifierCurrencyDisplay:
         assert n._quote_currency == "USDT"
 
     # ------------------------------------------------------------------
-    #  Per-trade notifications still use symbol-based extraction
-    # ------------------------------------------------------------------
+    #  Per-trade notifications use the ACCOUNT quote currency
+    #  ------------------------------------------------------------------
+    #  A normalized universal symbol like BTC/USDT on an Indodax/IDR
+    #  account must display IDR — the units the PnL/balance numbers are
+    #  actually in. Deriving the label from the symbol string produced
+    #  "USDT" on IDR accounts (audit: IDR/USDT mismatch).
 
-    def test_position_closed_uses_symbol_quote(self) -> None:
+    def test_position_closed_uses_account_quote(self) -> None:
         n = _make_notifier(quote_currency="IDR")
+        with patch.object(n, "_send") as mock_send:
+            n.notify_position_closed(
+                symbol="BTC/USDT", pnl=1_487.92, balance=20_822.50,
+                entry_price=50_000.0, exit_price=65_000.0,
+            )
+        text = mock_send.call_args[0][0]
+        # PnL and balance figures carry the ACCOUNT quote currency (IDR),
+        # never the symbol suffix (USDT) that produced the mismatch.
+        assert "Profit 1,487.92 IDR" in text
+        assert "Balance now 20,822.50 IDR" in text
+        assert "Profit 1,487.92 USDT" not in text
+        assert "Balance now 20,822.50 USDT" not in text
+
+    def test_take_profit_uses_account_quote(self) -> None:
+        n = _make_notifier(quote_currency="IDR")
+        with patch.object(n, "_send") as mock_send:
+            n.notify_take_profit(
+                symbol="ETH/USDT", profit=50_000.0,
+                entry_price=3_000.0, exit_price=3_100.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "Profit +50,000.00 IDR" in text
+        assert "Profit +50,000.00 USDT" not in text
+
+    def test_stop_loss_uses_account_quote(self) -> None:
+        n = _make_notifier(quote_currency="IDR")
+        with patch.object(n, "_send") as mock_send:
+            n.notify_stop_loss(
+                symbol="SOL/USDT", loss=-30_000.0,
+                entry_price=150.0, exit_price=145.0,
+            )
+        text = mock_send.call_args[0][0]
+        assert "Loss -30,000.00 IDR" in text
+        assert "Loss -30,000.00 USDT" not in text
+
+    def test_position_closed_usdt_account(self) -> None:
+        """USDT accounts still render USDT (regression: no hardcode flip)."""
+        n = _make_notifier(quote_currency="USDT")
         with patch.object(n, "_send") as mock_send:
             n.notify_position_closed(
                 symbol="BTC/USDT", pnl=100.0, balance=10_100.0,
                 entry_price=50_000.0, exit_price=51_000.0,
             )
         text = mock_send.call_args[0][0]
-        assert "USDT" in text  # extracted from symbol BTC/USDT, not from config IDR
-
-    def test_take_profit_uses_symbol_quote(self) -> None:
-        n = _make_notifier(quote_currency="IDR")
-        with patch.object(n, "_send") as mock_send:
-            n.notify_take_profit(
-                symbol="ETH/USDT", profit=50.0,
-                entry_price=3_000.0, exit_price=3_100.0,
-            )
-        text = mock_send.call_args[0][0]
-        assert "USDT" in text  # from symbol, not config
-
-    def test_stop_loss_uses_symbol_quote(self) -> None:
-        n = _make_notifier(quote_currency="IDR")
-        with patch.object(n, "_send") as mock_send:
-            n.notify_stop_loss(
-                symbol="SOL/USDT", loss=-30.0,
-                entry_price=150.0, exit_price=145.0,
-            )
-        text = mock_send.call_args[0][0]
-        assert "USDT" in text  # from symbol, not config
+        assert "Profit 100.00 USDT" in text
+        assert "Balance now 10,100.00 USDT" in text
