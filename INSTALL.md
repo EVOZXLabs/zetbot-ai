@@ -1,23 +1,51 @@
 # ZetBot AI — Installation Guide
 
-## Quick Install (Ubuntu / Debian)
+## One-Click Install (recommended)
+
+After cloning the repository, run exactly **one command**:
 
 ```bash
-# Clone the repository
-git clone https://github.com/anomalyco/zetbot-ai.git
+git clone https://github.com/EVOZXLabs/zetbot-ai.git
 cd zetbot-ai
-
-# Run the installer
 bash install.sh
 ```
 
+Works on **Termux (Android)**, Debian/Ubuntu, and macOS. No manual input is
+required during installation, and it is **safe to run again** (idempotent).
+
 The installer will:
-1. Check Python 3.10+
-2. Create a virtual environment
-3. Install all dependencies
-4. Create required folders (`data/`, `logs/`, `backups/`)
-5. Launch the Setup Wizard
-6. Start ZetBot AI
+
+1. Detect the platform (Termux is checked first)
+2. Update system packages (`pkg update && pkg upgrade` on Termux)
+3. Install required system packages:
+   `git`, `python`, `clang`, `rust`, `openssl`, `libffi` (Termux names)
+4. Create a virtual environment (`.venv/`)
+5. Install `requirements.txt` into the virtual environment
+6. Create `.env` from `.env.example` (an existing `.env` is never overwritten)
+7. Create the required folders (`data/`, `logs/`, `backups/`)
+8. Run a self-check and show a clear PASS/FAIL summary
+
+### Commands after installation
+
+| Command | What it does |
+| --- | --- |
+| `bash install.sh` | Install / repair the environment (safe to re-run) |
+| `bash run.sh` | Start the bot (Termux: supervised in tmux) |
+| `bash update.sh` | Pull the latest code + update dependencies |
+| `bash uninstall.sh` | Remove the bot (your config + data are preserved) |
+
+To start the bot for the first time:
+
+```bash
+bash run.sh
+```
+
+The bot runs in **paper trading mode by default** (`PAPER_MODE=true`) — no real
+funds are at risk until you edit `.env`. Configure credentials with:
+
+```bash
+nano .env
+```
 
 ---
 
@@ -37,12 +65,12 @@ sudo apt update
 sudo apt install -y python3 python3-pip python3-venv git
 
 # Clone the repository
-git clone https://github.com/anomalyco/zetbot-ai.git
+git clone https://github.com/EVOZXLabs/zetbot-ai.git
 cd zetbot-ai
 
 # Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -62,10 +90,10 @@ python3 main.py
 ```bash
 # Install Termux from F-Droid (not Google Play)
 pkg update && pkg upgrade
-pkg install -y python git clang libffi openssl
+pkg install -y python git clang rust openssl libffi
 
 # Clone the repository
-git clone https://github.com/anomalyco/zetbot-ai.git
+git clone https://github.com/EVOZXLabs/zetbot-ai.git
 cd zetbot-ai
 
 # Install dependencies
@@ -77,8 +105,8 @@ mkdir -p data logs backups
 # Run Setup Wizard
 python3 main.py --setup
 
-# Start the bot
-python3 main.py
+# Start the bot (recommended: tmux so it survives when Termux is minimized)
+bash run.sh
 ```
 
 ### VPS (Any Linux)
@@ -92,12 +120,12 @@ sudo apt update
 sudo apt install -y python3 python3-pip python3-venv git
 
 # Clone the repository
-git clone https://github.com/anomalyco/zetbot-ai.git
+git clone https://github.com/EVOZXLabs/zetbot-ai.git
 cd zetbot-ai
 
 # Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -151,13 +179,16 @@ Install a newer Python version:
 sudo apt install -y software-properties-common
 sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt install -y python3.11 python3.11-venv
+
+# Termux
+pkg install -y python
 ```
 
 ### "pip install fails"
 
 ```bash
 # On Termux
-pkg install -y python python-pip clang libffi openssl
+pkg install -y python clang rust openssl libffi
 
 # On Ubuntu
 pip install --upgrade pip setuptools wheel

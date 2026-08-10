@@ -67,14 +67,20 @@ fi
 
 # --- Install any new dependencies ---------------------------------------
 echo -e "${YELLOW}[5/5] Installing new dependencies...${NC}"
-PYTHON="python3"
-if command -v python3 &>/dev/null; then
-    PYTHON="python3"
-elif command -v python &>/dev/null; then
-    PYTHON="python"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON=""
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+    echo -e "  ${DIM}Using virtualenv: ${SCRIPT_DIR}/.venv${NC}"
+else
+    if command -v python3 &>/dev/null; then
+        PYTHON="python3"
+    elif command -v python &>/dev/null; then
+        PYTHON="python"
+    fi
 fi
 
-if [ -f "requirements.txt" ]; then
+if [ -f "requirements.txt" ] && [ -n "$PYTHON" ]; then
     $PYTHON -m pip install --upgrade pip -q 2>/dev/null || true
     $PYTHON -m pip install -r requirements.txt
     echo -e "  ${GREEN}Dependencies updated${NC}"
