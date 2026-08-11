@@ -206,8 +206,8 @@ class TestTopNVolumeCap:
             for i in range(20)
         }
         mock_ex = mock_md.return_value.exchange
-        mock_ex.fetch_markets.return_value = markets
-        mock_ex.fetch_tickers.return_value = tickers
+        mock_md.return_value.fetch_markets.return_value = markets
+        mock_md.return_value.fetch_tickers.return_value = tickers
         mock_ex.fetch_ohlcv.return_value = _candles()
 
         # Route OHLCV fetches through the SAME mocked exchange so no real
@@ -241,8 +241,8 @@ class TestTopNVolumeCap:
             for i in range(3)
         }
         mock_ex = mock_md.return_value.exchange
-        mock_ex.fetch_markets.return_value = markets
-        mock_ex.fetch_tickers.return_value = tickers
+        mock_md.return_value.fetch_markets.return_value = markets
+        mock_md.return_value.fetch_tickers.return_value = tickers
         mock_ex.fetch_ohlcv.return_value = _candles()
 
         monkeypatch.setattr(

@@ -85,7 +85,7 @@ class TestFetchMarketsQuoteFilter:
             {"spot": True, "quote": "IDR", "active": True, "base": "BTC", "symbol": "BTC/IDR"},
             {"spot": True, "quote": "IDR", "active": True, "base": "ETH", "symbol": "ETH/IDR"},
         ]
-        mock_md.return_value.exchange.fetch_markets.return_value = raw_markets
+        mock_md.return_value.fetch_markets.return_value = raw_markets
 
         scanner = MarketScanner(config=_fake_config(exchange="indodax", quote_currency="IDR"))
         pairs = scanner.fetch_markets()
@@ -98,7 +98,7 @@ class TestFetchMarketsQuoteFilter:
             {"spot": True, "quote": "USDT", "active": True, "base": "BTC", "symbol": "BTC/USDT"},
             {"spot": True, "quote": "IDR", "active": True, "base": "BTC", "symbol": "BTC/IDR"},
         ]
-        mock_md.return_value.exchange.fetch_markets.return_value = raw_markets
+        mock_md.return_value.fetch_markets.return_value = raw_markets
 
         scanner = MarketScanner(config=_fake_config(exchange="binance"))
         pairs = scanner.fetch_markets()
@@ -113,7 +113,7 @@ class TestFetchMarketsQuoteFilter:
         raw_markets = [
             {"spot": True, "quote": "IDR", "active": True, "base": "BTC", "symbol": "BTC/IDR"},
         ]
-        mock_md.return_value.exchange.fetch_markets.return_value = raw_markets
+        mock_md.return_value.fetch_markets.return_value = raw_markets
 
         scanner = MarketScanner(config=_fake_config(exchange="indodax", quote_currency="IDR"))
         pairs = scanner.fetch_markets()

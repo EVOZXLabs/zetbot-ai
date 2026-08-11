@@ -214,6 +214,42 @@ class MarketData:
 
         logger.info("MarketData initialized for %s", self.exchange_name)
 
+    def fetch_markets(self) -> list[dict[str, Any]]:
+        """Fetch the full market list, retry-wrapped.
+
+        ``MarketScanner`` filters this array by quote/spot/active, so it
+        cannot use the dict-shaped ``load_markets()``. The underlying ccxt
+        ``fetch_markets()`` has NO retry of its own, so the first call
+        after a cold start (DNS/TLS/connect to e.g. Indodax ``/api/pairs``)
+        would fail the whole scan and only succeed on the second run once
+        the connection is warm. Route through the shared retry helper so
+        every exchange (Binance, Tokocrypto, OKX, Indodax, …) survives
+        transient cold-start errors deterministically.
+        """
+        from scripts.exchange_providers import exchange_call_with_retry
+
+        try:
+            return list(exchange_call_with_retry(
+                lambda: self.exchange.fetch_markets(),
+                label="fetch_markets",
+                exchange=self.exchange_name,
+            ))
+        except Exception:
+            return []
+
+    def fetch_tickers(self, symbols=None) -> dict[str, Any]:
+        """Fetch 24h tickers, retry-wrapped (see ``fetch_markets``)."""
+        from scripts.exchange_providers import exchange_call_with_retry
+
+        try:
+            return dict(exchange_call_with_retry(
+                lambda: self.exchange.fetch_tickers(symbols),
+                label="fetch_tickers",
+                exchange=self.exchange_name,
+            ))
+        except Exception:
+            return {}
+
     def fetch_ohlcv(
         self,
         symbol: str = "BTC/USDT",

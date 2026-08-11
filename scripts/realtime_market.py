@@ -212,6 +212,23 @@ class RealtimeMarketData:
         """
         return self._mgr.get_provider()
 
+    def _exchange_call(self, fn: Any, label: str) -> Any:
+        """Run a raw ccxt call through the shared retry/backoff helper.
+
+        Realtime commands used to call the cached ccxt client directly
+        (``get_cached_public_exchange(...).fetch_ticker(...)``), which has
+        no retry of its own. On a cold start the first ``/detail`` /
+        ``/signals`` / ``/market`` would fail and only succeed on a retry —
+        the same class of failure as the scanner's ``fetch_markets()``.
+        Routing through ``exchange_call_with_retry`` fixes that for every
+        configured exchange without hardcoding any name.
+        """
+        from scripts.exchange_providers import exchange_call_with_retry
+
+        return exchange_call_with_retry(
+            fn, label=label, exchange=self.exchange_name,
+        )
+
     def _check_chat_cooldown(self, chat_id: str | None) -> None:
         now = time.time()
         if not chat_id:
@@ -267,7 +284,10 @@ class RealtimeMarketData:
             if cached and now - cached[0] < self._ticker_ttl:
                 return cached[1]
 
-        ticker = self._public_exchange_factory(self.exchange_name).fetch_ticker(symbol)
+        ticker = self._exchange_call(
+            lambda: self._public_exchange_factory(self.exchange_name).fetch_ticker(symbol),
+            label=f"fetch_ticker({symbol})",
+        )
         if not ticker or not ticker.get("last"):
             raise RealtimeMarketError(
                 f"Exchange '{self.exchange_name}': failed to fetch live "
@@ -297,8 +317,11 @@ class RealtimeMarketData:
         fetched_at = time.time()
 
         exchange = self._public_exchange_factory(self.exchange_name)
-        raw = exchange.fetch_ohlcv(
-            symbol, timeframe=self._timeframe, limit=OHLCV_LIMIT,
+        raw = self._exchange_call(
+            lambda: exchange.fetch_ohlcv(
+                symbol, timeframe=self._timeframe, limit=OHLCV_LIMIT,
+            ),
+            label=f"fetch_ohlcv({symbol})",
         )
         if not raw or len(raw) < MIN_CANDLES:
             raise RealtimeMarketError(
@@ -385,7 +408,10 @@ class RealtimeMarketData:
             else:
                 tickers = {}
         if not tickers:
-            tickers = self._public_exchange_factory(self.exchange_name).fetch_tickers()
+            tickers = self._exchange_call(
+                lambda: self._public_exchange_factory(self.exchange_name).fetch_tickers(),
+                label="fetch_tickers",
+            )
             if not tickers:
                 raise RealtimeMarketError(
                     f"Exchange '{self.exchange_name}': failed to fetch "

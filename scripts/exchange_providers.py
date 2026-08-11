@@ -405,6 +405,28 @@ class BaseProvider:
         except Exception:
             return {}
 
+    def fetch_markets(self) -> list[dict[str, Any]]:
+        """Fetch the full market list with the shared retry/backoff wrapper.
+
+        ``MarketScanner`` needs the raw market array (to filter by quote
+        currency / spot / active), so it cannot use the dict-shaped
+        ``load_markets()``. Callers MUST go through this method rather than
+        ``self._get_exchange().fetch_markets()`` directly: the latter has no
+        retry, so the very first call after a cold start (DNS/TLS/connect to
+        e.g. Indodax ``/api/pairs``) would fail the whole scan and only
+        succeed on the second run once the connection is warm. Works for
+        every configured exchange (Binance, Tokocrypto, OKX, Indodax, …)
+        because it delegates through ``self.CCXT_NAME``.
+        """
+        try:
+            return list(exchange_call_with_retry(
+                lambda: self._get_exchange().fetch_markets(),
+                label="fetch_markets",
+                exchange=self.name,
+            ))
+        except Exception:
+            return []
+
     def fetch_tickers(
         self, symbols: Optional[list[str]] = None,
     ) -> dict[str, Any]:

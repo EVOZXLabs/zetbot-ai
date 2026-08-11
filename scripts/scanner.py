@@ -626,7 +626,7 @@ class MarketScanner:
     def fetch_markets(self) -> list[PairRaw]:
         """Fetch and filter all Spot markets quoted in ``self.quote_currency``
         from the configured exchange (``self.exchange_name``)."""
-        raw_markets = self.md.exchange.fetch_markets()
+        raw_markets = self.md.fetch_markets()
         pairs: list[PairRaw] = []
         for m in raw_markets:
             if m.get("spot") is not True:
@@ -643,7 +643,7 @@ class MarketScanner:
 
     def attach_tickers(self, pairs: list[PairRaw]) -> None:
         """Attach 24h ticker data to all pairs."""
-        tickers = self.md.exchange.fetch_tickers()
+        tickers = self.md.fetch_tickers()
         for p in pairs:
             t = tickers.get(p.symbol)
             if t is None:
@@ -750,7 +750,7 @@ class MarketScanner:
 
         # 1. Markets
         print("  [1/4] Fetching markets … ", end="", flush=True)
-        all_raw = self.md.exchange.fetch_markets()
+        all_raw = self.md.fetch_markets()
         stats["total_markets"] = len(all_raw)
         raw_pairs = self.fetch_markets()
         stats["usdt_pairs"] = len(raw_pairs)
