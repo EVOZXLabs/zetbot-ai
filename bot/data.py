@@ -238,10 +238,23 @@ class MarketData:
             return []
 
     def fetch_tickers(self, symbols=None) -> dict[str, Any]:
-        """Fetch 24h tickers, retry-wrapped (see ``fetch_markets``)."""
+        """Fetch 24h tickers, retry-wrapped (see ``fetch_markets``).
+
+        ccxt's ``fetch_tickers`` calls ``self.load_markets()`` internally;
+        if the market map is ``None`` (e.g. a prior transient
+        ``fetch_markets`` failure left it unloaded on a cold start) that
+        raises ``TypeError: can only concatenate str (not "NoneType")``
+        deep inside ``safe_market``. Pre-load the market map via the
+        retry-wrapped ``fetch_markets`` here so it is always populated
+        before the tickers call, eliminating that latent crash instead of
+        only swallowing it.
+        """
         from scripts.exchange_providers import exchange_call_with_retry
 
         try:
+            # Ensure the market map exists (idempotent + retry-wrapped).
+            if not getattr(self.exchange, "markets", None):
+                self.fetch_markets()
             return dict(exchange_call_with_retry(
                 lambda: self.exchange.fetch_tickers(symbols),
                 label="fetch_tickers",

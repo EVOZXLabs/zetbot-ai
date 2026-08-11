@@ -127,12 +127,39 @@ class TestMarketDataFetchRetry:
         self, _patch_exchange: dict[str, Any],
     ) -> None:
         tickers = {"BICO/IDR": {"last": 891.0, "quoteVolume": 1_000_000.0}}
-        flaky = _FlakyExchange(failures=1, payloads={"fetch_tickers": tickers})
+        # markets starts empty so fetch_tickers must pre-load it first
+        # (then the tickers call itself is transient-flaky).
+        flaky = _FlakyExchange(
+            failures=1,
+            payloads={"fetch_tickers": tickers, "fetch_markets": [{"symbol": "BICO/IDR"}]},
+        )
         _patch_exchange["new_exchange"] = flaky
 
         md = MarketData(exchange_name="indodax", exchange=flaky)
         assert md.fetch_tickers() == tickers
-        assert flaky.calls["fetch_tickers"] == 2  # 1 fail + 1 success
+        # 1 fetch_markets (pre-load) + 2 fetch_tickers (1 fail + 1 success)
+        assert flaky.calls["fetch_tickers"] == 2
+
+    def test_fetch_tickers_preloads_markets_to_avoid_none_concat(
+        self, _patch_exchange: dict[str, Any],
+    ) -> None:
+        """Regression for the cold-start ``TypeError: can only concatenate
+        str (not "NoneType") to str`` from ccxt's fetch_tickers (its
+        internal load_markets hits a None market map). fetch_tickers must
+        pre-load the market map via fetch_markets so the call never
+        reaches that crash."""
+        tickers = {"BICO/IDR": {"last": 891.0, "quoteVolume": 1_000_000.0}}
+        flaky = _FlakyExchange(
+            failures=0,
+            payloads={"fetch_tickers": tickers, "fetch_markets": [{"symbol": "BICO/IDR"}]},
+        )
+        _patch_exchange["new_exchange"] = flaky
+
+        md = MarketData(exchange_name="indodax", exchange=flaky)
+        # With markets NOT pre-loaded, this used to raise TypeError deep
+        # in ccxt. It must now succeed (pre-loads markets transparently).
+        assert md.fetch_tickers() == tickers
+        assert flaky.calls.get("fetch_markets", 0) >= 1
 
     def test_fetch_markets_passes_through_exchange_name(
         self, _patch_exchange: dict[str, Any],
