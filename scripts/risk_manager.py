@@ -89,8 +89,9 @@ STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 # for callers that explicitly opt in via :func:`dynamic_max_positions`.
 POSITION_COUNT_TIERS: list[tuple[float, int]] = [
     (100.0, 1),
-    (1_000.0, 2),
-    (float("inf"), 3),
+    (1_000.0, 3),
+    (5_000.0, 5),
+    (float("inf"), 8),
 ]
 
 # Take-profit multipliers (relative to stop distance)

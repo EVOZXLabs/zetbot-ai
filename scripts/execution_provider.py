@@ -722,6 +722,36 @@ class LiveExecutionProvider(ExecutionProvider):
         except Exception:
             return None
 
+    def get_asset_balance(self, symbol: str) -> Optional[float]:
+        """Return the FREE balance of the base asset (e.g. BOME in BOME/USDT).
+
+        Used before every live SELL so we never ask the exchange to sell
+        more than we actually hold. Internal position tracking (quantity /
+        remaining_qty in positions.json) is derived from the trade plan at
+        signal time, not from what actually got filled/kept after fees and
+        exchange precision — so it can drift from the real wallet balance.
+
+        Returns ``None`` when the balance cannot be positively determined
+        (fetch failure, unsupported payload, etc.) — callers must NOT treat
+        that as "balance is zero", otherwise a transient API error would
+        wrongly close a position that is still held.
+        """
+        try:
+            provider = self._exchange.get_provider()
+            raw = provider.fetch_balance()
+            base = symbol.split("/")[0].upper()
+            free = None
+            bucket = raw.get("free")
+            if isinstance(bucket, dict) and base in bucket:
+                free = float(bucket[base])
+            if free is None:
+                per = raw.get(base)
+                if isinstance(per, dict):
+                    free = float(per.get("free", 0))
+            return free
+        except Exception:
+            return None
+
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         try:
             provider = self._exchange.get_provider()
@@ -847,6 +877,35 @@ class LiveExecutionProvider(ExecutionProvider):
                 return OrderResult.rejected(
                     request, f"Cannot determine price for {symbol}", self.name,
                 )
+
+        # --- Clamp to the REAL exchange balance ---
+        # Internal position tracking (positions.json) computes quantity from
+        # the trade plan (position_size_usdt / entry_price), not from the
+        # actual filled amount. Fees paid in the base asset, rounding to
+        # exchange lot precision, or the position being sold already
+        # (manually, or by a sibling TP/SL order) all make the tracked
+        # quantity drift above the real wallet balance. Without this check
+        # every TP/SL attempt fails forever with "insufficient balance"
+        # and the position never gets marked closed.
+        base_asset = symbol.split("/")[0]
+        available = self.get_asset_balance(symbol)
+        if available is not None and available <= 0:
+            return OrderResult.rejected(
+                request,
+                f"NO_BALANCE: exchange holds 0 {base_asset} — position is likely "
+                f"already closed (sold manually or by another order)",
+                self.name,
+            )
+        if available is not None and amount_p > available:
+            clamped = self.amount_to_precision(symbol, available)
+            if clamped <= 0:
+                return OrderResult.rejected(
+                    request,
+                    f"NO_BALANCE: available {base_asset} balance ({available}) is "
+                    f"below exchange minimum after precision",
+                    self.name,
+                )
+            amount_p = clamped
 
         try:
             provider = self._exchange.get_provider()

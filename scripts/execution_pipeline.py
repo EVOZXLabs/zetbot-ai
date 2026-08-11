@@ -266,6 +266,19 @@ class ExecutionPipeline:
 
             tp_result = self._sell(symbol, tp_price, sell_qty, exit_level=hit_key)
             if tp_result.status != "FILLED":
+                if tp_result.error and str(tp_result.error).startswith("NO_BALANCE"):
+                    # Exchange already holds ~0 of this asset — the position
+                    # is gone (manual sell, or a sibling order got there
+                    # first). Retrying the same amount every pipeline cycle
+                    # will never succeed, so stop tracking it as open.
+                    _log.warning(
+                        "TP sell skipped for %s: %s — marking remaining "
+                        "quantity as closed instead of retrying forever",
+                        symbol, tp_result.error,
+                    )
+                    remaining = 0
+                    result[hit_key] = True
+                    break
                 _log.warning("TP sell failed for %s: %s — rolling back exit state", symbol, tp_result.error)
                 self._write_ahead(symbol, dict(result))
                 continue
@@ -348,8 +361,20 @@ class ExecutionPipeline:
                         except Exception:
                             pass
                 else:
-                    _log.warning("SL sell failed for %s: %s — rolling back exit state", symbol, sl_result.error)
-                    self._write_ahead(symbol, dict(result))
+                    if sl_result.error and str(sl_result.error).startswith("NO_BALANCE"):
+                        # Same meaning as the TP branch: the exchange no
+                        # longer holds the asset, so retrying the SL every
+                        # cycle can never succeed — mark it closed instead.
+                        _log.warning(
+                            "SL sell skipped for %s: %s — marking remaining "
+                            "quantity as closed instead of retrying forever",
+                            symbol, sl_result.error,
+                        )
+                        remaining = 0
+                        result["status"] = "STOPPED"
+                    else:
+                        _log.warning("SL sell failed for %s: %s — rolling back exit state", symbol, sl_result.error)
+                        self._write_ahead(symbol, dict(result))
 
         # --- Update position state ---
         result["remaining_qty"] = round(remaining, 8)
