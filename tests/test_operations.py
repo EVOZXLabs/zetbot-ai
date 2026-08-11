@@ -355,12 +355,60 @@ class TestExchangeTest:
         mock_ccxt_mod = MagicMock()
         mock_ccxt_mod.binance = lambda *a, **kw: mock_exchange
 
+        # Pre-import the modules run_exchange_test() pulls in BEFORE swapping
+        # sys.modules["ccxt"]. Otherwise scripts.exchange_providers gets
+        # imported for the first time inside the mock window and permanently
+        # binds the fake ccxt as its module global — which breaks every later
+        # test that relies on exchange_providers.ccxt being the real module
+        # (e.g. TestExchangeRetry). Regression: see
+        # test_exchange_test_keeps_ccxt_global_real.
+        from scripts import exchange_providers  # noqa: F401  (load with real ccxt)
+        from scripts.exchange_test import run_exchange_test
+
         monkeypatch.setitem(sys.modules, "ccxt", mock_ccxt_mod)
 
         with patch("scripts.app_config.load_config", return_value=mock_cfg):
-            from scripts.exchange_test import run_exchange_test
             result = run_exchange_test()
             assert isinstance(result, str)
+
+    def test_exchange_test_keeps_ccxt_global_real(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: running the exchange-test flow with a fake ccxt must not
+        leave ``scripts.exchange_providers.ccxt`` pointing at the fake.
+
+        The old version swapped ``sys.modules["ccxt"]`` before
+        ``scripts.exchange_providers`` was first imported, so that module bound
+        the fake permanently and broke TestExchangeRetry whenever
+        test_operations.py ran before test_batch1_hardening.py.
+        """
+        import ccxt as real_ccxt
+        from scripts import exchange_providers
+        from scripts.exchange_test import run_exchange_test
+
+        assert exchange_providers.ccxt is real_ccxt
+
+        mock_cfg = MagicMock()
+        mock_cfg.exchange = "binance"
+        mock_cfg.api_key = ""
+        mock_cfg.api_secret = ""
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_status.return_value = {"status": "ok"}
+        mock_exchange.fetch_time.return_value = 1700000000000
+
+        mock_ccxt_mod = MagicMock()
+        mock_ccxt_mod.binance = lambda *a, **kw: mock_exchange
+
+        with patch("scripts.app_config.load_config", return_value=mock_cfg):
+            with monkeypatch.context() as mp:
+                mp.setitem(sys.modules, "ccxt", mock_ccxt_mod)
+                result = run_exchange_test()
+                assert isinstance(result, str)
+
+        assert exchange_providers.ccxt is real_ccxt, (
+            "exchange_providers.ccxt was rebound to the fake ccxt module"
+        )
 
 
 # ---------------------------------------------------------------------------

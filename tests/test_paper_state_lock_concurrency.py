@@ -270,7 +270,8 @@ class TestAtomicWriteJson:
 
         path = str(tmp_path / "test.json")
         atomic_write_json(path, {"a": 1}, indent=2, default=str)
-        content = open(path).read()
+        with open(path) as f:
+            content = f.read()
         assert "\n" in content  # indented
 
     def test_tmp_cleaned_on_error(self, tmp_path):

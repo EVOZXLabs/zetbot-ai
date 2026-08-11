@@ -197,7 +197,8 @@ class TestClosePaperPositionOnSell:
         from scripts.order_manager import _close_paper_position_on_sell
 
         _close_paper_position_on_sell("ADA/IDR", 1.9614, 3065.0802, 6011.8)
-        first_balance = json.load(open("data/paper_state.json"))["balance"]
+        with open("data/paper_state.json") as f:
+            first_balance = json.load(f)["balance"]
 
         assert _close_paper_position_on_sell("ADA/IDR", 1.9614, 3065.0802, 6011.8) == 0.0
         with open("data/paper_state.json") as f:

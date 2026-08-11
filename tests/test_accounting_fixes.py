@@ -798,7 +798,8 @@ class TestPaperExportMerge:
 
         PaperExport.orders_json(engine_orders, path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         ids = [o["id"] for o in result["orders"]]
         assert "monitor-BTCUSDT-123" in ids, "Monitor SELL order was lost!"
         assert result["open_orders"] == 1
@@ -841,7 +842,8 @@ class TestPaperExportMerge:
 
         PaperExport.orders_json(engine_orders, path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         assert len(result["orders"]) == 1
         assert result["orders"][0]["status"] == "CLOSED"
 
@@ -889,7 +891,8 @@ class TestPaperExportBalanceMerge:
 
         PaperExport.balance_json(engine_metrics, [], path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         # File's higher realized_pnl should be preserved
         assert result["realized_pnl"] == 500.0
         assert result["total_trades"] == 2
@@ -924,6 +927,7 @@ class TestPaperExportBalanceMerge:
 
         PaperExport.balance_json(engine_metrics, [], path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         assert result["realized_pnl"] == 800.0
         assert result["total_trades"] == 5
