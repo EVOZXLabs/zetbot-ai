@@ -523,10 +523,12 @@ class OrderManager:
     def sync_paper_state(self, result: Any) -> None:
         """Sync an OrderResult to the canonical paper state files.
 
-        Writes to ``paper_orders.json``, ``paper_balance.json``, and
-        ``positions.json`` so that Telegram commands see the trade
-        immediately.  Safe to call multiple times (the next pipeline
-        run will re-derive authoritative state from ``paper_state.json``).
+        Writes to ``paper_orders.json``, ``paper_balance.json``,
+        ``paper_state.json`` (authoritative) and ``positions.json`` (the
+        Telegram view) so the trade — and its open position — is durable
+        and immediately visible. Safe to call multiple times (the next
+        pipeline run re-derives authoritative state from
+        ``paper_state.json``).
         """
         if self._engine.mode != "PAPER":
             return
@@ -543,6 +545,12 @@ class OrderManager:
             status = result.get("status", "UNKNOWN")
             pnl = result.get("net_pnl", 0.0)
             fee = float(result.get("fee", 0.0) or 0.0)
+            meta = result.get("metadata", {}) or {}
+            req_sl = meta.get("stop_loss") or meta.get("sl") or 0.0
+            req_tp1 = meta.get("take_profit") or meta.get("tp1") or 0.0
+            req_tp2 = meta.get("tp2") or 0.0
+            req_tp3 = meta.get("tp3") or 0.0
+            signal_time = meta.get("signal_time", "") or ""
         else:
             sym = result.symbol
             side = result.side
@@ -552,11 +560,29 @@ class OrderManager:
             status = result.status
             pnl = getattr(result, 'net_pnl', 0.0)
             fee = float(getattr(result, 'fee', 0.0) or 0.0)
+            meta = getattr(result, 'metadata', None) or {}
+            req_sl = meta.get("stop_loss") or meta.get("sl") or 0.0
+            req_tp1 = meta.get("take_profit") or meta.get("tp1") or 0.0
+            req_tp2 = meta.get("tp2") or 0.0
+            req_tp3 = meta.get("tp3") or 0.0
+            signal_time = meta.get("signal_time", "") or ""
 
         if status not in ("FILLED", "EXECUTED"):
             return
 
-        _sync_paper_files(sym, side.upper(), amt, price, cost, pnl, fee=fee)
+        # A manual BUY without an explicit plan carries no protection
+        # levels. Default to a baseline 2% stop-loss so the position is
+        # never completely unmanaged; TP levels stay 0.0 until a
+        # protection pass arms them (auto-protect / monitor).
+        sl = float(req_sl) or (round(price * 0.98, 8) if price > 0 else 0.0)
+        tp1 = float(req_tp1)
+        tp2 = float(req_tp2)
+        tp3 = float(req_tp3)
+
+        _sync_paper_files(
+            sym, side.upper(), amt, price, cost, pnl, fee=fee,
+            sl=sl, tp1=tp1, tp2=tp2, tp3=tp3, signal_time=signal_time,
+        )
 
     def sync_position(self, result: Any) -> None:
         """Mode-aware position sync — call this after a successful order
@@ -867,8 +893,20 @@ class OrderManager:
 def _sync_paper_files(
     symbol: str, side: str, amount: float, price: float, cost: float, pnl: float,
     fee: float = 0.0,
+    sl: float = 0.0, tp1: float = 0.0, tp2: float = 0.0, tp3: float = 0.0,
+    signal_time: str = "",
 ) -> None:
-    """Write a manual trade to ``paper_orders.json`` and ``paper_balance.json``."""
+    """Persist a manual trade to the canonical PAPER state files.
+
+    BUY and SELL are symmetric: both must update the AUTHORITATIVE state
+    (``paper_state.json`` — wallet balance + position + order) AND the
+    Telegram-facing view (``positions.json``) AND the order log /
+    accounting (``paper_orders.json`` + ``paper_balance.json``). A manual
+    trade that only touched some of these was silently reverted by the
+    next pipeline cycle (which re-derives everything from
+    ``paper_state.json``). This is the BUY counterpart to
+    ``_close_paper_position_on_sell``.
+    """
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
     data_dir = "data"
@@ -920,6 +958,15 @@ def _sync_paper_files(
         }
 
     if side == "BUY":
+        # Open the position in the AUTHORITATIVE state files so the next
+        # pipeline cycle can't silently revert the cash debit:
+        # paper_state.json (wallet balance + position + order) and
+        # positions.json (Telegram views). The BUY order record's
+        # ``cost`` already accounts for fees/slippage.
+        _open_paper_position_on_buy(
+            symbol, amount, price, cost, fee=fee,
+            sl=sl, tp1=tp1, tp2=tp2, tp3=tp3, signal_time=signal_time,
+        )
         pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) - cost, 2)
     elif side == "SELL":
         proceeds = amount * price - fee
@@ -979,6 +1026,170 @@ def _sync_paper_files(
         _awj(bal_path, pb, indent=2)
     except OSError:
         pass
+
+
+def _open_paper_position_on_buy(
+    symbol: str,
+    quantity: float,
+    fill_price: float,
+    cost: float,
+    fee: float = 0.0,
+    sl: float = 0.0,
+    tp1: float = 0.0,
+    tp2: float = 0.0,
+    tp3: float = 0.0,
+    signal_time: str = "",
+) -> None:
+    """Open a paper position after a manual /buy fills.
+
+    Symmetric counterpart to ``_close_paper_position_on_sell``. A manual
+    BUY that only updated ``paper_balance.json`` used to be silently
+    reverted by the next pipeline cycle: the position never entered
+    ``paper_state.json`` (what the pipeline re-derives everything from),
+    so the cash debit was rolled back and ``/positions`` never showed the
+    symbol. This patches ``paper_state.json`` (wallet balance + OPEN
+    position + BUY order) and ``positions.json`` (Telegram view) so the
+    open is durable and immediately visible.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+    now_ts = datetime.now(timezone.utc).isoformat()
+    data_dir = "data"
+
+    state_path = f"{data_dir}/paper_state.json"
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        state = None
+
+    if state is None:
+        # No authoritative state to open against — nothing to persist
+        # into. The order/balance updates in _sync_paper_files still
+        # stand; the position simply can't be anchored.
+        return
+
+    # Never double-open: if a position already exists for the symbol
+    # (e.g. a retried manual invocation), update in place rather than
+    # stacking a second OPEN entry.
+    existing = (state.get("positions") or {}).get(symbol)
+    order_id = (
+        existing.get("order_id")
+        if existing and existing.get("status") == "OPEN"
+        else f"po_{int(datetime.now(timezone.utc).timestamp())}"
+    )
+
+    # Debit the wallet so the next pipeline cycle keeps the cash out.
+    state["balance"] = round(float(state.get("balance", 0.0)) - cost, 2)
+
+    state["positions"][symbol] = {
+        "symbol": symbol,
+        "order_id": order_id,
+        "quantity": quantity,
+        "remaining_qty": quantity,
+        "entry_price": fill_price,
+        "current_price": fill_price,
+        "unrealized_pnl": 0.0,
+        "realized_pnl": 0.0,
+        "total_pnl": 0.0,
+        "cost_basis": cost,
+        "status": "OPEN",
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "stop_loss": sl,
+        "opened_at": now_ts,
+        "signal_time": signal_time,
+        "closure_notified": False,
+        "tp1_sold": False,
+        "tp2_sold": False,
+        "tp3_sold": False,
+    }
+
+    # BUY order record, shaped exactly like the engine's PAPER orders so
+    # ``PaperTradingEngine._load_state`` can reload it without coercion
+    # errors.
+    state.setdefault("orders", []).append({
+        "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
+        "symbol": symbol,
+        "side": "BUY",
+        "type": "MARKET",
+        "quantity": quantity,
+        "filled_quantity": quantity,
+        "entry_price": fill_price,
+        "fill_price": fill_price,
+        "slippage": 0.0,
+        "entry_fee": fee,
+        "exit_price": 0.0,
+        "exit_fee": 0.0,
+        "total_cost": cost,
+        "total_proceeds": 0.0,
+        "net_pnl": 0.0,
+        "net_pnl_pct": 0.0,
+        "status": "FILLED",
+        "created_at": now_ts,
+        "filled_at": now_ts,
+        "closed_at": "",
+        "exit_reason": "",
+    })
+
+    try:
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(state_path, state, indent=2, default=str)
+    except OSError:
+        pass
+
+    # Mirror the OPEN position into positions.json (Telegram view) via
+    # the shared atomic merge so concurrent writers are preserved and
+    # the active/closed counters stay correct.
+    from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+    from scripts.position_status import is_open  # noqa: PLC0415
+
+    existing_positions: list[dict[str, Any]] = []
+    pos_path = f"{data_dir}/positions.json"
+    try:
+        with open(pos_path) as f:
+            pos_data = json.load(f)
+        existing_positions = [
+            p for p in (pos_data.get("positions", []) if pos_data else [])
+        ]
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    new_pos = {
+        "symbol": symbol,
+        "entry_price": fill_price,
+        "current_price": fill_price,
+        "position_size_usdt": cost,
+        "quantity": quantity,
+        "remaining_qty": quantity,
+        "remaining_pct": 100.0,
+        "cost_basis": cost,
+        "unrealized_pnl": 0.0,
+        "realized_pnl": 0.0,
+        "total_pnl": 0.0,
+        "highest_price": fill_price,
+        "lowest_price": fill_price,
+        "stop_loss": sl,
+        "current_stop": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "tp3_hit": False,
+        "breakeven_active": False,
+        "trailing_active": False,
+        "holding_candles": 0,
+        "holding_hours": 0.0,
+        "entry_time": now_ts,
+        "status": "OPEN",
+    }
+
+    updated = {
+        p["symbol"]: p for p in existing_positions if p.get("symbol")
+    }
+    updated[symbol] = new_pos
+    merge_positions(list(updated.values()))
 
 
 @paper_state_writes
