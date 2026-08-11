@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import paper_state_writes
 
 
 # ======================================================================
@@ -117,6 +118,9 @@ class OrderRequest:
             self.trace_id = str(uuid.uuid4())
         if not self.client_order_id:
             self.client_order_id = "zb" + self.trace_id.replace("-", "")[:34]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
@@ -233,7 +237,7 @@ class ExecutionProvider(ABC):
 # ======================================================================
 
 
-PAPER_INITIAL_BALANCE = 10_000.0
+PAPER_INITIAL_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 PAPER_TAKER_FEE = 0.001
 PAPER_SLIPPAGE_BPS = 3
 PAPER_STATE_PATH = "data/paper_state.json"
@@ -260,6 +264,13 @@ class PaperPosition:
     opened_at: str = ""
     signal_time: str = ""
     closure_notified: bool = False
+    # Mirror the paper engine's tpX_sold vocabulary so a TP level sold by
+    # the pipeline is never sold again by the engine's startup reconcile
+    # (BUG-1: restart double-sell after a crash between the sell and the
+    # positions.json persist step).
+    tp1_sold: bool = False
+    tp2_sold: bool = False
+    tp3_sold: bool = False
 
 
 class PaperBalance:
@@ -301,16 +312,16 @@ class PaperBalance:
     def add(self, amount: float) -> None:
         self.balance += amount
 
+    @paper_state_writes
     def save(self) -> None:
-        import json
         os.makedirs("data", exist_ok=True)
         data = {
             "initial_balance": self.initial,
             "final_balance": round(self.balance, 2),
             "final_equity": round(self.balance, 2),
         }
-        with open(PAPER_BALANCE_PATH, "w") as f:
-            json.dump(data, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj  # noqa: PLC0415
+        _awj(PAPER_BALANCE_PATH, data, indent=2)
 
 
 def _paper_buy(price: float, qty: float) -> dict[str, float]:
@@ -366,26 +377,51 @@ class PaperExecutionProvider(ExecutionProvider):
                     opened_at=vp.get("opened_at", ""),
                     signal_time=vp.get("signal_time", ""),
                     closure_notified=vp.get("closure_notified", False),
+                    tp1_sold=vp.get("tp1_sold", False),
+                    tp2_sold=vp.get("tp2_sold", False),
+                    tp3_sold=vp.get("tp3_sold", False),
                 )
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
-    def _save_positions(self) -> None:
+    @paper_state_writes
+    def _save_positions(self, extra_order: Optional[dict[str, Any]] = None) -> None:
+        """Persist positions (and wallet) to paper_state.json.
+
+        ``paper_state.json`` is the authoritative state the pipeline and
+        risk manager re-derive from — never clobber its orders /
+        equity_history (those belong to paper_trading_engine), preserve
+        them so a provider save cannot wipe trade history.
+        """
         import json
         os.makedirs("data", exist_ok=True)
+        try:
+            with open(PAPER_STATE_PATH) as f:
+                existing = json.load(f)
+            orders = list(existing.get("orders", []))
+            equity_history = existing.get("equity_history", [])
+            initial_balance = existing.get("initial_balance", self.balance.initial)
+            margin_used = existing.get("margin_used", 0.0)
+        except (FileNotFoundError, json.JSONDecodeError):
+            orders = []
+            equity_history = []
+            initial_balance = self.balance.initial
+            margin_used = 0.0
+        if extra_order is not None:
+            orders.append(extra_order)
         state: dict[str, Any] = {
             "version": 1,
             "balance": self.balance.balance,
-            "initial_balance": self.balance.initial,
-            "margin_used": 0.0,
-            "orders": [],
+            "initial_balance": initial_balance,
+            "margin_used": margin_used,
+            "orders": orders,
             "positions": {
                 sym: asdict(vp) for sym, vp in self.positions.items()
             },
-            "equity_history": [],
+            "equity_history": equity_history,
         }
-        with open(PAPER_STATE_PATH, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj  # noqa: PLC0415
+        _awj(PAPER_STATE_PATH, state, indent=2, default=str)
 
     def get_exchange_name(self) -> str:
         return os.getenv("EXCHANGE", "binance")
@@ -395,9 +431,8 @@ class PaperExecutionProvider(ExecutionProvider):
 
     def get_current_price(self, symbol: str) -> Optional[float]:
         try:
-            import ccxt
-            ex = ccxt.binance({"enableRateLimit": True, "timeout": 15000})
-            ticker = ex.fetch_ticker(symbol)
+            from bot.data import fetch_ticker_cached
+            ticker = fetch_ticker_cached(self.get_exchange_name(), symbol)
             return float(ticker.get("last", 0) or 0)
         except Exception:
             return None
@@ -516,6 +551,64 @@ class PaperExecutionProvider(ExecutionProvider):
 
         elapsed = (time.time() - t0) * 1000
 
+        # Close / reduce the paper position so paper_state.json stays the
+        # authoritative record — otherwise the next pipeline cycle reloads
+        # a stale OPEN position and reverts the sale (both the position
+        # and the credited balance).
+        vp = self.positions.get(symbol)
+        if vp is not None and vp.status in OPEN_STATUSES:
+            cost_part = vp.cost_basis * (qty / vp.quantity) if vp.quantity > 0 else 0.0
+            sell_pnl = total_proceeds - cost_part
+            vp.remaining_qty = max(0.0, vp.remaining_qty - qty)
+            # Reduce cost_basis proportionally so future PnL calculations
+            # (both here and in the /positions Telegram command) remain
+            # correct for the remaining portion of the position.
+            vp.cost_basis = max(0.0, vp.cost_basis - cost_part)
+            vp.realized_pnl = round(vp.realized_pnl + sell_pnl, 2)
+            vp.current_price = fill_price
+            # Mark the take-profit level as sold in paper_state.json so
+            # the paper engine's startup reconcile (which checks its own
+            # tpX_sold flags) never executes the same level a second time
+            # after a crash/restart (BUG-1).
+            exit_level = (request.metadata or {}).get("exit_level", "")
+            if exit_level in ("tp1_hit", "tp2_hit", "tp3_hit"):
+                setattr(vp, exit_level.replace("_hit", "_sold"), True)
+            if vp.remaining_qty <= 0:
+                vp.status = "CLOSED"
+                vp.remaining_qty = 0.0
+                vp.unrealized_pnl = 0.0
+            vp.total_pnl = round(vp.realized_pnl + vp.unrealized_pnl, 2)
+            sell_order = {
+                "id": f"po_{uuid.uuid4().hex[:12]}",
+                "symbol": symbol,
+                "side": "SELL",
+                "type": request.type,
+                "quantity": qty,
+                "filled_quantity": qty,
+                "entry_price": round(vp.entry_price, 8),
+                "fill_price": round(fill_price, 8),
+                "slippage": round(result.get("slippage", 0.0), 8),
+                "entry_fee": 0.0,
+                "exit_price": round(fill_price, 8),
+                "exit_fee": round(result.get("fee", 0.0), 8),
+                "total_cost": round(cost_part, 8),
+                "total_proceeds": round(total_proceeds, 8),
+                "net_pnl": round(sell_pnl, 2),
+                "net_pnl_pct": round(
+                    (sell_pnl / cost_part * 100.0), 2
+                ) if cost_part > 0 else 0.0,
+                "status": "CLOSED",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "filled_at": datetime.now(timezone.utc).isoformat(),
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "exit_reason": "market_sell",
+            }
+            self._save_positions(extra_order=sell_order)
+            emit_event(PipelineEvent(
+                "POSITION_CLOSED", symbol,
+                qty=qty, price=fill_price, pnl=round(sell_pnl, 2),
+            ))
+
         return OrderResult(
             order_id="po_" + uuid.uuid4().hex[:12],
             trace_id=request.trace_id,
@@ -566,8 +659,29 @@ def _round_qty(qty: float) -> float:
 # ======================================================================
 
 
+def _live_armed() -> bool:
+    """True only when live trading has been explicitly armed.
+
+    Uses the SAME in-memory arm flag that gates ExecutionEngine's
+    LiveExecutor (flipped by OrderManager.arm_live() ->
+    LiveExecutor.enable(), reset to False on every process start and by
+    disarm_live()). This is the single safety switch that EVERY real-order
+    path must pass through — LiveExecutionProvider must never submit a
+    real exchange order while live trading is not armed, regardless of
+    which code path (pipeline stage, position monitor, manual command)
+    constructs it.
+    """
+    from scripts.execution_engine import LiveExecutor  # noqa: PLC0415
+    return LiveExecutor.is_enabled()
+
+
 class LiveExecutionProvider(ExecutionProvider):
-    """Executes orders on a real exchange via CCXT."""
+    """Executes orders on a real exchange via CCXT.
+
+    Real order submission is gated on the live-arm switch: while
+    ``LiveExecutor`` is not enabled, ``execute_buy``/``execute_sell``
+    refuse with REJECTED and never touch the exchange.
+    """
 
     name = "live"
     mode = "LIVE"
@@ -599,7 +713,7 @@ class LiveExecutionProvider(ExecutionProvider):
     def get_current_price(self, symbol: str) -> Optional[float]:
         try:
             provider = self._exchange.get_provider()
-            raw = provider.fetch_ticker(symbol)
+            raw = provider.get_ticker(symbol)
             if isinstance(raw, dict):
                 return float(raw.get("last", 0) or raw.get("ask", 0) or raw.get("bid", 0) or 0)
             if hasattr(raw, "last"):
@@ -608,7 +722,7 @@ class LiveExecutionProvider(ExecutionProvider):
         except Exception:
             return None
 
-    def get_asset_balance(self, symbol: str) -> float:
+    def get_asset_balance(self, symbol: str) -> Optional[float]:
         """Return the FREE balance of the base asset (e.g. BOME in BOME/USDT).
 
         Used before every live SELL so we never ask the exchange to sell
@@ -616,6 +730,11 @@ class LiveExecutionProvider(ExecutionProvider):
         remaining_qty in positions.json) is derived from the trade plan at
         signal time, not from what actually got filled/kept after fees and
         exchange precision — so it can drift from the real wallet balance.
+
+        Returns ``None`` when the balance cannot be positively determined
+        (fetch failure, unsupported payload, etc.) — callers must NOT treat
+        that as "balance is zero", otherwise a transient API error would
+        wrongly close a position that is still held.
         """
         try:
             provider = self._exchange.get_provider()
@@ -629,9 +748,9 @@ class LiveExecutionProvider(ExecutionProvider):
                 per = raw.get(base)
                 if isinstance(per, dict):
                     free = float(per.get("free", 0))
-            return free if free is not None else 0.0
+            return free
         except Exception:
-            return 0.0
+            return None
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         try:
@@ -648,6 +767,14 @@ class LiveExecutionProvider(ExecutionProvider):
             return _round_qty(price)
 
     def execute_buy(self, request: OrderRequest) -> OrderResult:
+        if not _live_armed():
+            return OrderResult.rejected(
+                request,
+                "Live trading is not enabled (not armed). "
+                "Run /golive and reply CONFIRM LIVE to arm real-money trading.",
+                self.name,
+            )
+
         t0 = time.time()
         symbol = request.symbol
         amount = request.amount
@@ -678,7 +805,11 @@ class LiveExecutionProvider(ExecutionProvider):
         try:
             provider = self._exchange.get_provider()
             ex = provider._get_exchange()
-            price_p = None
+            # Indodax sizes a market BUY by quote (IDR) cost = amount ×
+            # price, and rejects the order without a price; Binance and
+            # friends ignore price for market orders (passing it there
+            # would silently convert the order to a quoteOrderQty spend).
+            price_p = price if provider.market_buy_requires_price() else None
             id_params = provider.client_order_id_params(request.client_order_id)
             ccxt_order = ex.create_order(
                 symbol=symbol,
@@ -687,6 +818,13 @@ class LiveExecutionProvider(ExecutionProvider):
                 amount=amount_p,
                 price=price_p,
                 params=id_params,
+            )
+            ccxt_order = _settle_live_order(
+                provider,
+                str(ccxt_order.get("id", "")),
+                symbol,
+                amount_p,
+                ccxt_order,
             )
             elapsed = (time.time() - t0) * 1000
             status = _map_live_status(ccxt_order, amount_p)
@@ -714,6 +852,14 @@ class LiveExecutionProvider(ExecutionProvider):
             return OrderResult.failed(request, f"Live BUY error: {exc}", self.name)
 
     def execute_sell(self, request: OrderRequest) -> OrderResult:
+        if not _live_armed():
+            return OrderResult.rejected(
+                request,
+                "Live trading is not enabled (not armed). "
+                "Run /golive and reply CONFIRM LIVE to arm real-money trading.",
+                self.name,
+            )
+
         t0 = time.time()
         symbol = request.symbol
         amount = request.amount
@@ -743,14 +889,14 @@ class LiveExecutionProvider(ExecutionProvider):
         # and the position never gets marked closed.
         base_asset = symbol.split("/")[0]
         available = self.get_asset_balance(symbol)
-        if available <= 0:
+        if available is not None and available <= 0:
             return OrderResult.rejected(
                 request,
                 f"NO_BALANCE: exchange holds 0 {base_asset} — position is likely "
                 f"already closed (sold manually or by another order)",
                 self.name,
             )
-        if amount_p > available:
+        if available is not None and amount_p > available:
             clamped = self.amount_to_precision(symbol, available)
             if clamped <= 0:
                 return OrderResult.rejected(
@@ -773,6 +919,13 @@ class LiveExecutionProvider(ExecutionProvider):
                 amount=amount_p,
                 price=price_p,
                 params=id_params,
+            )
+            ccxt_order = _settle_live_order(
+                provider,
+                str(ccxt_order.get("id", "")),
+                symbol,
+                amount_p,
+                ccxt_order,
             )
             elapsed = (time.time() - t0) * 1000
             status = _map_live_status(ccxt_order, amount_p)
@@ -803,15 +956,64 @@ class LiveExecutionProvider(ExecutionProvider):
 def _map_live_status(ccxt_order: dict[str, Any], requested_amount: float) -> str:
     raw_status = str(ccxt_order.get("status") or "").lower()
     filled = float(ccxt_order.get("filled", 0) or 0)
+    remaining = float(ccxt_order.get("remaining", 0) or 0)
     if raw_status in ("canceled", "cancelled", "expired"):
         return "CANCELLED"
     if raw_status == "rejected":
         return "REJECTED"
+    # Some exchanges (e.g. Indodax) report a settled order as status
+    # "closed"/"filled" but omit the numeric `filled` field entirely —
+    # treat those as fully filled rather than PENDING.
+    if raw_status in ("closed", "filled"):
+        return "FILLED"
+    if raw_status in ("partial", "partially_filled"):
+        return "PARTIALLY_FILLED"
     if filled <= 0:
         return "PENDING"
     if requested_amount > 0 and filled < requested_amount * 0.999:
         return "PARTIALLY_FILLED"
     return "FILLED"
+
+
+def _settle_live_order(
+    provider: Any,
+    order_id: str,
+    symbol: str,
+    requested_amount: float,
+    initial_order: dict[str, Any],
+) -> dict[str, Any]:
+    """Confirm a market order's outcome when ``create_order`` returned only
+    a bare order id (no status/fill snapshot).
+
+    Indodax's trade endpoint answers with just ``{success, return.order_id}``,
+    so without this the pipeline would forever report the fill as PENDING.
+    Bounded and best-effort: polls ``fetch_order`` for ~3s and returns the
+    confirmed order dict, or keeps the initial snapshot if confirmation is
+    unavailable or fails (the order still went through; the live-position
+    sync reconstructs it from exchange balance on the next cycle).
+    """
+    if _map_live_status(initial_order, requested_amount) != "PENDING":
+        return initial_order
+    if not order_id or not symbol:
+        return initial_order
+
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            raw = provider.fetch_order(order_id, symbol)
+        except Exception:
+            continue
+        if not raw:
+            continue
+        status = _map_live_status(raw, requested_amount)
+        if status != "PENDING":
+            merged = dict(initial_order)
+            for key in ("status", "filled", "price", "average", "cost", "fee", "remaining"):
+                if raw.get(key) is not None:
+                    merged[key] = raw[key]
+            return merged
+    return initial_order
 
 
 # ======================================================================

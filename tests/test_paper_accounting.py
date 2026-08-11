@@ -21,6 +21,18 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    Tests here persist ``data/paper_state.json`` / ``data/positions.json``;
+    without the redirect they used to overwrite the REAL paper state used
+    by the live bot (test positions leaking into the running bot).
+    Tests create their own ``data/`` dir (some via plain ``mkdir()``).
+    """
+    monkeypatch.chdir(tmp_path)
+
 # Ensure project root is on sys.path
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -34,7 +46,6 @@ from scripts.paper_trading_engine import (
     VirtualWallet,
     TAKER_FEE,
     SLIPPAGE_BPS,
-    INITIAL_BALANCE,
 )
 
 
@@ -180,7 +191,11 @@ class TestStateRecovery:
 
         # Create engine, execute a buy
         engine = PaperTradingEngine()
-        assert engine.wallet.balance == INITIAL_BALANCE
+        # Fresh engine (no state file) → balance == its own initial balance.
+        # NOTE: assert against the engine itself, not a module-level
+        # INITIAL_BALANCE import — other test files reload the module with
+        # different env values, which would break this in a full-suite run.
+        assert engine.wallet.balance == engine.wallet.initial
 
         # Manually create a plan and execute
         plan = {
@@ -209,7 +224,7 @@ class TestStateRecovery:
 
         # Create new engine — should restore
         engine2 = PaperTradingEngine()
-        assert engine2.wallet.balance < INITIAL_BALANCE
+        assert engine2.wallet.balance < engine2.wallet.initial
         assert len(engine2.orders) == 1
         assert "BTC/USDT" in engine2.positions
         vp = engine2.positions["BTC/USDT"]
@@ -242,6 +257,83 @@ class TestStateRecovery:
 
         engine3 = PaperTradingEngine()
         assert engine3.positions["TEST"].closure_notified is True
+
+    def test_load_state_tolerates_incomplete_order_records(self, tmp_path: Any) -> None:
+        """Regression: the pipeline's PaperExecutionProvider used to append
+        SELL orders missing 7 ``Order`` fields (``entry_price``,
+        ``slippage``, ``entry_fee``, ``exit_price``, ``exit_fee``,
+        ``total_cost``, ``net_pnl_pct``). ``Order(**o)`` then raised on the
+        next startup, silently disabling the paper engine. Loading must
+        backfill the missing fields instead of crashing.
+        """
+        os.chdir(tmp_path)
+        os.makedirs("data", exist_ok=True)
+
+        legacy_sell = {
+            "id": "po_legacy1",
+            "symbol": "ADA/IDR",
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": 1.9614,
+            "filled_quantity": 1.9614,
+            "fill_price": 3065.0802,
+            "total_proceeds": 6011.8,
+            "net_pnl": -12.4,
+            "status": "CLOSED",
+            "created_at": "2026-07-31T00:00:00",
+            "filled_at": "2026-07-31T00:00:00",
+            "closed_at": "2026-07-31T00:00:00",
+            "exit_reason": "market_sell",
+        }
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "version": 1,
+                "balance": 384640.58,
+                "initial_balance": 1000000.0,
+                "margin_used": 0.0,
+                "orders": [legacy_sell],
+                "positions": {},
+                "equity_history": [],
+            }, f)
+
+        engine = PaperTradingEngine()
+        assert len(engine.orders) == 1
+        order = engine.orders[0]
+        assert order.side == "SELL"
+        assert order.status == "CLOSED"
+        assert order.net_pnl == -12.4
+        assert order.entry_price == 0.0
+        assert order.slippage == 0.0
+        assert order.total_cost == 0.0
+        assert order.net_pnl_pct == 0.0
+
+        # Unknown extra keys must not leak into the dataclass.
+        legacy_sell["some_unknown_key"] = "ignored"
+        with open("data/paper_state.json", "w") as f:
+            json.dump({
+                "version": 1,
+                "balance": 384640.58,
+                "initial_balance": 1000000.0,
+                "margin_used": 0.0,
+                "orders": [legacy_sell],
+                "positions": {},
+                "equity_history": [],
+            }, f)
+        engine2 = PaperTradingEngine()
+        assert len(engine2.orders) == 1
+        assert not hasattr(engine2.orders[0], "some_unknown_key")
+
+        # Round-trip: saving normalizes the record to the full schema.
+        engine2._save_state()
+        with open("data/paper_state.json") as f:
+            state = json.load(f)
+        saved = state["orders"][0]
+        for field in (
+            "entry_price", "slippage", "entry_fee", "exit_price",
+            "exit_fee", "total_cost", "net_pnl_pct",
+        ):
+            assert field in saved, f"field {field} not persisted"
+        assert "some_unknown_key" not in saved
 
 
 # ---------------------------------------------------------------------------
@@ -579,3 +671,73 @@ class TestPaperStateSyncOnClosure:
             state = json.load(f)
         # total_proceeds defaults to 0, so balance stays unchanged
         assert state["balance"] == 9500.0
+
+
+class TestIdleCycleDoesNotResetBalance:
+    """Regression test for the "BOT STARTED" / "/status" mismatch bug.
+
+    Bug: an open position was bought (cash correctly debited in
+    ``paper_state.json``), then a later pipeline cycle found no new
+    READY plans. Because that cycle appended nothing to
+    ``equity_history``, ``MetricsCalculator.compute()`` fell back to
+    ``initial_balance`` for ``final_balance`` -- silently "refunding"
+    the cash already spent on the still-open position. This made
+    ``paper_balance.json`` (and therefore /status, /balance, /wallet)
+    report cash == the full starting balance while equity also counted
+    the open position's value on top of it, effectively double-counting
+    the money.
+    """
+
+    def test_no_ready_plans_keeps_real_wallet_balance(
+        self, tmp_path: Any
+    ) -> None:
+        os.chdir(tmp_path)
+        os.makedirs("data", exist_ok=True)
+
+        engine = PaperTradingEngine(initial_balance=1_000_000.0)
+
+        plan = {
+            "symbol": "SHIB/IDR",
+            "entry_price": 0.088486538,
+            "quantity": 6_782_726.66,
+            "position_size_usdt": 600_000.0,
+            "stop_loss": 0.08538723,
+            "tp1": 0.09153277,
+            "tp2": 0.09460554,
+            "tp3": 0.09767831,
+            "risk_amount": 25.0,
+            "reward_amount": 25.0,
+            "risk_reward": 1.0,
+            "confidence": 80.0,
+            "recommendation": "BUY",
+            "signal_time": "2026-08-01T17:46:01",
+            "status": "READY",
+        }
+        order = engine._execute_plan(plan, None)
+        assert order is not None
+
+        real_cash_after_buy = engine.wallet.balance
+        assert real_cash_after_buy < engine.wallet.initial
+
+        # Simulate a later, separate pipeline run (new engine instance,
+        # state restored from disk) that finds no READY plans -- this is
+        # the "idle cycle" path (``run()`` with an empty ``plans`` list),
+        # which historically reset the reported cash back to the full
+        # initial balance.
+        engine._save_state()
+        idle_engine = PaperTradingEngine()
+        assert idle_engine.wallet.balance == pytest.approx(real_cash_after_buy)
+
+        metrics = idle_engine.run(allow_new_positions=True)
+
+        assert metrics["final_balance"] == pytest.approx(
+            real_cash_after_buy, abs=0.01
+        )
+        assert metrics["final_balance"] != pytest.approx(
+            idle_engine.wallet.initial, abs=0.01
+        )
+        # Equity must be cash + position value, never cash counted twice.
+        position_value = idle_engine._total_position_value()
+        assert metrics["final_equity"] == pytest.approx(
+            real_cash_after_buy + position_value, abs=0.01
+        )

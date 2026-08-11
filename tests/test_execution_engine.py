@@ -7,6 +7,8 @@ import unittest.mock
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from scripts.execution_engine import (
     AUDIT_PATH,
     IExecutionEngine,
@@ -374,14 +376,11 @@ class TestExecutionMetrics:
 
 
 class TestAuditTrail:
-    def setup_method(self) -> None:
-        self.audit_file = AUDIT_PATH
-        if os.path.exists(self.audit_file):
-            os.remove(self.audit_file)
-
-    def teardown_method(self) -> None:
-        if os.path.exists(self.audit_file):
-            os.remove(self.audit_file)
+    @pytest.fixture(autouse=True)
+    def _isolated_audit(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        import scripts.execution_engine as ee
+        self.audit_file = str(tmp_path / "execution_audit.jsonl")
+        monkeypatch.setattr(ee, "AUDIT_PATH", self.audit_file)
 
     def test_append_and_read(self) -> None:
         entry = AuditEntry(

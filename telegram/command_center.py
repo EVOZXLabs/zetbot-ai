@@ -79,6 +79,13 @@ class CommandCenter:
             k: kwargs.pop(k) for k in list(kwargs.keys())
             if hasattr(CommandContext, k)
         }
+        # The DI container is a construction-time dependency of this
+        # CommandCenter: every dispatch must carry it into the context so
+        # commands resolve services (realtime market data, exchange, …)
+        # through the injected fakes/container instead of building fresh
+        # live clients. Callers may still override via the ``services``
+        # kwarg (e.g. legacy handle_message/WhatsApp paths).
+        known_fields.setdefault("services", self._services)
 
         ctx = CommandContext(
             config=self._config,

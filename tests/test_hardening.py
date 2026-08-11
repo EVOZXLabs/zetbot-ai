@@ -20,6 +20,23 @@ import pytest
 from scripts.app_config import AppConfig, ConfigError, validate_config
 
 
+@pytest.fixture(autouse=True)
+def _offline_health_checks(monkeypatch):
+    """Keep health-related tests offline-deterministic.
+
+    ``HealthMonitor._gather`` performs REAL internet / exchange checks
+    (``requests`` ping plus ``ccxt.load_markets()`` with a 15s ccxt timeout).
+    None of these tests needs live connectivity, yet with the network down
+    each ``_gather`` blocked for up to ~15s per call — several tests call it
+    directly or via ``/health`` — which made this whole module appear to hang.
+    Patch the two checks so the module is fast and stable in any environment.
+    """
+    import scripts.health as health
+
+    monkeypatch.setattr(health, "_check_internet", lambda: (True, 1.0))
+    monkeypatch.setattr(health, "_check_exchange", lambda name: (True, "binance"))
+
+
 # ---------------------------------------------------------------------------
 #  PID lock tests
 # ---------------------------------------------------------------------------
@@ -344,6 +361,37 @@ class TestHealthMonitor:
         assert "internet=OK" in result
         assert "exchange=OK" in result
 
+    def test_health_net_pnl_is_canonical_not_stale_key(self, tmp_path: Any) -> None:
+        """Regression: HEALTH used to log the raw ``net_pnl`` key from
+        ``paper_balance.json`` — a value only refreshed on position closure,
+        so it sat frozen (e.g. ``+250.00``) and matched nothing in the real
+        account. It must come from the canonical MetricsManager snapshot
+        (realized + unrealized computed from raw data).
+        """
+        import json
+
+        os.makedirs(tmp_path, exist_ok=True)
+        with open(os.path.join(tmp_path, "paper_balance.json"), "w") as f:
+            json.dump({
+                "initial_balance": 1_000_000.0,
+                "final_balance": 1_000_000.0,
+                "final_equity": 1_000_000.0,
+                "net_pnl": 250.00,  # stale leftover
+            }, f)
+        with open(os.path.join(tmp_path, "positions.json"), "w") as f:
+            json.dump({"positions": []}, f)
+
+        from scripts.health import HealthMonitor
+        cfg = self._make_config()
+        cfg = cfg.__class__(**{**cfg.__dict__, "data_dir": str(tmp_path)})
+        monitor = HealthMonitor(logger=_FakeLogger(), config=cfg, interval=60.0)
+
+        net_pnl = monitor._gather()["net_pnl"]
+        # No open positions and balance == initial_balance → 0.00, never the
+        # stale raw key (+250.00).
+        assert net_pnl == pytest.approx(0.0)
+        assert net_pnl != 250.00
+
 
 # ---------------------------------------------------------------------------
 #  /health command tests
@@ -584,15 +632,20 @@ class TestPipelineTimeout:
 
     def test_stage_timeout_fails_gracefully(self) -> None:
         """A stage that hangs beyond STAGE_TIMEOUT must return a failure result."""
+        from scripts.pipeline import Pipeline  # noqa: PLC0415
         import scripts.pipeline as pipeline_mod
         orig_timeout = pipeline_mod.STAGE_TIMEOUT
         pipeline_mod.STAGE_TIMEOUT = 0.1  # very short timeout for testing
 
-        from scripts.pipeline import Pipeline, StageResult
+        # Release gate: _run_stage abandons the timed-out stage on a
+        # non-daemon ThreadPoolExecutor worker. Without releasing it, the
+        # worker keeps the interpreter alive for the full hang duration
+        # after the test reports done (~10 s). Setting the event lets the
+        # worker finish so the suite doesn't linger.
+        release = threading.Event()
 
         def _hanging_stage() -> None:
-            import time
-            time.sleep(10)
+            release.wait(timeout=10)
 
         try:
             config = self._make_config()
@@ -605,6 +658,7 @@ class TestPipelineTimeout:
             assert "timed out" in (result.error or "")
         finally:
             pipeline_mod.STAGE_TIMEOUT = orig_timeout
+            release.set()
 
     def test_fast_stage_succeeds(self) -> None:
         """A stage that completes quickly must succeed."""

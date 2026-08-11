@@ -8,7 +8,9 @@ import pytest
 
 from bot.data import NORMALIZED_COLUMNS, MarketData
 
-SUPPORTED_EXCHANGES = ("binance", "bybit", "tokocrypto")
+SUPPORTED_EXCHANGES = (
+    "binance", "bybit", "tokocrypto", "okx", "gate", "kucoin", "mexc", "indodax",
+)
 
 
 def test_invalid_exchange_raises_error() -> None:
@@ -25,6 +27,7 @@ def test_valid_exchange_initialises() -> None:
         assert md.exchange is not None
 
 
+@pytest.mark.exchange("binance")
 class TestLiveFetchOHLCV:
     """Live integration tests against Binance public API."""
 
@@ -118,6 +121,7 @@ class TestLiveFetchOHLCV:
         assert (df["close"] > 0).all()
 
     @pytest.mark.network
+    @pytest.mark.exchange("bybit")
     def test_fetch_bybit(self) -> None:
         """Should fetch from Bybit successfully."""
         md = MarketData(exchange_name="bybit")
@@ -126,6 +130,7 @@ class TestLiveFetchOHLCV:
         assert list(df.columns) == NORMALIZED_COLUMNS
 
     @pytest.mark.network
+    @pytest.mark.exchange("tokocrypto")
     def test_fetch_tokocrypto(self) -> None:
         """Should fetch from Tokocrypto successfully."""
         md = MarketData(exchange_name="tokocrypto")

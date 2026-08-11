@@ -483,12 +483,18 @@ check_configuration() {
     paper_mode=$(env_read "PAPER_MODE" "$env_file")
     telegram_enabled=$(env_read "TELEGRAM_ENABLED" "$env_file")
 
+    local whatsapp_enabled
+    whatsapp_enabled=$(env_read "WHATSAPP_ENABLED" "$env_file")
+
     local required_vars=("EXCHANGE")
     if [[ "$paper_mode" == "false" ]]; then
         required_vars+=("API_KEY" "API_SECRET")
     fi
     if [[ "$telegram_enabled" == "true" ]]; then
         required_vars+=("TELEGRAM_TOKEN" "TELEGRAM_CHAT_ID")
+    fi
+    if [[ "$whatsapp_enabled" == "true" ]]; then
+        required_vars+=("TWILIO_ACCOUNT_SID" "TWILIO_AUTH_TOKEN" "TWILIO_WHATSAPP_FROM" "WHATSAPP_ALLOWED_NUMBERS")
     fi
 
     local missing=0
@@ -547,7 +553,7 @@ check_exchange() {
     # ── Exchange name ──
     if [[ -n "$exchange" ]]; then
         case "$exchange" in
-            binance|bybit|okx|kucoin|coinbase|kraken|gate|huobi|bitget|mexc|phemex)
+            binance|bybit|okx|kucoin|coinbase|kraken|gate|huobi|bitget|mexc|phemex|tokocrypto|indodax)
                 pass "Exchange: ${exchange}"
                 ;;
             *)
@@ -625,6 +631,98 @@ check_telegram() {
     else
         warn "Chat ID format unusual — expected numeric (e.g., -1001234567890)"
     fi
+}
+
+# =============================================================================
+#  §8b  WHATSAPP (via Twilio)
+# =============================================================================
+check_whatsapp() {
+    section "WhatsApp (Twilio)"
+
+    local wa_enabled sid token from allowed host port
+
+    wa_enabled=$(env_read "WHATSAPP_ENABLED" ".env")
+    sid=$(env_read "TWILIO_ACCOUNT_SID" ".env")
+    token=$(env_read "TWILIO_AUTH_TOKEN" ".env")
+    from=$(env_read "TWILIO_WHATSAPP_FROM" ".env")
+    allowed=$(env_read "WHATSAPP_ALLOWED_NUMBERS" ".env")
+    host=$(env_read "WHATSAPP_WEBHOOK_HOST" ".env")
+    port=$(env_read "WHATSAPP_WEBHOOK_PORT" ".env")
+
+    # ── Enabled / Disabled ──
+    if [[ "$wa_enabled" == "true" ]]; then
+        pass "WhatsApp: enabled"
+    elif [[ "$wa_enabled" == "false" || -z "$wa_enabled" ]]; then
+        info "WhatsApp: disabled (set WHATSAPP_ENABLED=true in .env to turn on)"
+        return 0
+    else
+        warn "WHATSAPP_ENABLED='${wa_enabled}' — expected true or false"
+        return 0
+    fi
+
+    # ── flask (webhook server dependency) ──
+    if "$_PYTHON" -c "import flask" &>/dev/null; then
+        pass "flask: installed (required for the WhatsApp webhook server)"
+    else
+        fail "flask: not installed — run: pip install flask"
+    fi
+
+    # ── Twilio Account SID ──
+    if [[ -z "$sid" || "$sid" == "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ]]; then
+        fail "TWILIO_ACCOUNT_SID not configured"
+    elif [[ "$sid" =~ ^AC[A-Za-z0-9]{32}$ ]]; then
+        local masked_sid="${sid:0:6}...${sid: -4}"
+        pass "Account SID: ${masked_sid}"
+    else
+        warn "TWILIO_ACCOUNT_SID format unusual — expected to start with 'AC' (34 chars total)"
+    fi
+
+    # ── Twilio Auth Token ──
+    if [[ -z "$token" || "$token" == "your_auth_token" ]]; then
+        fail "TWILIO_AUTH_TOKEN not configured"
+    else
+        pass "Auth Token: set (hidden)"
+    fi
+
+    # ── Sender number ──
+    if [[ -z "$from" ]]; then
+        fail "TWILIO_WHATSAPP_FROM not configured"
+    elif [[ "$from" =~ ^whatsapp:\+[0-9]+$ ]]; then
+        pass "Sender: ${from}"
+    else
+        warn "TWILIO_WHATSAPP_FROM format unusual — expected 'whatsapp:+<countrycode><number>' (e.g. whatsapp:+14155238886)"
+    fi
+
+    # ── Allow-list (mandatory — webhook is public) ──
+    if [[ -z "$allowed" ]]; then
+        fail "WHATSAPP_ALLOWED_NUMBERS not configured — webhook will reject all messages"
+    else
+        local bad_numbers=0 num
+        IFS=',' read -ra _wa_nums <<< "$allowed"
+        for num in "${_wa_nums[@]}"; do
+            num=$(echo "$num" | xargs)
+            [[ "$num" =~ ^whatsapp:\+[0-9]+$ ]] || ((bad_numbers++)) || true
+        done
+        if (( bad_numbers == 0 )); then
+            pass "Allow-list: ${#_wa_nums[@]} number(s) configured"
+        else
+            warn "Allow-list: ${bad_numbers} entr(ies) don't match 'whatsapp:+<number>' — check WHATSAPP_ALLOWED_NUMBERS"
+        fi
+    fi
+
+    # ── Webhook host/port ──
+    kv "Webhook host" "${host:-0.0.0.0 (default)}"
+    kv "Webhook port" "${port:-8088 (default)}"
+    if [[ -n "$port" ]] && has_cmd curl; then
+        if curl -sS --connect-timeout 2 --max-time 3 "http://127.0.0.1:${port}" &>/dev/null; then
+            info "Port ${port} already has something listening (may be a previous run)"
+        fi
+    fi
+
+    echo -e "  ${DIM}${SYM_INFO}  Twilio needs a public HTTPS URL to reach this webhook.${NC}"
+    echo -e "  ${DIM}${SYM_INFO}  For local testing: ngrok http ${port:-8088}, then set${NC}"
+    echo -e "  ${DIM}${SYM_INFO}  Twilio's \"WHEN A MESSAGE COMES IN\" to <ngrok-url>/whatsapp/webhook${NC}"
+    echo -e "  ${DIM}${SYM_INFO}  Full guide: docs/SETUP_WEB3_WHATSAPP.md${NC}"
 }
 
 # =============================================================================
@@ -861,6 +959,7 @@ main() {
     check_configuration    || true
     check_exchange         || true
     check_telegram         || true
+    check_whatsapp         || true
     check_runtime          || true
     check_git              || true
     check_optional_tools   || true

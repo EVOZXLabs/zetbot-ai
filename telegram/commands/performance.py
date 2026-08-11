@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_compact_number, fmt_holding, fmt_pf
+from telegram.formatter import (
+    fmt_compact_number, fmt_holding, fmt_pf, order_hold_seconds,
+)
 from telegram.ui import compact_header, build_message
 
 
@@ -35,6 +37,7 @@ class PerformanceCommand(BaseCommand):
                 return None
 
         now = datetime.now(timezone.utc)
+        entry_map = ctx.entry_time_map()
         daily = []
         weekly = []
         monthly = []
@@ -70,10 +73,9 @@ class PerformanceCommand(BaseCommand):
 
             hold_times = []
             for o in orders:
-                filled = _parse_dt(o.get("filled_at", ""))
-                closed = _parse_dt(o.get("closed_at", ""))
-                if filled and closed:
-                    hold_times.append((closed - filled).total_seconds())
+                hold = order_hold_seconds(o, entry_map)
+                if hold is not None:
+                    hold_times.append(hold)
             avg_hold = sum(hold_times) / len(hold_times) if hold_times else 0.0
 
             return {
@@ -84,24 +86,27 @@ class PerformanceCommand(BaseCommand):
                 "avg_win": avg_w,
                 "avg_loss": avg_l,
                 "avg_holding": avg_hold,
+                "has_hold_data": bool(hold_times),
             }
 
         daily_m = _metrics(daily)
         weekly_m = _metrics(weekly)
         monthly_m = _metrics(monthly)
 
+        quote = getattr(ctx.config, "quote_currency", "USDT") or "USDT"
         blocks = [compact_header(), "📈 *Performance*"]
 
         def _fmt_period(m: dict, label: str) -> str:
             if m["trades"] == 0:
                 return ""
+            hold_line = f"Avg Hold: {fmt_holding(m['avg_holding'])}" if m["has_hold_data"] else ""
             return (
                 f"*{label}*\n"
                 f"Trades: {m['trades']}  WR: {m['win_rate']:.0f}%\n"
                 f"PF: {fmt_pf(m['profit_factor'])}  E: {m['expectancy']:+.2f}\n"
-                f"Avg Win: {fmt_compact_number(m['avg_win'])}  "
-                f"Avg Loss: {fmt_compact_number(m['avg_loss'])}\n"
-                f"Avg Hold: {fmt_holding(m['avg_holding'])}"
+                f"Avg Win: {fmt_compact_number(m['avg_win'], quote)}  "
+                f"Avg Loss: {fmt_compact_number(m['avg_loss'], quote)}\n"
+                f"{hold_line}"
             )
 
         for period_m, label in [

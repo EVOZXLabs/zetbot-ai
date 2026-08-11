@@ -92,6 +92,8 @@ CONFIG = {
 
     "backup_corrupted_state": os.getenv("BACKUP_CORRUPTED_STATE", "true").lower() == "true",
 
+    "quote_currency": os.getenv("QUOTE_CURRENCY", "USDT").upper(),
+
     "testing": os.getenv("TESTING", "false").lower() == "true",
 
 }

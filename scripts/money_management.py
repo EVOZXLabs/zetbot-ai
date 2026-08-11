@@ -80,11 +80,11 @@ MAX_OPEN_POSITIONS = 1        # concurrent open positions
 DAILY_LOSS_LIMIT = 0.03      # 3% of balance max daily loss
 
 # Fallback defaults for the non-default modes
-FIXED_AMOUNT_USD = 10.0
+FIXED_AMOUNT_USDT = 10.0
 PERCENTAGE_BALANCE_PCT = 0.10  # legacy "10% of available balance" default
 
-# Absolute dollar floor for a single position (exchange min-notional).
-MIN_POSITION_VALUE_USD = 5.0
+# Absolute USDT floor for a single position (exchange min-notional).
+MIN_POSITION_VALUE_USDT = 5.0
 
 
 @dataclass
@@ -101,7 +101,7 @@ class MoneyManagementConfig:
     take_profit_pct: float = TAKE_PROFIT_PCT
     max_open_positions: int = MAX_OPEN_POSITIONS
     daily_loss_limit: float = DAILY_LOSS_LIMIT
-    fixed_amount: float = FIXED_AMOUNT_USD
+    fixed_amount: float = FIXED_AMOUNT_USDT
     percentage_balance: float = PERCENTAGE_BALANCE_PCT
     # Optional hard cap (fraction of balance) a caller can apply on top
     # of any of the modes above, e.g. a portfolio-wide exposure limit.

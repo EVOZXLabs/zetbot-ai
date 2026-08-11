@@ -31,6 +31,17 @@ BOT_VERSION = "v0.5.0"
 SCANNER_TIMEOUT = 7200        # seconds before scanner data is considered stale (default 2h)
 SCANNER_CRITICAL = 86400      # seconds before scanner data is considered critical (default 24h)
 
+# Internet probes — deliberately NOT api.binance.com: Binance is blocked
+# by Indonesian ISPs (Kominfo), so a binance-based probe reported FAIL on
+# a perfectly healthy connection and pushed users toward unnecessary VPNs.
+# These neutral endpoints are reachable in Indonesia (and everywhere else);
+# first success wins, so a single flaky probe never trips the health check.
+_INTERNET_PROBES = (
+    "https://www.gstatic.com/generate_204",
+    "https://1.1.1.1",
+    "https://www.google.com",
+)
+
 
 class HealthMonitor:
     """Periodically check real component health in a background thread."""
@@ -100,10 +111,28 @@ class HealthMonitor:
         exchange_ok, exchange_name = _check_exchange(self._config.exchange)
 
         d = self._config.data_dir
+        telegram_status = _read_telegram_status(f"{d}/telegram_status.json")
         scanner_time, scanner_age = _file_timestamp(f"{d}/scanner_results.json", now)
         api_time, api_age = _file_timestamp(f"{d}/paper_balance.json", now)
 
         paper_data = _read_json(f"{d}/paper_balance.json")
+
+        # net_pnl/balance/equity are the canonical snapshot values
+        # (computed from raw data via MetricsManager.compute_snapshot),
+        # never the raw keys of paper_balance.json — those are only
+        # refreshed on position closure and can sit stale (or absent)
+        # for long stretches, which made HEALTH report figures that
+        # matched nothing in the actual account or in /wallet.
+        try:
+            from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+            snap = MetricsManager(self._config.data_dir).account()
+            net_pnl = round(snap.net_pnl, 2)
+            balance = round(snap.balance, 2)
+            equity = round(snap.equity, 2)
+        except Exception:
+            net_pnl = paper_data.get("net_pnl", 0.0)
+            balance = paper_data.get("final_balance", 0.0)
+            equity = paper_data.get("final_equity", 0.0)
 
         # Derive scanner status
         if scanner_age == float("inf"):
@@ -130,6 +159,7 @@ class HealthMonitor:
             "internet_latency_ms": internet_latency,
             "exchange_ok": exchange_ok,
             "exchange_name": exchange_name,
+            "telegram_status": telegram_status,
             "scanner_time": scanner_time,
             "scanner_age": scanner_age,
             "scanner_status": scanner_status,
@@ -137,9 +167,10 @@ class HealthMonitor:
             "scanner_critical": SCANNER_CRITICAL,
             "api_time": api_time,
             "api_age": api_age,
-            "balance": paper_data.get("final_balance", 0.0),
-            "equity": paper_data.get("final_equity", 0.0),
-            "net_pnl": paper_data.get("net_pnl", 0.0),
+            "balance": balance,
+            "equity": equity,
+            "net_pnl": net_pnl,
+            "quote_currency": self._config.quote_currency,
             "open_positions": sum(
                 1 for p in _read_json(f"{d}/positions.json").get("positions", [])
                 if is_open(p.get("status"))
@@ -160,28 +191,50 @@ class HealthMonitor:
 
 
 def _check_internet() -> tuple[bool, float]:
-    """Check internet connectivity via a fast HTTPS HEAD request."""
+    """Check internet connectivity via fast HTTPS probes.
+
+    Probes a small list of neutral, exchange-independent endpoints
+    (Google generate_204, Cloudflare 1.1.1.1, google.com) instead of a
+    single exchange API — those are geo-blocked in several regions
+    (e.g. Binance in Indonesia), which made a working connection report
+    ``internet=FAIL`` and implied a VPN was needed when it wasn't.
+    """
     t0 = time.time()
-    try:
-        requests.get("https://api.binance.com/api/v3/ping", timeout=5)
-        latency = round((time.time() - t0) * 1000, 1)
-        return True, latency
-    except requests.RequestException:
-        return False, 0.0
+    for url in _INTERNET_PROBES:
+        try:
+            requests.get(url, timeout=5)
+            latency = round((time.time() - t0) * 1000, 1)
+            return True, latency
+        except requests.RequestException:
+            continue
+    return False, 0.0
+
+
+_exchange_check_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
+_EXCHANGE_CHECK_TTL = 120.0
 
 
 def _check_exchange(name: str) -> tuple[bool, str]:
-    """Check exchange API connectivity."""
+    """Check exchange API connectivity (cached 2 minutes).
+
+    The check loads all markets (``/api/pairs`` on indodax) — running it
+    every 60s on top of the monitor/pipeline ticker fetches used to trip
+    the exchange rate limit (429), so results are cached with a TTL and
+    the check goes through the shared cached client.
+    """
+    now = time.time()
+    cached = _exchange_check_cache.get(name)
+    if cached is not None and now - cached[0] < _EXCHANGE_CHECK_TTL:
+        return cached[1]
     try:
-        import ccxt
-        exchange_class = getattr(ccxt, name, None)
-        if exchange_class is None:
-            return False, "unknown"
-        ex = exchange_class({"enableRateLimit": False, "timeout": 15000})
+        from bot.data import get_cached_public_exchange  # noqa: PLC0415
+        ex = get_cached_public_exchange(name)
         ex.load_markets()
-        return True, name
+        result = (True, name)
     except Exception:
-        return False, name
+        result = (False, name)
+    _exchange_check_cache[name] = (time.time(), result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +259,17 @@ def _read_json(path: str) -> dict[str, Any]:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+
+
+def _read_telegram_status(path: str) -> str:
+    """Read the Telegram link health written by the polling loop.
+
+    Returns ``OK``/``DEGRADED``/``OFFLINE``, or ``UNKNOWN`` when the
+    Telegram command center is not running or has not reported yet.
+    """
+    data = _read_json(path)
+    status = data.get("status", "")
+    return status if status in ("OK", "DEGRADED", "OFFLINE") else "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +342,9 @@ def _format_metrics(m: dict[str, Any]) -> str:
     threads = m["thread_count"]
     internet = "OK" if m["internet_ok"] else "FAIL"
     exchange = "OK" if m["exchange_ok"] else "FAIL"
+    telegram = m.get("telegram_status", "UNKNOWN")
     net_pnl = m.get("net_pnl", 0.0)
+    quote = m.get("quote_currency", "USDT")
     return (
         f"uptime={hours:02.0f}h{minutes:02.0f}m{seconds:02.0f}s"
         f"  rss={rss_mb:.1f}MB"
@@ -286,5 +352,6 @@ def _format_metrics(m: dict[str, Any]) -> str:
         f"  threads={threads}"
         f"  internet={internet}"
         f"  exchange={exchange}"
-        f"  net_pnl={net_pnl:+.2f}"
+        f"  telegram={telegram}"
+        f"  net_pnl={net_pnl:+.2f} {quote}"
     )

@@ -22,10 +22,20 @@ def run_exchange_test() -> str:
     lines.append(f"  Exchange: {config.exchange}")
 
     import ccxt
+    from scripts.exchange_providers import get_provider_class, list_supported_exchanges
 
-    exchange_class = getattr(ccxt, config.exchange, None)
+    try:
+        ccxt_name = get_provider_class(config.exchange)().ccxt_name
+    except KeyError:
+        lines.append(
+            f"  Status:   FAIL — unknown exchange '{config.exchange}' "
+            f"(supported: {', '.join(list_supported_exchanges())})"
+        )
+        return "\n".join(lines)
+
+    exchange_class = getattr(ccxt, ccxt_name, None)
     if exchange_class is None:
-        lines.append(f"  Status:   FAIL — unknown exchange '{config.exchange}'")
+        lines.append(f"  Status:   FAIL — CCXT has no exchange '{ccxt_name}'")
         return "\n".join(lines)
 
     exchange = exchange_class({
@@ -71,7 +81,7 @@ def run_exchange_test() -> str:
             total_btc = balance.get("total", {}).get("BTC", 0)
             lines.append(f"  BTC:      {total_btc:.8f}")
             symbols = exchange.symbols if hasattr(exchange, "symbols") else []
-            has_spot = any("SPOT" in str(exchange.options.get("defaultType", "")).upper())
+            has_spot = "SPOT" in str(exchange.options.get("defaultType", "")).upper()
             lines.append(f"  Spot:     {'enabled' if has_spot else 'available'}")
         except Exception as exc:
             lines.append(f"  Account:  FAIL — {exc}")

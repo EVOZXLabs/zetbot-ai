@@ -52,7 +52,7 @@ MAX_OPEN_POSITIONS = MM_MAX_OPEN_POSITIONS            # default mode: RISK_PERCE
 MONEY_MANAGEMENT_MODE = MM_DEFAULT_MODE.value
 MIN_RR = 1.5                        # minimum acceptable risk-reward
 MAX_RR = 5.0                        # cap to avoid unrealistic targets
-MIN_POSITION_SIZE_USD = 10.0        # smallest trade value — reflects real
+MIN_POSITION_SIZE_USDT = 10.0       # smallest trade value — reflects real
                                      # exchange minimum notional, not an
                                      # arbitrary cutoff. Accounts too small
                                      # to clear this at the configured
@@ -66,10 +66,19 @@ MIN_POSITION_SIZE_USD = 10.0        # smallest trade value — reflects real
 MIN_PROBABILITY = 50.0              # from decision engine
 MAX_ATR_PCT = 8.0                   # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
-MAX_POSITION_SIZE_PCT = 0.6         # max % of account EQUITY across ALL open
-                                     # positions combined ($ VALUE, not risk).
-                                     # This is a PORTFOLIO-WIDE exposure cap,
-                                     # not a per-position allowance.
+# max % of account EQUITY across ALL open positions combined
+# ($ VALUE, not risk). This is a PORTFOLIO-WIDE exposure cap, not a
+# per-position allowance.
+#
+# WARNING: ``RiskManager.__init__`` deliberately defaults
+# ``max_position_size_pct=None`` and resolves this module-level constant
+# AT INSTANTIATION time (not at import time). A Python default argument
+# like ``max_position_size_pct=MAX_POSITION_SIZE_PCT`` would be bound
+# once when the module is imported and could never observe the live
+# value that ``Pipeline._apply_config()`` writes into this module before
+# every run — which is exactly how a stale 0.6 (60 %) cap survived a
+# ``MAX_POSITION_SIZE_PCT=0.05`` .env edit and over-exposed the account.
+MAX_POSITION_SIZE_PCT = 0.6
 STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
 STOP_FIXED_PCT = 5.0                # fallback fixed stop %
 
@@ -123,6 +132,7 @@ class ScannerData:
     atr_pct: float
     relative_volume: float
     trend_alignment: str
+    venue: str = "cex"
 
 
 @dataclass
@@ -162,6 +172,7 @@ class RiskResult:
     money_management_mode: str = MONEY_MANAGEMENT_MODE
     stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
+    venue: str = "cex"
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +324,7 @@ class TradeValidator:
         self,
         min_rr: float = MIN_RR,
         max_rr: float = MAX_RR,
-        min_pos_usd: float = MIN_POSITION_SIZE_USD,
+        min_pos_usd: float = MIN_POSITION_SIZE_USDT,
         max_atr: float = MAX_ATR_PCT,
         min_vol: float = MIN_VOLUME_24H,
         min_prob: float = MIN_PROBABILITY,
@@ -353,7 +364,7 @@ class TradeValidator:
         # 3. Volume
         if scanner.volume_24h < self.min_vol:
             reasons.append(
-                f"Volume ${scanner.volume_24h:,.0f} < ${self.min_vol:,.0f}"
+                f"Volume {scanner.volume_24h:,.0f} < {self.min_vol:,.0f} vol"
             )
 
         # 4. ATR volatility
@@ -368,8 +379,9 @@ class TradeValidator:
 
         # 6. Position size
         if position_value < self.min_pos_usd:
+            _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             reasons.append(
-                f"Position ${position_value:,.0f} < ${self.min_pos_usd:,.0f}"
+                f"Position {position_value:,.0f} {_qc} < {self.min_pos_usd:,.0f} {_qc}"
             )
 
         # 7. Max open positions
@@ -412,7 +424,7 @@ def _count_open_positions() -> int:
         with open(PAPER_STATE_PATH) as f:
             paper_state = json.load(f)
         for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+            if vp.get("status") == "OPEN":
                 count += 1
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -468,7 +480,7 @@ def _existing_open_exposure() -> float:
         with open(PAPER_STATE_PATH) as f:
             paper_state = json.load(f)
         for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") in ("OPEN", "PARTIAL", "TRAILING", "BREAKEVEN"):
+            if vp.get("status") == "OPEN":
                 total += _position_notional(vp)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -507,6 +519,7 @@ class DataLoader:
                 atr_pct=p.get("atr_pct", 0.0),
                 relative_volume=p.get("relative_volume", 1.0),
                 trend_alignment=p.get("trend_alignment", "MIXED"),
+                venue=p.get("venue", "cex"),
             )
         return result
 
@@ -546,7 +559,7 @@ class RiskManager:
         risk_per_trade: float = MAX_RISK_PER_TRADE_PCT,
         max_daily_loss: float = MAX_DAILY_LOSS_PCT,
         max_positions: int | None = None,
-        max_position_size_pct: float = MAX_POSITION_SIZE_PCT,
+        max_position_size_pct: float | None = None,
         equity: float | None = None,
         existing_exposure: float | None = None,
         mm_config: MoneyManagementConfig | None = None,
@@ -566,6 +579,17 @@ class RiskManager:
             :mod:`scripts.money_management`. Callers that still want
             the old equity-tiered position count can pass
             ``max_positions=dynamic_max_positions(equity)`` explicitly.
+        max_position_size_pct : float | None
+            Portfolio-wide notional exposure cap as a fraction of equity
+            (e.g. 0.05 == 5 %). If ``None`` (default), it is resolved from
+            the module-level ``MAX_POSITION_SIZE_PCT`` constant AT
+            INSTANTIATION time — NOT at import time. This is deliberate:
+            ``Pipeline._apply_config()`` writes the AppConfig value from
+            ``.env`` into ``risk_manager.MAX_POSITION_SIZE_PCT`` before
+            every run, and a ``def __init__(..., max_position_size_pct=
+            MAX_POSITION_SIZE_PCT)`` default argument would freeze the
+            import-time value (0.6) forever and silently ignore the
+            operator's configured cap.
         equity : float | None
             Total account equity = cash + value of open positions (e.g.
             ``wallet.equity``). Used as the base for the portfolio-wide
@@ -584,7 +608,10 @@ class RiskManager:
         self.balance = balance
         self.risk_per_trade = risk_per_trade
         self.max_daily_loss_amt = balance * (max_daily_loss / 100.0)
-        self.max_position_size_pct = max_position_size_pct
+        self.max_position_size_pct = (
+            MAX_POSITION_SIZE_PCT if max_position_size_pct is None
+            else max_position_size_pct
+        )
         self.validator = TradeValidator()
         self.results: list[RiskResult] = []
         self._used_capital = 0.0
@@ -637,20 +664,21 @@ class RiskManager:
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PROFESSIONAL RISK MANAGER")
         print(f"  {'=' * 78}")
-        print(f"  Balance          : ${self.balance:>8,.2f}")
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+        print(f"  Balance          : {self.balance:>8,.2f} {_qc}")
         print(f"  Money Mgmt mode  : {MONEY_MANAGEMENT_MODE}")
         print(f"  Risk/trade       : {self.risk_per_trade:>5.1f}%  "
-              f"(${self.balance * self.risk_per_trade / 100:>7,.2f})")
+              f"({self.balance * self.risk_per_trade / 100:>7,.2f} {_qc})")
         pct_denom = self.balance if self.balance else self.equity
         print(f"  Max daily loss   : "
               f"{self.max_daily_loss_amt / pct_denom * 100 if pct_denom else 0.0:>5.1f}%  "
-              f"(${self.max_daily_loss_amt:>7,.2f})")
+              f"({self.max_daily_loss_amt:>7,.2f} {_qc})")
         print(f"  Max positions    : {self.max_positions}")
-        print(f"  Equity           : ${self.equity:>8,.2f}")
-        print(f"  Existing exposure: ${self._existing_exposure:>8,.2f}  "
+        print(f"  Equity           : {self.equity:>8,.2f} {_qc}")
+        print(f"  Existing exposure: {self._existing_exposure:>8,.2f} {_qc}  "
               f"({self._existing_exposure / self.equity * 100.0 if self.equity else 0.0:>5.1f}%)")
         print(f"  Max exposure cap : {self.max_position_size_pct * 100:>5.1f}%  "
-              f"(${self.equity * self.max_position_size_pct:>7,.2f})")
+              f"({self.equity * self.max_position_size_pct:>7,.2f} {_qc})")
         print(f"  Min R:R          : {MIN_RR}")
         print(f"  Min probability  : {MIN_PROBABILITY:.0f}%")
         print()
@@ -765,9 +793,10 @@ class RiskManager:
             if approval == "APPROVED":
                 approved_count += 1
                 self._used_capital += pos_value
+                _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
                 print(f"    APPROVED {dec.symbol:>12s}  "
                       f"R:R {rr_for_validation:.2f}  "
-                      f"${pos_value:>7,.2f}")
+                      f"{pos_value:>7,.2f} {_qc}")
             else:
                 print(f"    {approval:>8s} {dec.symbol:>12s}  {reason}")
 
@@ -792,6 +821,7 @@ class RiskManager:
                 money_management_mode=self.mm_config.mode.value,
                 stop_loss_pct=round(self.mm_config.stop_loss_pct * 100, 2),
                 take_profit_pct=round(self.mm_config.take_profit_pct * 100, 2),
+                venue=scanner.venue,
             ))
 
         self.results = results
@@ -828,11 +858,12 @@ class RiskManager:
 
             print(f"  Approved Trade Summary:")
             print(f"    Avg R:R          : {avg_rr:.2f}")
-            print(f"    Avg Position     : ${avg_pos:>8,.2f}")
-            print(f"    Largest Position : ${largest:>8,.2f}")
-            print(f"    Smallest Position: ${smallest:>8,.2f}")
-            print(f"    Total Capital    : ${total_capital:>9,.2f}")
-            print(f"    Total Risk       : ${total_risk:>9,.2f}")
+            _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+            print(f"    Avg Position     : {avg_pos:>8,.2f} {_qc}")
+            print(f"    Largest Position : {largest:>8,.2f} {_qc}")
+            print(f"    Smallest Position: {smallest:>8,.2f} {_qc}")
+            print(f"    Total Capital    : {total_capital:>9,.2f} {_qc}")
+            print(f"    Total Risk       : {total_risk:>9,.2f} {_qc}")
             print()
 
         print(f"  Execution time   : {elapsed:.2f}s")
@@ -852,7 +883,8 @@ class RiskManager:
 
             approved.sort(key=lambda r: r.probability, reverse=True)
             for i, r in enumerate(approved[:10], 1):
-                size_str = f"${r.position_value:,.0f}"
+                _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+                size_str = f"{r.position_value:,.0f} {_qc}"
                 print(
                     f"  {i:3d} {r.symbol:>12s} {r.probability:6.1f} "
                     f"{size_str:>10s} {r.entry_price:>10.4f} "
@@ -883,7 +915,7 @@ class RiskReport:
             "risk_amount", "risk_percent",
             "reward_amount", "expected_rr",
             "approval", "rejection_reason",
-            "money_management_mode",
+            "money_management_mode", "venue",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
@@ -952,10 +984,18 @@ def main() -> None:
     mm_config = MoneyManagementConfig(
         mode=MoneyManagementMode(MONEY_MANAGEMENT_MODE),
     )
+    # Resolve MAX_POSITION_SIZE_PCT from .env / AppConfig so a direct
+    # CLI run (``python -m scripts.risk_manager``) honors the operator's
+    # configured cap exactly like the pipeline's DI risk stage does —
+    # never the module-default 0.6.
+    from scripts.app_config import load_config  # noqa: PLC0415
+
+    _cfg = load_config()
     manager = RiskManager(
         balance=balance,
         equity=equity,
         existing_exposure=existing_exposure,
+        max_position_size_pct=_cfg.max_position_size_pct,
         mm_config=mm_config,
     )
     results = manager.run()

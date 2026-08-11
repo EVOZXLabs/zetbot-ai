@@ -235,7 +235,9 @@ class TestNotificationMethods:
         assert "50000" in text
         assert "-1.50%" in text
         assert "+2.50%" in text
-        assert "EMA200_BULLISH" in text
+        # Markdown-special characters in dynamic content are escaped so
+        # the API never rejects the message (renders identically).
+        assert "EMA200\\_BULLISH" in text
         assert "Stop Loss" in text
         assert "Take Profit" in text
 
@@ -459,7 +461,7 @@ class TestTradeNotificationRegression:
         text = mock_send.call_args[0][0]
         assert "+150.00" in text
         assert "+2.00%" in text
-        assert "$+150" in text
+        assert "USDT" in text
 
     def test_losing_trade_shows_negative_pnl(self) -> None:
         _enable_telegram()

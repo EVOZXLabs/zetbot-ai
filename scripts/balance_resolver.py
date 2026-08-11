@@ -20,9 +20,10 @@ if neither file has the value.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-_FALLBACK_INITIAL_BALANCE = 10_000.0
+_FALLBACK_INITIAL_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 
 
 def resolve_initial_balance(

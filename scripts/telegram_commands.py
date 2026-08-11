@@ -54,9 +54,16 @@ UPDATE_ID_FILE = "data/.last_update_id"
 STARTUP_GRACE_PERIOD = 30  # ignore shutdown commands within N seconds of start
 DATA_DIR = "data"
 
-MAX_BACKOFF = 120          # maximum sleep between poll retries (seconds)
-BASE_DELAY = 2.0           # initial retry delay
-MAX_CONSECUTIVE_ERRORS = 15  # circuit-breaker: give up after this many consecutive errors
+# Poll retry schedule (seconds): 1st failure -> 5s, 2nd -> 10s,
+# 3rd -> 30s, then capped at 60s until the connection is restored.
+RETRY_DELAYS = [5, 10, 30, 60]
+
+# Consecutive failures before the link health degrades.
+DEGRADED_ERRORS = 1        # 1+ failures  -> telegram=DEGRADED
+OFFLINE_ERRORS = 5         # 5+ failures  -> telegram=OFFLINE
+
+HEALTH_WRITE_INTERVAL = 30  # throttle telegram_status.json writes (seconds)
+TELEGRAM_STATUS_FILE = "data/telegram_status.json"
 
 BOT_VERSION = "v0.5.0"
 
@@ -98,6 +105,15 @@ def _read_json(path: str) -> dict[str, Any]:
         return {}
 
 
+class TelegramAPIError(Exception):
+    """Transient Telegram API-level failure (not a transport error).
+
+    Raised when Telegram returns an error response (``ok=false``, HTTP
+    error status, invalid JSON body).  It is never fatal — the polling
+    loop treats it like a connection problem and backs off.
+    """
+
+
 # ---------------------------------------------------------------------------
 #  Command Center
 # ---------------------------------------------------------------------------
@@ -133,6 +149,12 @@ class TelegramCommandCenter:
         self._test_index: int = 0
         self._consecutive_errors: int = 0
 
+        # Link health tracking — never fatal, always recoverable.
+        self._link_status: str = "OK"
+        self._last_ok_ts: float = time.time()
+        self._last_health_write: float = 0.0
+        self._last_written_status: Optional[str] = None
+
         # New modular command system
         from telegram.command_center import CommandCenter  # noqa: PLC0415
         self._command_center = CommandCenter(config, logger=_log,
@@ -142,10 +164,22 @@ class TelegramCommandCenter:
         self._command_handlers: dict[str, Any] = {}
 
         _log("Telegram Command Center started (modular dispatch).")
+        try:
+            all_cmds = self._command_center.registry.get_all_commands()
+            public_count = sum(1 for m in all_cmds if not m.hidden)
+            admin_count = sum(1 for m in all_cmds if m.permission == "admin")
+            _log(f"Telegram commands registered: {public_count} public, {admin_count} admin")
+        except Exception:
+            pass
         if self._test_mode:
             _log(f"TEST MODE — simulating {len(_TEST_COMMANDS)} commands")
         else:
             _log(f"Listening for commands on chat {self._chat_id}")
+
+        # Register Telegram command menu (setMyCommands) so users see
+        # commands when typing "/" in the chat. Only call in non-test mode.
+        if not test_mode and self._token and self._chat_id:
+            self._register_telegram_menu()
 
     # ------------------------------------------------------------------
     #  Update ID persistence (prevents replay of old commands after restart)
@@ -168,44 +202,118 @@ class TelegramCommandCenter:
             pass
 
     # ------------------------------------------------------------------
+    #  Telegram command menu (setMyCommands)
+    # ------------------------------------------------------------------
+
+    def _register_telegram_menu(self) -> None:
+        """Register the bot's command menu with Telegram so users see
+        commands when typing "/" in any chat.
+
+        Commands are grouped by category for the BotFather menu.  Hidden
+        and admin-only commands are excluded from the public menu but
+        remain functional for authorized users.
+        """
+        try:
+            meta_list = self._command_center.registry.get_all_commands()
+        except Exception as exc:
+            _log(f"Failed to enumerate commands for menu: {exc}")
+            return
+
+        trading = []
+        account = []
+        monitoring = []
+        system = []
+        admin = []
+
+        for meta in meta_list:
+            if meta.hidden:
+                continue
+            cmd = f"/{meta.name}"
+            entry: dict[str, str] = {
+                "command": cmd,
+                "description": meta.description[:100],
+            }
+            if meta.permission == "admin":
+                admin.append(entry)
+            else:
+                if meta.name in (
+                    "status", "positions", "signals", "signal", "detail",
+                    "buy", "sell", "portfolio", "performance", "wallet",
+                    "summary", "market",
+                ):
+                    trading.append(entry)
+                elif meta.name in ("balance", "exchange", "exchanges"):
+                    account.append(entry)
+                elif meta.name in ("health", "scan", "pipeline", "version", "logs"):
+                    monitoring.append(entry)
+                else:
+                    system.append(entry)
+
+        menu = []
+        menu.extend(trading)
+        menu.extend(account)
+        menu.extend(monitoring)
+        menu.extend(system)
+
+        if not menu:
+            _log("No public commands to register in Telegram menu")
+            return
+
+        url = API_BASE.format(token=self._token, method="setMyCommands")
+        payload: dict[str, Any] = {
+            "commands": menu,
+            "scope": {"type": "chat", "chat_id": int(self._chat_id)},
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=self._timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("ok"):
+                count = len(menu) + len(admin)
+                _log(f"Telegram command menu registered ({count} commands)")
+            else:
+                _log(f"setMyCommands returned ok=false: {data}")
+        except Exception as exc:
+            _log(f"Failed to register Telegram command menu: {exc}")
+
+    # ------------------------------------------------------------------
     #  Public
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Start the polling loop (blocks forever)."""
+        """Start the polling loop (blocks forever).
+
+        Telegram is a communication channel only — the loop must survive
+        any connectivity problem.  Transport timeouts, connection errors
+        and temporary API failures trigger an exponential backoff (5s,
+        10s, 30s, 60s) and are never treated as fatal.  Only an explicit
+        shutdown stops the loop.
+        """
         try:
             while self._running and not self._is_shutdown():
                 try:
                     updates = self._poll()
-                    self._consecutive_errors = 0
-                    for update in updates:
-                        if not self._running or self._is_shutdown():
-                            return
-                        self._process_update(update)
-                except requests.Timeout:
-                    pass
+                except requests.Timeout as exc:
+                    self._record_failure(f"timeout: {exc}")
+                    continue
+                except requests.ConnectionError as exc:
+                    self._record_failure(f"connection lost: {exc}")
+                    continue
+                except TelegramAPIError as exc:
+                    self._record_failure(f"api error: {exc}")
+                    continue
+                except requests.RequestException as exc:
+                    self._record_failure(f"request error: {exc}")
+                    continue
                 except Exception as exc:
-                    self._consecutive_errors += 1
-                    if self._consecutive_errors > MAX_CONSECUTIVE_ERRORS:
-                        _log(
-                            f"Too many consecutive errors "
-                            f"({self._consecutive_errors}) — "
-                            f"shutting down polling"
-                        )
-                        self._running = False
+                    self._record_failure(f"unexpected: {exc}")
+                    continue
+
+                self._record_success()
+                for update in updates:
+                    if not self._running or self._is_shutdown():
                         return
-                    delay = self._backoff_delay()
-                    _log(
-                        f"Poll error ({self._consecutive_errors}x): {exc}"
-                        f"  retry in {delay:.0f}s"
-                    )
-                    if self._shutdown_event is not None:
-                        self._shutdown_event.wait(timeout=delay)
-                        if self._shutdown_event.is_set():
-                            self._running = False
-                            return
-                    else:
-                        time.sleep(delay)
+                    self._process_update(update)
         except KeyboardInterrupt:
             _log("Shutting down")
             self._running = False
@@ -219,16 +327,84 @@ class TelegramCommandCenter:
         self._running = False
 
     # ------------------------------------------------------------------
-    #  Backoff
+    #  Backoff / link health
     # ------------------------------------------------------------------
 
-    def _backoff_delay(self) -> float:
-        """Compute exponential backoff with jitter."""
-        delay = min(MAX_BACKOFF, BASE_DELAY * (2 ** (self._consecutive_errors - 1)))
-        # Add ±25% jitter
-        import random
-        jitter = 1.0 + (random.random() - 0.5) * 0.5
-        return round(delay * jitter, 1)
+    @property
+    def link_status(self) -> str:
+        """Current link health: OK, DEGRADED or OFFLINE."""
+        return self._link_status
+
+    def health_status(self) -> dict[str, Any]:
+        """Machine-readable link health snapshot (for health monitor)."""
+        return {
+            "status": self._link_status,
+            "consecutive_errors": self._consecutive_errors,
+            "last_ok_ts": self._last_ok_ts,
+        }
+
+    def _retry_delay(self) -> float:
+        """Exponential backoff schedule: 5s, 10s, 30s, then capped at 60s."""
+        idx = max(0, min(self._consecutive_errors - 1, len(RETRY_DELAYS) - 1))
+        return float(RETRY_DELAYS[idx])
+
+    def _record_failure(self, reason: str) -> None:
+        """Handle a failed poll: back off and degrade, never stop the loop."""
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= OFFLINE_ERRORS:
+            self._set_status("OFFLINE")
+        elif self._consecutive_errors >= DEGRADED_ERRORS:
+            self._set_status("DEGRADED")
+        delay = self._retry_delay()
+        _log(f"connection lost, retry in {delay:.0f}s ({reason})")
+        self._update_health_file()
+        if self._shutdown_event is not None:
+            if self._shutdown_event.wait(timeout=delay):
+                self._running = False
+        else:
+            time.sleep(delay)
+
+    def _record_success(self) -> None:
+        """Handle a successful poll: reset backoff and restore the link."""
+        if self._consecutive_errors > 0:
+            _log("connection restored")
+        self._consecutive_errors = 0
+        self._last_ok_ts = time.time()
+        self._set_status("OK")
+        self._update_health_file()
+
+    def _set_status(self, status: str) -> None:
+        if status == self._link_status:
+            return
+        _log(f"status → {status}")
+        self._link_status = status
+
+    def _update_health_file(self) -> None:
+        """Persist link health so the HealthMonitor can report it.
+
+        Writes are throttled — the file is only refreshed when the status
+        changes or when HEALTH_WRITE_INTERVAL has elapsed, so a healthy
+        polling loop does not touch disk on every iteration.
+        """
+        now = time.time()
+        if (self._last_written_status is not None
+                and self._link_status == self._last_written_status
+                and now - self._last_health_write < HEALTH_WRITE_INTERVAL):
+            return
+        self._last_written_status = self._link_status
+        self._last_health_write = now
+        payload: dict[str, Any] = {
+            "status": self._link_status,
+            "consecutive_errors": self._consecutive_errors,
+            "last_ok_ts": self._last_ok_ts,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(TELEGRAM_STATUS_FILE, "w") as f:
+                json.dump(payload, f)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     #  Polling
@@ -263,33 +439,32 @@ class TelegramCommandCenter:
         ]
 
     def _poll_telegram(self) -> list[dict[str, Any]]:
-        """Get updates from Telegram via long-polling."""
+        """Get updates from Telegram via long-polling.
+
+        On failure this raises (``requests.Timeout``,
+        ``requests.ConnectionError``, ``TelegramAPIError``) so the caller
+        can back off and retry.  An empty ``result`` (no new messages) is
+        a normal healthy response and returns ``[]``.
+        """
         url = API_BASE.format(token=self._token, method="getUpdates")
         params: dict[str, Any] = {
             "offset": self._last_update_id + 1,
             "timeout": POLL_TIMEOUT,
             "allowed_updates": ["message"],
         }
-        try:
-            resp = requests.get(url, params=params, timeout=POLL_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-        except requests.ConnectionError as exc:
-            _log(f"Telegram connection error (DNS/network): {exc}")
-            return []
-        except requests.Timeout as exc:
-            _log(f"Telegram poll timeout: {exc}")
-            return []
+        resp = requests.get(url, params=params, timeout=POLL_REQUEST_TIMEOUT)
+        resp.raise_for_status()
 
         try:
             data = resp.json()
         except json.JSONDecodeError as exc:
-            _log(f"Telegram returned invalid JSON: {resp.text[:300]}")
-            return []
+            raise TelegramAPIError(
+                f"Telegram returned invalid JSON: {resp.text[:300]}"
+            ) from exc
 
         if not data.get("ok"):
             desc = data.get("description", "no description")
-            _log(f"Telegram API error (getUpdates): {desc}")
-            return []
+            raise TelegramAPIError(f"Telegram API error (getUpdates): {desc}")
 
         return data.get("result", [])
 
@@ -373,9 +548,23 @@ class TelegramCommandCenter:
                     f"{self._config.telegram_retry}): {exc}"
                 )
             except requests.RequestException as exc:
+                # Telegram rejects Markdown text with unescaped special
+                # characters (400 "can't parse entities").  Resend the
+                # same text without parse_mode so the reply always
+                # arrives instead of being lost.
+                resp = getattr(exc, "response", None)
+                if (
+                    parse_mode
+                    and resp is not None
+                    and resp.status_code == 400
+                    and "parse" in (getattr(resp, "text", "") or "").lower()
+                ):
+                    _log("Markdown rejected — resending as plain text")
+                    payload.pop("parse_mode", None)
+                    parse_mode = ""
                 resp_body = (
-                    exc.response.text[:300]
-                    if getattr(exc, 'response', None) is not None
+                    resp.text[:300]
+                    if resp is not None
                     else "no response"
                 )
                 _log(
@@ -436,12 +625,14 @@ class TelegramCommandCenter:
             )
 
         _log("Shutdown confirmed — initiating graceful shutdown")
+        # Always write the shutdown signal file so the watchdog sees a
+        # deliberate stop and does not auto-restart (BUG A fix).
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(SHUTDOWN_FILE, "w") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
+
         if self._shutdown_event:
             self._shutdown_event.set()
-        else:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(SHUTDOWN_FILE, "w") as f:
-                f.write(datetime.now(timezone.utc).isoformat())
         self._running = False
         return (
             "\U0001f6d1 *Shutting Down*\n"

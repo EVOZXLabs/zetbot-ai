@@ -30,6 +30,7 @@ from scripts.execution_engine import (
     _now,
     append_audit,
 )
+from scripts.paper_state_lock import paper_state_writes
 
 
 class OrderVerificationError(Exception):
@@ -94,6 +95,11 @@ class OrderManager:
         Accepts both ``OrderRequest`` and ``dict`` (backward compat).
         When given a ``dict``, converts to ``OrderRequest`` internally.
 
+        LIVE SELL orders are serialized on the same per-symbol lock used
+        by every other exit path (position monitor, pipeline
+        reconciliation, protection scheduler) so a manual /sell can never
+        race a concurrent TP/SL market sell for the same symbol (BUG-2).
+
         Returns ``OrderResult`` (or ``dict`` when given a ``dict`` for
         backward compatibility).
         """
@@ -104,6 +110,15 @@ class OrderManager:
         else:
             request = self._plan_to_request(trade_plan) if isinstance(trade_plan, dict) else trade_plan
 
+        if self._engine.mode == "LIVE" and (request.side or "").upper() == "SELL":
+            from scripts.exit_gate import exit_guard  # noqa: PLC0415
+            with exit_guard(request.symbol):
+                return self._execute(request, was_dict)
+        return self._execute(request, was_dict)
+
+    def _execute(self, request: OrderRequest, was_dict: bool) -> Any:
+        """Execute an already-built order request (holds the per-symbol
+        exit lock when it is a LIVE sell — see ``execute``)."""
         # ── 0. SafeGuard check (paused/limits/cooldown) ────────────────
         if self._safeguard is not None and request.side == "BUY":
             ok, reason = self._safeguard.can_open_new_position()
@@ -118,6 +133,20 @@ class OrderManager:
             self._metrics.record(risk_result)
             append_audit(self._result_to_audit(risk_result))
             return risk_result.to_dict() if was_dict else risk_result
+
+        # ── 1b. Cancel resting protection BEFORE a LIVE market sell ────
+        # A stale protection leg (full-quantity limit/stop order) could
+        # double-fill together with this market sell at the same level.
+        # Runs inside the per-symbol exit lock held by ``execute``, i.e.
+        # before any concurrent TP/SL exit for the same symbol.
+        if self._engine.mode == "LIVE" and (request.side or "").upper() == "SELL":
+            try:
+                from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+                ProtectionManager(self._exchange, self._config).cancel_protection(
+                    request.symbol, reason="manual_sell_pre_execution",
+                )
+            except Exception:
+                pass  # best-effort — _handle_live_protection retries after fill
 
         # ── 2. Execute with retry ───────────────────────────────────────
         result = self._execute_with_retry(request)
@@ -834,6 +863,7 @@ class OrderManager:
 # ---------------------------------------------------------------------------
 
 
+@paper_state_writes
 def _sync_paper_files(
     symbol: str, side: str, amount: float, price: float, cost: float, pnl: float,
     fee: float = 0.0,
@@ -866,8 +896,8 @@ def _sync_paper_files(
         "filled_at": now_ts,
     })
     try:
-        with open(orders_path, "w") as f:
-            json.dump(orders_data, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(orders_path, orders_data, indent=2)
     except OSError:
         pass
 
@@ -878,8 +908,8 @@ def _sync_paper_files(
             pb = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pb = {
-            "final_balance": 10000.0,
-            "final_equity": 10000.0,
+            "final_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+            "final_equity": float(os.getenv("ACCOUNT_BALANCE", "10000")),
             "total_trades": 0,
             "winning_trades": 0,
             "losing_trades": 0,
@@ -890,10 +920,18 @@ def _sync_paper_files(
         }
 
     if side == "BUY":
-        pb["final_balance"] = round(pb.get("final_balance", 10000.0) - cost, 2)
+        pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) - cost, 2)
     elif side == "SELL":
         proceeds = amount * price - fee
-        pb["final_balance"] = round(pb.get("final_balance", 10000.0) + proceeds, 2)
+        # Close the position in the AUTHORITATIVE state files so the
+        # next pipeline cycle can't resurrect it: paper_state.json
+        # (wallet balance + position + order) and positions.json
+        # (Telegram views). Returns the REAL realized PnL.
+        pnl = _close_paper_position_on_sell(symbol, amount, price, proceeds)
+        # Keep the order record consistent with the realized PnL.
+        if orders_data.get("orders"):
+            orders_data["orders"][-1]["net_pnl"] = round(pnl, 2)
+        pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) + proceeds, 2)
         pb["total_trades"] = pb.get("total_trades", 0) + 1
         if pnl > 0:
             pb["winning_trades"] = pb.get("winning_trades", 0) + 1
@@ -921,7 +959,7 @@ def _sync_paper_files(
     snapshot = MetricsManager.compute_snapshot(
         cash=pb.get("final_balance", 0.0),
         realized_pnl=pb.get("realized_pnl", 0.0),
-        initial_balance=pb.get("initial_balance", 10_000.0),
+        initial_balance=pb.get("initial_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))),
         open_positions=open_positions,
         total_trades=pb.get("total_trades", 0),
         winning_trades=pb.get("winning_trades", 0),
@@ -937,7 +975,136 @@ def _sync_paper_files(
     pb["net_pnl"] = round(snapshot.net_pnl, 2)
 
     try:
-        with open(bal_path, "w") as f:
-            json.dump(pb, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(bal_path, pb, indent=2)
     except OSError:
         pass
+
+
+@paper_state_writes
+def _close_paper_position_on_sell(
+    symbol: str,
+    amount: float,
+    price: float,
+    proceeds: float,
+) -> float:
+    """Close an OPEN paper position after a manual /sell fills.
+
+    ``paper_state.json`` is the authoritative state the pipeline re-derives
+    everything from.  A manual SELL that only updated ``paper_balance.json``
+    used to be silently reverted by the next pipeline cycle: the position
+    was reloaded as still-OPEN and the cash figure reverted to the
+    pre-sale balance.  This patches ``paper_state.json`` (wallet balance +
+    CLOSED position + SELL order) and ``positions.json`` so the closure is
+    durable and immediately visible to Telegram commands.
+
+    Returns the realized PnL computed against the position's cost basis
+    (0.0 when no matching OPEN position is found).
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+    now_ts = datetime.now(timezone.utc).isoformat()
+    data_dir = "data"
+
+    state_path = f"{data_dir}/paper_state.json"
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        state = None
+
+    pnl = 0.0
+    vp = (state.get("positions") or {}).get(symbol) if state is not None else None
+
+    if vp is not None and vp.get("status") == "OPEN":
+        qty_total = float(vp.get("quantity", 0) or 0)
+        cost_basis = float(vp.get("cost_basis", 0) or 0)
+        cost_part = cost_basis * (amount / qty_total) if qty_total > 0 else 0.0
+        pnl = proceeds - cost_part
+
+        # Credit the wallet so the next pipeline cycle sees the proceeds.
+        state["balance"] = round(float(state.get("balance", 0.0)) + proceeds, 2)
+
+        vp["status"] = "CLOSED"
+        vp["remaining_qty"] = 0.0
+        vp["unrealized_pnl"] = 0.0
+        vp["realized_pnl"] = round(pnl, 2)
+        vp["total_pnl"] = round(pnl, 2)
+        vp["current_price"] = price
+        vp["closure_notified"] = True
+
+        entry_price = float(vp.get("entry_price", 0) or 0)
+        net_pnl_pct = round((pnl / cost_part * 100), 2) if cost_part > 0 else 0.0
+
+        state.setdefault("orders", []).append({
+            "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
+            "symbol": symbol,
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": amount,
+            "filled_quantity": amount,
+            "entry_price": entry_price,
+            "fill_price": price,
+            "slippage": 0.0,
+            "entry_fee": 0.0,
+            "exit_price": price,
+            "exit_fee": 0.0,
+            "total_cost": round(cost_part, 2),
+            "total_proceeds": round(proceeds, 2),
+            "net_pnl": round(pnl, 2),
+            "net_pnl_pct": net_pnl_pct,
+            "status": "CLOSED",
+            "created_at": now_ts,
+            "filled_at": now_ts,
+            "closed_at": now_ts,
+            "exit_reason": "manual",
+        })
+
+        try:
+            from scripts.paper_state_lock import atomic_write_json as _awj
+            _awj(state_path, state, indent=2, default=str)
+        except OSError:
+            pass
+
+    # Close the position in positions.json too so /status and /positions
+    # reflect the closure immediately — this must run regardless of
+    # whether paper_state.json had a matching OPEN entry above. Relying
+    # on that guard used to let an out-of-sync paper_state.json silently
+    # skip this block entirely, leaving positions.json (what Telegram
+    # actually reads) showing a position that had already been sold.
+    from scripts.position_status import is_open  # noqa: PLC0415
+    pos_path = f"{data_dir}/positions.json"
+    try:
+        with open(pos_path) as f:
+            pos_data = json.load(f)
+        for p in pos_data.get("positions", []):
+            if p.get("symbol") == symbol and is_open(p.get("status")):
+                if vp is None:
+                    # paper_state.json didn't have this position — fall
+                    # back to positions.json's own cost basis so PnL is
+                    # still reported instead of a misleading 0.0.
+                    fallback_cost_basis = float(p.get("cost_basis", 0.0) or 0.0)
+                    if fallback_cost_basis <= 0:
+                        fallback_cost_basis = float(p.get("entry_price", 0.0) or 0.0) * amount
+                    pnl = proceeds - fallback_cost_basis
+                p["status"] = "CLOSED"
+                p["remaining_qty"] = 0.0
+                p["unrealized_pnl"] = 0.0
+                p["realized_pnl"] = round(pnl, 2)
+                p["total_pnl"] = round(pnl, 2)
+                p["closed_at"] = now_ts
+                break
+        pos_data["total_positions"] = len(pos_data.get("positions", []))
+        pos_data["active_count"] = sum(
+            1 for p in pos_data.get("positions", [])
+            if is_open(p.get("status"))
+        )
+        pos_data["closed_count"] = sum(
+            1 for p in pos_data.get("positions", [])
+            if not is_open(p.get("status"))
+        )
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(pos_path, pos_data, indent=2, default=str)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    return pnl

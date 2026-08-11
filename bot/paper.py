@@ -111,8 +111,8 @@ class PaperTrader:
 
         if position_value < min_position_usd:
             logger.info(
-                "Paper BUY rejected — position $%.2f below min notional "
-                "$%.2f for balance=$%.2f (%.1f%% sizing). Account too "
+                "Paper BUY rejected — position %.2f USDT below min notional "
+                "%.2f USDT for balance=%.2f USDT (%.1f%% sizing). Account too "
                 "small for current position_size%% setting.",
                 position_value, min_position_usd, self._balance,
                 position_size_pct,
@@ -151,7 +151,7 @@ class PaperTrader:
                 (take_profit_price - entry_price) / entry_price * 100.0
                 if entry_price > 0 else 0.0
             ),
-            f"${position_value:,.2f} / ",
+            f"{position_value:,.2f} USDT / ",
             position_size_pct,
             quantity,
             symbol.split("/")[0],

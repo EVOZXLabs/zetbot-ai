@@ -34,8 +34,13 @@ from scripts.order_manager import OrderManager
 
 
 @pytest.fixture
-def safeguard() -> SafeGuard:
+def safeguard(monkeypatch: pytest.MonkeyPatch) -> SafeGuard:
     """Fresh SafeGuard with low limits for easy testing."""
+    # _live_balance() reads the real data/paper_balance.json (live bot
+    # state) — redirect it to 0.0 so the fallback chain uses
+    # set_account_balance() and tests stay deterministic regardless of
+    # the bot's current balance file.
+    monkeypatch.setattr(SafeGuard, "_live_balance", staticmethod(lambda: 0.0))
     sg = SafeGuard(
         max_daily_loss_pct=5.0,
         max_consecutive_losses=3,
@@ -43,6 +48,7 @@ def safeguard() -> SafeGuard:
         exchange_failure_window=60,
         exchange_max_failures=3,
         atr_spike_multiplier=3.0,
+        max_open_positions=999,   # never block in these unit tests
     )
     sg.set_account_balance(10000.0)
     yield sg
@@ -152,7 +158,7 @@ class TestDailyLossLimit:
         assert allowed
 
     def test_resets_on_new_day(self) -> None:
-        sg = SafeGuard(max_daily_loss_pct=5.0)
+        sg = SafeGuard(max_daily_loss_pct=5.0, max_open_positions=999)
         sg.set_account_balance(10000.0)
         # Manually set tracking for yesterday
         from datetime import timedelta

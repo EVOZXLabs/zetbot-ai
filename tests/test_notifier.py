@@ -186,7 +186,9 @@ class TestNotificationMethods:
         assert "50000" in text
         assert "-1.50%" in text
         assert "+2.50%" in text
-        assert "EMA200_BULLISH" in text
+        # Markdown-special characters in dynamic content are escaped so
+        # the API never rejects the message (renders identically).
+        assert "EMA200\\_BULLISH" in text
 
     def test_notify_position_closed_win(self) -> None:
         n = _make_notifier()
@@ -200,7 +202,7 @@ class TestNotificationMethods:
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
         assert "POSITION CLOSED" in text
-        assert "Profit $150.00" in text
+        assert "Profit 150.00 USDT" in text
         assert "4h" in text
 
     def test_notify_position_closed_loss(self) -> None:
@@ -215,7 +217,7 @@ class TestNotificationMethods:
         mock_send.assert_called_once()
         text = mock_send.call_args[0][0]
         assert "POSITION CLOSED" in text
-        assert "Loss $200.00" in text
+        assert "Loss 200.00 USDT" in text
         assert "Stop Loss" in text
 
     def test_notify_take_profit(self) -> None:

@@ -62,6 +62,8 @@ class ServiceContainer:
         self._health: Optional[IHealthMonitor] = None
         self._metrics: Optional[IMetricsManager] = None
         self._pipeline: Any = None
+        # Realtime market data for Telegram user-facing commands (lazy).
+        self._realtime_market: Any = None
 
     # ------------------------------------------------------------------
     #  Bootstrap
@@ -78,6 +80,7 @@ class ServiceContainer:
             active=self._config_service.exchange,
             api_key=self._config_service.api_key,
             api_secret=self._config_service.api_secret,
+            quote_currency=self._config_service.quote_currency,
         )
         # Wallet must exist before Metrics: in LIVE mode, MetricsManager
         # needs the wallet to fetch the REAL exchange balance instead of
@@ -105,7 +108,7 @@ class ServiceContainer:
             atr_spike_multiplier=self._config_service.atr_spike_multiplier,
         )
         self._safeguard.set_account_balance(self._config_service.account_balance)
-        self._scanner = _ScannerAdapter(self._config_service)
+        self._scanner = _ScannerAdapter(self._config_service, self._exchange)
         self._strategy = _StrategyAdapter()
         self._risk = _RiskAdapter(self._config_service)
         self._order = OrderManager(
@@ -207,6 +210,22 @@ class ServiceContainer:
         assert self._metrics is not None
         return self._metrics
 
+    @property
+    def realtime_market(self) -> Any:
+        """Realtime market service for user-facing market data commands.
+
+        Lazily created; its short TTL caches (per symbol) live as long as
+        the process so repeated Telegram commands don't hammer the
+        exchange while still never serving data older than the TTL.
+        """
+        if self._realtime_market is None:
+            from scripts.realtime_market import RealtimeMarketData  # noqa: PLC0415
+            self._realtime_market = RealtimeMarketData(
+                exchange_manager=self._exchange,
+                timeframe=self._config_service.timeframe,
+            )
+        return self._realtime_market
+
     # ------------------------------------------------------------------
     #  Convenience
     # ------------------------------------------------------------------
@@ -275,8 +294,8 @@ class _WalletAdapter:
         import json, os  # noqa: PLC0415
         path = os.path.join(self._config.data_dir, "paper_balance.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(data, f)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data)
 
     @property
     def balance(self) -> float:
@@ -447,16 +466,41 @@ class _LiveWalletAdapter:
         return dict(self._snapshot())
 
 
+class _ScannerConfigView:
+    """Config view for the scanner that overrides ``.exchange`` with
+    whatever is currently active on the ``ExchangeManager`` — everything
+    else (quote_currency, thresholds, etc.) passes through unchanged.
+
+    This is what makes the Telegram ``/exchange`` command actually
+    redirect scanning, not just order execution: without this, the
+    scanner always re-read ``EXCHANGE`` from ``.env`` at bootstrap and
+    never saw a runtime switch.
+    """
+
+    def __init__(self, config: IConfigService, exchange_manager: ExchangeManager) -> None:
+        self._config = config
+        self._exchange_manager = exchange_manager
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "exchange":
+            return self._exchange_manager.name
+        if name == "quote_currency":
+            return self._exchange_manager.quote_currency
+        return getattr(self._config, name)
+
+
 class _ScannerAdapter:
     """Wraps scripts.scanner as IScanner."""
 
-    def __init__(self, config: IConfigService) -> None:
+    def __init__(self, config: IConfigService, exchange_manager: ExchangeManager) -> None:
         self._config = config
+        self._exchange_manager = exchange_manager
 
     def run(self) -> dict[str, Any]:
         from scripts import scanner  # noqa: PLC0415
+        scanner_config = _ScannerConfigView(self._config, self._exchange_manager)
         try:
-            scanner.main()
+            scanner.main(config=scanner_config)
         except RuntimeError as exc:
             # "cannot schedule new futures after interpreter shutdown"
             # happens when shutdown is requested while scanner threads
@@ -511,6 +555,7 @@ class _RiskAdapter:
             risk_per_trade=self._config.max_risk_per_trade_pct,
             max_daily_loss=5.0,
             max_positions=self._config.max_positions,
+            max_position_size_pct=self._config.max_position_size_pct,
         )
         if decisions:
             mgr._data.decisions = decisions

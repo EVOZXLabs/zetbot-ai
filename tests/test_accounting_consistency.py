@@ -165,7 +165,7 @@ class TestAccountingInvariants:
         # Unrealized = (105_000 - 100_000) × 0.1 = 500
         _write_pb(
             tmp_path, final_balance=9_500.0, final_equity=20_000.0,
-            realized_pnl=0.0, unrealized_pnl=500.0, net_pnl=500.0,
+            realized_pnl=0.0, unrealized_pnl=500.0, net_pnl=10_000.0,
         )
         pos = _open_pos(entry_price=100_000, current_price=105_000, quantity=0.1, remaining_qty=0.1)
         _write_positions(tmp_path, [pos])
@@ -175,8 +175,8 @@ class TestAccountingInvariants:
         assert a.position_value == pytest.approx(10_500.0)
         assert a.equity == pytest.approx(20_000.0)
         assert a.unrealized_pnl == pytest.approx(500.0)
-        # Net = realized + unrealized
-        assert a.net_pnl == pytest.approx(a.realized_pnl + a.unrealized_pnl)
+        # net_pnl = equity - initial_balance = 20000 - 10000 = 10000
+        assert a.net_pnl == pytest.approx(10_000.0)
         # Exposure = 10_500 / 20_000 × 100 = 52.5%
         assert a.exposure_pct == pytest.approx(52.5)
         # Invariant: equity = balance + position_value
@@ -188,7 +188,7 @@ class TestAccountingInvariants:
         # Unrealized = (95_000 - 100_000) × 0.1 = -500
         _write_pb(
             tmp_path, final_balance=9_500.0, final_equity=19_000.0,
-            realized_pnl=0.0, unrealized_pnl=-500.0, net_pnl=-500.0,
+            realized_pnl=0.0, unrealized_pnl=-500.0, net_pnl=9_000.0,
         )
         pos = _open_pos(entry_price=100_000, current_price=95_000, quantity=0.1, remaining_qty=0.1)
         _write_positions(tmp_path, [pos])
@@ -198,7 +198,7 @@ class TestAccountingInvariants:
         assert a.position_value == pytest.approx(9_500.0)
         assert a.equity == pytest.approx(19_000.0)
         assert a.unrealized_pnl == pytest.approx(-500.0)
-        assert a.net_pnl == pytest.approx(-500.0)
+        assert a.net_pnl == pytest.approx(9_000.0)
         # Invariant
         assert a.equity == pytest.approx(a.balance + a.position_value)
 
@@ -208,10 +208,10 @@ class TestAccountingInvariants:
         # pos2 market value = 3_200 × 2.0 = 6_400 -> position_value = 11_500
         # equity = 8_000 + 11_500 = 19_500
         # unrealized = (102_000-100_000)×0.05 + (3_200-3_000)×2.0 = 100 + 400 = 500
-        # net = realized(100) + unrealized(500) = 600
+        # net = equity - initial_balance = 19500 - 10000 = 9500
         _write_pb(
             tmp_path, final_balance=8_000.0, final_equity=19_500.0,
-            realized_pnl=100.0, unrealized_pnl=500.0, net_pnl=600.0,
+            realized_pnl=100.0, unrealized_pnl=500.0, net_pnl=9_500.0,
         )
         pos1 = _open_pos("BTCUSDT", 100_000, 102_000, 0.05, 0.05)
         pos2 = _open_pos("ETHUSDT", 3_000, 3_200, 2.0, 2.0)
@@ -222,7 +222,7 @@ class TestAccountingInvariants:
         assert a.position_value == pytest.approx(11_500.0)
         assert a.equity == pytest.approx(19_500.0)
         assert a.unrealized_pnl == pytest.approx(500.0)
-        assert a.net_pnl == pytest.approx(600.0)
+        assert a.net_pnl == pytest.approx(9_500.0)
         assert a.open_positions == 2
         # Invariant
         assert a.equity == pytest.approx(a.balance + a.position_value)
@@ -230,10 +230,10 @@ class TestAccountingInvariants:
     def test_partial_exit(self, tmp_path: Any) -> None:
         """Position with partial exit (remaining_qty < quantity)."""
         # Market value = 105_000 × 0.05 = 5_250; equity = 10_200 + 5_250 = 15_450
-        # Unrealized = (105_000 - 100_000) × 0.05 = 250; net = 200 + 250 = 450
+        # Unrealized = (105_000 - 100_000) × 0.05 = 250; net = equity - initial_balance = 15450 - 10000 = 5450
         _write_pb(
             tmp_path, final_balance=10_200.0, final_equity=15_450.0,
-            realized_pnl=200.0, unrealized_pnl=250.0, net_pnl=450.0,
+            realized_pnl=200.0, unrealized_pnl=250.0, net_pnl=5_450.0,
         )
         pos = _open_pos(
             entry_price=100_000, current_price=105_000,
@@ -245,7 +245,7 @@ class TestAccountingInvariants:
 
         assert a.position_value == pytest.approx(5_250.0)
         assert a.unrealized_pnl == pytest.approx(250.0)
-        assert a.net_pnl == pytest.approx(450.0)
+        assert a.net_pnl == pytest.approx(5_450.0)
 
     def test_full_exit(self, tmp_path: Any) -> None:
         """Only closed positions — no open position value."""
@@ -282,19 +282,20 @@ class TestAccountingInvariants:
         assert a.total_return_pct == pytest.approx(105.0)
 
     def test_net_pnl_invariant(self, tmp_path: Any) -> None:
-        """net_pnl == realized_pnl + unrealized_pnl always."""
+        """net_pnl == equity - initial_balance always."""
         # Market value = 52_000 × 1.0 = 52_000; equity = 9_000 + 52_000 = 61_000
-        # Unrealized = (52_000-50_000)×1.0 = 2_000; net = 300 + 2_000 = 2_300
+        # net_pnl = 61000 - 10000 = 51000
         _write_pb(
             tmp_path, final_balance=9_000.0, final_equity=61_000.0,
-            realized_pnl=300.0, unrealized_pnl=2_000.0, net_pnl=2_300.0,
+            realized_pnl=300.0, unrealized_pnl=2_000.0, net_pnl=51_000.0,
         )
         pos = _open_pos(entry_price=50_000, current_price=52_000, quantity=1.0)
         _write_positions(tmp_path, [pos])
 
         a = self._mgr(tmp_path).account()
 
-        assert a.net_pnl == pytest.approx(a.realized_pnl + a.unrealized_pnl)
+        # Account-centric: net_pnl = equity - initial_balance
+        assert a.net_pnl == pytest.approx(a.equity - a.initial_balance)
 
     def test_equity_invariant(self, tmp_path: Any) -> None:
         """equity == balance + position_value always (true by construction:
@@ -399,10 +400,10 @@ class TestAccountSnapshotConsistency:
     def test_wallet_uses_snapshot(self, tmp_path: Any) -> None:
         """Wallet command accounting matches AccountSnapshot."""
         # market value = 55_000 × 0.5 = 27_500; equity = 9_000 + 27_500 = 36_500
-        # unrealized = (55_000-50_000)×0.5 = 2_500; net = 200 + 2_500 = 2_700
+        # net_pnl = 36500 - 10000 = 26500
         _write_pb(
             tmp_path, final_balance=9_000.0, final_equity=36_500.0,
-            realized_pnl=200.0, unrealized_pnl=2_500.0, net_pnl=2_700.0,
+            realized_pnl=200.0, unrealized_pnl=2_500.0, net_pnl=26_500.0,
         )
         pos = _open_pos(entry_price=50_000, current_price=55_000, quantity=0.5, remaining_qty=0.5)
         _write_positions(tmp_path, [pos])
@@ -413,16 +414,16 @@ class TestAccountSnapshotConsistency:
         assert a.balance == 9_000.0
         assert a.position_value == pytest.approx(27_500.0)  # 55_000 × 0.5
         assert a.equity == pytest.approx(36_500.0)
-        assert a.net_pnl == pytest.approx(2_700.0)  # realized(200) + unrealized(2500)
+        assert a.net_pnl == pytest.approx(26_500.0)  # equity - initial_balance
         assert a.exposure_pct == pytest.approx(27_500 / 36_500 * 100)
 
     def test_portfolio_uses_snapshot(self, tmp_path: Any) -> None:
         """Portfolio command accounting matches AccountSnapshot."""
         # market value = 2_800 × 10 = 28_000; equity = 8_000 + 28_000 = 36_000
-        # unrealized = (2_800-3_000)×10 = -2_000; net = -100 + -2_000 = -2_100
+        # net_pnl = 36000 - 10000 = 26000
         _write_pb(
             tmp_path, final_balance=8_000.0, final_equity=36_000.0,
-            realized_pnl=-100.0, unrealized_pnl=-2_000.0, net_pnl=-2_100.0,
+            realized_pnl=-100.0, unrealized_pnl=-2_000.0, net_pnl=26_000.0,
         )
         pos = _open_pos(entry_price=3_000, current_price=2_800, quantity=10.0, remaining_qty=10.0)
         _write_positions(tmp_path, [pos])
@@ -432,7 +433,7 @@ class TestAccountSnapshotConsistency:
         assert a.balance == 8_000.0
         assert a.position_value == pytest.approx(28_000.0)
         assert a.equity == pytest.approx(36_000.0)
-        assert a.net_pnl == pytest.approx(-2_100.0)  # -100 + (-2000)
+        assert a.net_pnl == pytest.approx(26_000.0)  # equity - initial_balance
         assert a.exposure_pct == pytest.approx(28_000 / 36_000 * 100)
 
     def test_status_uses_snapshot(self, tmp_path: Any) -> None:
@@ -440,7 +441,7 @@ class TestAccountSnapshotConsistency:
         # Market value = 100_000 × 0.05 = 5_000; equity = 10_000 + 5_000 = 15_000
         _write_pb(
             tmp_path, final_balance=10_000.0, final_equity=15_000.0,
-            unrealized_pnl=0.0, net_pnl=0.0,
+            unrealized_pnl=0.0, net_pnl=5_000.0,
         )
         pos = _open_pos(entry_price=100_000, current_price=100_000, quantity=0.05, remaining_qty=0.05)
         _write_positions(tmp_path, [pos])
@@ -449,7 +450,7 @@ class TestAccountSnapshotConsistency:
 
         # At same price, no unrealized PnL
         assert a.unrealized_pnl == pytest.approx(0.0)
-        assert a.net_pnl == pytest.approx(0.0)
+        assert a.net_pnl == pytest.approx(5_000.0)  # equity - initial_balance
         # Market value = 100_000 × 0.05 = 5_000
         assert a.position_value == pytest.approx(5_000.0)
         # Exposure = 5_000 / 15_000 × 100 ≈ 33.3%
@@ -459,7 +460,7 @@ class TestAccountSnapshotConsistency:
         """Balance command returns same values as AccountSnapshot."""
         _write_pb(
             tmp_path, final_balance=12_000.0, final_equity=12_000.0,
-            realized_pnl=1_000.0, unrealized_pnl=0.0, net_pnl=1_000.0,
+            realized_pnl=1_000.0, unrealized_pnl=0.0, net_pnl=2_000.0,
         )
         _write_positions(tmp_path, [])
 
@@ -469,15 +470,15 @@ class TestAccountSnapshotConsistency:
         assert a.equity == 12_000.0
         assert a.realized_pnl == 1_000.0
         assert a.unrealized_pnl == 0.0
-        assert a.net_pnl == 1_000.0
+        assert a.net_pnl == 2_000.0  # equity - initial_balance
 
     def test_mixed_positions_consistency(self, tmp_path: Any) -> None:
         """Mix of open and closed positions — only open contribute to position_value."""
         # Only the open position contributes: 105_000 × 0.05 = 5_250
-        # equity = 9_500 + 5_250 = 14_750; unrealized = 250; net = 300 + 250 = 550
+        # equity = 9_500 + 5_250 = 14_750; net = equity - initial_balance = 4750
         _write_pb(
             tmp_path, final_balance=9_500.0, final_equity=14_750.0,
-            realized_pnl=300.0, unrealized_pnl=250.0, net_pnl=550.0,
+            realized_pnl=300.0, unrealized_pnl=250.0, net_pnl=4_750.0,
         )
         open_p = _open_pos("BTCUSDT", 100_000, 105_000, 0.05, 0.05)
         closed_p = _closed_pos("ETHUSDT", 3_000, 3_200, 5.0)
@@ -490,6 +491,7 @@ class TestAccountSnapshotConsistency:
         assert a.open_positions == 1
         # Equity = 9_500 + 5_250 = 14_750
         assert a.equity == pytest.approx(14_750.0)
+        assert a.net_pnl == pytest.approx(4_750.0)  # equity - initial_balance
         # Invariant
         assert a.equity == pytest.approx(a.balance + a.position_value)
 

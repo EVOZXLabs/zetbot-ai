@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from telegram.base_command import BaseCommand, CommandMeta
-from telegram.formatter import fmt_holding, fmt_price, fmt_pct
+from telegram.formatter import fmt_holding, fmt_price, fmt_pct, fmt_pnl
 from telegram.ui import (
     compact_header, wib_now, pnl_emoji, progress_bar,
     ai_insight, build_message,
@@ -114,17 +114,55 @@ class PositionsCommand(BaseCommand):
         if not open_positions:
             return build_message(compact_header(), "No open positions.")
 
+        # Account quote currency — never the symbol's own suffix: a
+        # normalized symbol like BTC/USDT on an Indodax/IDR account must
+        # display PnL in IDR (the units every number is actually in).
+        if ctx.services is not None:
+            quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+        else:
+            quote = getattr(ctx.config, "quote_currency", "USDT") or "USDT"
+
         cards = [compact_header()]
 
         for p in open_positions:
             symbol = p.get("symbol", "?")
             entry = p.get("entry_price", 0.0)
             current = p.get("current_price", 0.0)
-            remaining = p.get("remaining_qty", p.get("quantity", 0.0))
+            total_qty = p.get("quantity", 0.0)
+            remaining = p.get("remaining_qty", total_qty)
             cost_basis = p.get("cost_basis", 0.0)
 
-            pnl = current * remaining - cost_basis
-            pnl_pct = ((current / entry) - 1) * 100 if entry > 0 else 0.0
+            # ``cost_basis`` in positions.json represents the *total* cost for
+            # the original full quantity (including fees + slippage).  After a
+            # partial TP sell, ``remaining_qty < quantity`` but ``cost_basis``
+            # is still the full amount, so we must scale it down to the
+            # remaining portion before computing PnL.
+            #
+            # Legacy entries without cost_basis: derive from entry price.
+            if cost_basis <= 0 and entry > 0:
+                cost_basis = entry * total_qty
+
+            # Scale cost_basis to the remaining portion of the position.
+            if total_qty > 0:
+                cost_basis_remaining = cost_basis * (remaining / total_qty)
+            else:
+                cost_basis_remaining = cost_basis
+
+            pnl = current * remaining - cost_basis_remaining
+            # pnl_pct derived from the *actual* pnl vs cost paid — consistent
+            # with the absolute pnl value shown next to it.
+            # Guard: when cost_basis_remaining is 0 (legacy position with
+            # missing cost data), fall back to entry-price calculation so
+            # pnl_pct sign always matches the sign of pnl (no contradiction
+            # like "-103 IDR (+28.04%)").
+            if cost_basis_remaining > 0:
+                pnl_pct = pnl / cost_basis_remaining * 100
+            elif entry > 0 and remaining > 0:
+                # Fallback: derive from entry price
+                fallback_cost = entry * remaining
+                pnl_pct = (current * remaining - fallback_cost) / fallback_cost * 100
+            else:
+                pnl_pct = 0.0
 
             emoji = pnl_emoji(pnl)
 
@@ -151,8 +189,9 @@ class PositionsCommand(BaseCommand):
                 bar = progress_bar(pct_to_tp, 100, 10)
                 progress_line = f"Entry → TP1  {bar} {pct_to_tp:.0f}%\n"
 
+            quote_upper = quote.upper()
             card = (
-                f"{emoji} *{symbol}*  ${pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
+                f"{emoji} *{symbol}*  {fmt_pnl(pnl, quote_upper)} ({pnl_pct:+.2f}%)\n"
                 f"{progress_line}"
                 f"🕒 Held {holding_str}"
             )

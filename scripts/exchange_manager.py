@@ -34,6 +34,7 @@ class ExchangeManager:
         active: str = "binance",
         api_key: str = "",
         api_secret: str = "",
+        quote_currency: str = "",
     ) -> None:
         self._providers: dict[str, ExchangeProvider] = {}
         self._active_name: str = active.lower()
@@ -42,6 +43,10 @@ class ExchangeManager:
         # a single API key/secret pair is exchange-specific.
         self._api_key = api_key or ""
         self._api_secret = api_secret or ""
+        # Runtime-overridable quote currency (e.g. IDR for Indodax) —
+        # starts as whatever AppConfig/.env said, but can be changed at
+        # runtime via `/exchange <name> <quote>` without editing .env.
+        self._quote_currency: str = (quote_currency or "USDT").upper()
 
     # -- Provider access -------------------------------------------------
 
@@ -83,6 +88,16 @@ class ExchangeManager:
         name = name.lower().replace(" ", "")
         self._resolve(name)  # validate existence
         self._active_name = name
+
+    @property
+    def quote_currency(self) -> str:
+        """Return the currently active quote currency (e.g. USDT, IDR)."""
+        return self._quote_currency
+
+    def set_quote_currency(self, quote: str) -> None:
+        """Override the quote currency used for scanning/trading at
+        runtime (e.g. 'IDR' when switching to Indodax)."""
+        self._quote_currency = quote.strip().upper()
 
     def list_providers(self) -> list[str]:
         """Return sorted list of all supported exchange names."""

@@ -48,7 +48,7 @@ CONFIG_FIELDS: list[ConfigField] = [
                 validator=lambda v: v.lower() in ("true", "false")),
     ConfigField("TELEGRAM_TOKEN", "Telegram Bot Token", "", secret=True),
     ConfigField("TELEGRAM_CHAT_ID", "Telegram Chat ID", "", secret=True),
-    ConfigField("POSITION_SIZE", "Position Size (USDT)", "10"),
+    ConfigField("POSITION_SIZE", "Position Size (Quote Currency)", "10"),
     ConfigField("MAX_POSITIONS", "Max Open Positions", "1"),
     ConfigField("TIMEFRAME", "Timeframe", "1h",
                 validator=lambda v: v in VALID_TIMEFRAMES),
@@ -57,13 +57,13 @@ CONFIG_FIELDS: list[ConfigField] = [
     ConfigField("AUTO_PIPELINE", "Auto Pipeline (true/false)", "true",
                 validator=lambda v: v.lower() in ("true", "false")),
     ConfigField("PIPELINE_INTERVAL", "Pipeline Interval (seconds)", "300"),
-    ConfigField("ACCOUNT_BALANCE", "Initial Account Balance (USDT)", "10000"),
+    ConfigField("ACCOUNT_BALANCE", "Initial Account Balance (Quote Currency)", "10000"),
     ConfigField("MAX_RISK_PER_TRADE_PCT", "Max Risk Per Trade (%)", "1.0"),
     ConfigField("MIN_RR", "Min Risk/Reward Ratio", "1.5"),
     ConfigField("MAX_RR", "Max Risk/Reward Ratio", "5.0"),
     ConfigField("SCANNER_THREADS", "Scanner Threads", "5"),
     ConfigField("SCANNER_TOP_N", "Scanner Top N", "50"),
-    ConfigField("SCANNER_MIN_VOLUME", "Scanner Min Volume (USDT)", "50000"),
+    ConfigField("SCANNER_MIN_VOLUME", "Scanner Min Volume (Quote Currency)", "50000"),
     # Money Management (SPECIFICATION.md §25/§47) — default production
     # mode is RISK_PERCENTAGE. Fractional notation (0.01 == 1%).
     ConfigField("MONEY_MANAGEMENT_MODE", "Money Management Mode", "RISK_PERCENTAGE",
@@ -110,6 +110,13 @@ def write_env(values: dict[str, str], path: str = ENV_PATH) -> None:
 
 
 def display_config() -> str:
+    # Re-load the .env file so the output reflects the current file on disk,
+    # not a stale os.environ snapshot from before any .env changes this
+    # session. ``override=True`` ensures file values win over any pre-existing
+    # env vars (e.g. the shell had EXCHANGE=indodax before the file was
+    # changed to EXCHANGE=binance).
+    if os.path.exists(ENV_PATH):
+        load_dotenv(ENV_PATH, override=True)
     lines = ["\n=== Current Configuration ===\n"]
     for field in CONFIG_FIELDS:
         value = os.getenv(field.key, field.default)
@@ -119,6 +126,10 @@ def display_config() -> str:
 
 
 def config_to_dict() -> dict[str, str]:
+    # Re-load the .env file so the returned dict reflects the current file
+    # on disk, not a stale os.environ snapshot.
+    if os.path.exists(ENV_PATH):
+        load_dotenv(ENV_PATH, override=True)
     result: dict[str, str] = {}
     for field in CONFIG_FIELDS:
         value = os.getenv(field.key, field.default)

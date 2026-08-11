@@ -5,10 +5,61 @@ thread.  Prevents overlapping runs, survives Telegram / exchange failures,
 and exposes status for monitoring.
 """
 
+import json
 import logging
+import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
+
+_log = logging.getLogger("ZetBot")
+
+# Paths written by the scheduler so watchdog can detect staleness.
+PIPELINE_LAST_RUN_FILE = "data/pipeline_last_run.json"
+HEARTBEAT_FILE = "data/watchdog_heartbeat.json"
+
+
+def _write_pipeline_timestamp() -> None:
+    """Write data/pipeline_last_run.json with the current UTC timestamp.
+
+    Called after every successful pipeline execution so the watchdog can
+    detect when the pipeline has been silent for too long.
+    """
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open(PIPELINE_LAST_RUN_FILE, "w") as f:
+            json.dump({"last_run": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+        pass
+
+
+def _notify_pipeline_error(error: str) -> None:
+    """Send a Telegram notification for a critical pipeline failure.
+
+    Uses the centralized Notifier; silently no-ops when Telegram is not
+    configured.
+    """
+    try:
+        from bot.notifier import Notifier  # noqa: PLC0415
+        notifier = Notifier.from_env()
+        notifier.notify_error(f"Pipeline failed: {error[:200]}")
+    except Exception:
+        pass
+
+
+def write_heartbeat() -> None:
+    """Write data/watchdog_heartbeat.json with the current timestamp.
+
+    Should be called periodically (e.g. every 60s) by the main loop so
+    the watchdog can detect a hung-but-alive bot process.
+    """
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open(HEARTBEAT_FILE, "w") as f:
+            json.dump({"ts": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+        pass
 
 
 class PipelineScheduler:
@@ -212,10 +263,14 @@ class PipelineScheduler:
                 f"({len(results)} stages, "
                 f"{sum(1 for r in results if r.success)}/{len(results)} OK)."
             )
+            # Write pipeline_last_run.json so watchdog can detect staleness.
+            _write_pipeline_timestamp()
         except Exception as exc:
             with self._lock:
                 self._last_status = f"failed: {exc}"
             self._log.error(f"Pipeline #{run_number} failed: {exc}")
+            # Notify via Telegram on critical pipeline failure
+            _notify_pipeline_error(str(exc))
 
         with self._lock:
             self._last_end = time.time()

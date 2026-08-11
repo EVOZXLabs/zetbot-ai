@@ -15,6 +15,12 @@ data/
 
 # Runtime backups (snapshots of auto-saved state)
 backup/
+backups/
+
+# Installer/updater/uninstaller working backups
+.env.update-backup
+.data-update-backup/
+.uninstall-backup-*/
 
 # VSCode
 .vscode/

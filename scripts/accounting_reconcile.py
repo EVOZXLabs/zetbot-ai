@@ -49,12 +49,14 @@ def _read_json(path: str) -> dict[str, Any]:
 
 
 def _write_json(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, default=str)
+    from scripts.paper_state_lock import atomic_write_json as _awj
+    _awj(path, data, indent=2, default=str)
 
 
-def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
+def reconcile(
+    logger_obj: logging.Logger | None = None,
+    account_balance: float = 10_000.0,
+) -> dict[str, Any]:
     """Run all reconciliation checks and repairs.
 
     Returns a dict of findings for testing / logging::
@@ -72,6 +74,7 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
         "stale_equity": False,
         "profit_factor_fixed": False,
         "three_writer_drift": False,
+        "fresh_account_initialized": False,
         "repairs_applied": 0,
     }
 
@@ -80,14 +83,48 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
     pos_data = _read_json(_POSITIONS_PATH)
 
     if not state and not pb:
-        log.debug("[RECONCILE] No accounting files found — skipping")
+        # Brand-new account (first run) or right after
+        # scripts/reset_paper_state.py — neither accounting file
+        # exists yet. Previously this was just skipped, which left
+        # /status, /balance and /wallet showing $0.00 and a
+        # nonsensical "-100% all-time" (since the initial_balance
+        # fallback used for the % calc is 10,000 while cash/equity
+        # default to 0 when the file is missing) until the bot's
+        # first full pipeline cycle happened to write these files.
+        # Fund the account immediately instead, so Telegram always
+        # shows accurate numbers from the very first query.
+        log.info(
+            f"[RECONCILE] No accounting files found — initializing "
+            f"fresh account with balance={account_balance:.2f}"
+        )
+        fresh_state = {"initial_balance": account_balance, "balance": account_balance}
+        fresh_pb = {
+            "initial_balance": account_balance,
+            "final_balance": account_balance,
+            "final_equity": account_balance,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+            "total_return_pct": 0.0,
+            "win_rate": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "profit_factor": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+        }
+        _write_json(_STATE_PATH, fresh_state)
+        _write_json(_BALANCE_PATH, fresh_pb)
+        findings["fresh_account_initialized"] = True
+        findings["repairs_applied"] += 1
         return findings
 
     # ------------------------------------------------------------------
     #  1. Detect mismatched initial_balance
     # ------------------------------------------------------------------
-    state_initial = state.get("initial_balance", 10_000.0)
-    pb_initial = pb.get("initial_balance", 10_000.0)
+    state_initial = state.get("initial_balance", account_balance)
+    pb_initial = pb.get("initial_balance", account_balance)
 
     if state and pb and state_initial != pb_initial:
         findings["initial_balance_mismatch"] = True
@@ -230,7 +267,7 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
             log.warning(
                 f"[RECONCILE] Stale equity detected: file={file_equity} "
                 f"but {len(open_positions)} open position(s) with "
-                f"unrealized=${snapshot.unrealized_pnl:+.2f} — repairing"
+                f"unrealized={snapshot.unrealized_pnl:+.2f} {os.getenv('QUOTE_CURRENCY', 'USDT').upper()} — repairing"
             )
 
         # Write computed values from canonical snapshot — only count
@@ -266,18 +303,20 @@ def reconcile(logger_obj: logging.Logger | None = None) -> dict[str, Any]:
         # Write file only if any repair was applied
         if findings["repairs_applied"] > 0:
             _write_json(_BALANCE_PATH, pb)
+            qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             log.info(
                 f"[RECONCILE] Accounting reconciled: "
-                f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
-                f"unrealized=${snapshot.unrealized_pnl:+.2f} "
+                f"balance={cash:,.2f} {qc} equity={snapshot.equity:,.2f} {qc} "
+                f"unrealized={snapshot.unrealized_pnl:+.2f} {qc} "
                 f"return={snapshot.total_return_pct:+.2f}% "
                 f"({len(open_positions)} open, "
                 f"{findings['repairs_applied']} repair(s))"
             )
         else:
+            qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             log.debug(
                 f"[RECONCILE] All clean — "
-                f"balance=${cash:,.2f} equity=${snapshot.equity:,.2f} "
+                f"balance={cash:,.2f} {qc} equity={snapshot.equity:,.2f} {qc} "
                 f"({len(open_positions)} open)"
             )
 

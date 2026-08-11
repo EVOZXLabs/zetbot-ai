@@ -22,6 +22,11 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import (
+    add_notified_buy,
+    merge_positions,
+    paper_state_writes,
+)
 
 # ---------------------------------------------------------------------------
 #  Config
@@ -31,7 +36,9 @@ TRADE_PLAN_PATH = "data/trade_plan.json"
 POSITIONS_PATH = "data/positions.json"
 STATE_PATH = "data/paper_state.json"
 
-INITIAL_BALANCE = 10_000.0
+QUOTE_CURRENCY: str = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+
+INITIAL_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 TAKER_FEE = 0.001           # 0.1 %
 MAKER_FEE = 0.00075         # 0.075 %
 SLIPPAGE_BPS = 3            # 3 bps market-order slippage
@@ -65,6 +72,35 @@ class Order:
     filled_at: str
     closed_at: str
     exit_reason: str = ""
+
+
+# Fallback values for Order records persisted by older writers (e.g. the
+# pipeline's PaperExecutionProvider) that omitted some dataclass fields.
+# Used by ``PaperTradingEngine._coerce_order`` so ``Order(**o)`` in
+# ``_load_state`` never crashes on a legacy/incomplete record.
+ORDER_FIELD_DEFAULTS: dict[str, Any] = {
+    "id": "unknown",
+    "symbol": "",
+    "side": "SELL",
+    "type": "MARKET",
+    "quantity": 0.0,
+    "filled_quantity": 0.0,
+    "entry_price": 0.0,
+    "fill_price": 0.0,
+    "slippage": 0.0,
+    "entry_fee": 0.0,
+    "exit_price": 0.0,
+    "exit_fee": 0.0,
+    "total_cost": 0.0,
+    "total_proceeds": 0.0,
+    "net_pnl": 0.0,
+    "net_pnl_pct": 0.0,
+    "status": "CLOSED",
+    "created_at": "",
+    "filled_at": "",
+    "closed_at": "",
+    "exit_reason": "",
+}
 
 
 @dataclass
@@ -238,6 +274,8 @@ class MetricsCalculator:
         equity_snapshots: list[EquitySnapshot],
         initial_balance: float,
         unrealized_pnl: float = 0.0,
+        current_balance: float | None = None,
+        current_equity: float | None = None,
     ) -> dict[str, Any]:
         closed = [o for o in orders if o.status == "CLOSED"]
         winners = [o for o in closed if o.net_pnl > 0]
@@ -268,13 +306,29 @@ class MetricsCalculator:
                 max_dd = dd
                 max_dd_pct = dd_pct
 
-        final_eq = equity_snapshots[-1].equity if equity_snapshots else initial_balance
+        # When this run produced no new equity snapshots (e.g. an idle
+        # cycle with no READY plans and nothing to reconcile), fall back
+        # to the wallet's actual CURRENT cash/equity — never to
+        # initial_balance. Falling back to initial_balance silently
+        # "refunded" any cash already spent on still-open positions,
+        # which corrupted paper_balance.json's final_balance back to the
+        # starting balance and made /status, /balance, /wallet double
+        # count the position's value on top of it.
+        if equity_snapshots:
+            final_balance_val = equity_snapshots[-1].balance
+            final_eq = equity_snapshots[-1].equity
+        else:
+            final_balance_val = (
+                current_balance if current_balance is not None else initial_balance
+            )
+            final_eq = (
+                current_equity if current_equity is not None else final_balance_val
+            )
         total_return = _safe_div(final_eq - initial_balance, initial_balance) * 100.0
 
         return {
             "initial_balance": round(initial_balance, 2),
-            "final_balance": round(equity_snapshots[-1].balance, 2)
-            if equity_snapshots else round(initial_balance, 2),
+            "final_balance": round(final_balance_val, 2),
             "final_equity": round(final_eq, 2),
             "total_return_pct": round(total_return, 2),
             "total_trades": total_trades,
@@ -300,8 +354,11 @@ class MetricsCalculator:
 class PaperTradingEngine:
     """Orchestrate paper trading simulation."""
 
-    def __init__(self, notifier: Any = None) -> None:
-        self.wallet = VirtualWallet(INITIAL_BALANCE)
+    def __init__(self, notifier: Any = None, initial_balance: float | None = None) -> None:
+        self._explicit_initial = initial_balance is not None
+        self.wallet = VirtualWallet(
+            initial_balance if self._explicit_initial else INITIAL_BALANCE
+        )
         self.orders: list[Order] = []
         self.positions: dict[str, VirtualPosition] = {}
         self.equity_history: list[EquitySnapshot] = []
@@ -326,9 +383,10 @@ class PaperTradingEngine:
             return
 
         self.wallet.balance = state.get("balance", INITIAL_BALANCE)
-        self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
+        if not self._explicit_initial:
+            self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
         self.wallet.margin_used = state.get("margin_used", 0.0)
-        self.orders = [Order(**o) for o in state.get("orders", [])]
+        self.orders = [self._coerce_order(o) for o in state.get("orders", [])]
         self.positions = {
             sym: VirtualPosition(**vp)
             for sym, vp in state.get("positions", {}).items()
@@ -336,6 +394,21 @@ class PaperTradingEngine:
         self.equity_history = [
             EquitySnapshot(**s) for s in state.get("equity_history", [])
         ]
+
+    @staticmethod
+    def _coerce_order(raw: dict[str, Any]) -> Order:
+        """Build an ``Order`` from a persisted record tolerantly.
+
+        Legacy writers (e.g. ``PaperExecutionProvider.execute_sell``)
+        persisted order dicts missing several ``Order`` fields, which
+        made ``Order(**o)`` raise at startup and silently disabled the
+        whole paper engine.  Unknown keys are dropped and missing fields
+        are backfilled with ``ORDER_FIELD_DEFAULTS`` so the engine never
+        fails to load state again — the next ``_save_state`` rewrites the
+        record in full.
+        """
+        record = {k: v for k, v in raw.items() if k in ORDER_FIELD_DEFAULTS}
+        return Order(**{**ORDER_FIELD_DEFAULTS, **record})
 
     # ------------------------------------------------------------------
     #  Telegram notification helper
@@ -355,7 +428,7 @@ class PaperTradingEngine:
             tp3 = plan.get("tp3", 0)
             reasons = plan.get("reasons", ["Paper trade executed"])
 
-            self._notifier.notify_buy_opened(
+            sent = self._notifier.notify_buy_opened(
                 symbol=symbol,
                 exchange=exchange,
                 timeframe=timeframe,
@@ -368,6 +441,17 @@ class PaperTradingEngine:
                 take_profit_3=tp3,
                 reasons=reasons,
             )
+            if sent:
+                # Record the symbol so restart recovery (main.py
+                # _notify_existing_positions) does NOT send a duplicate
+                # BUY_OPENED for the same open position. Same dedup file and
+                # format as scripts/pipeline.py run_execution. Only recorded
+                # on successful delivery — a failed send is retried on the
+                # next restart. Serialized + atomic via
+                # scripts/paper_state_lock.add_notified_buy so the startup
+                # daemon thread and the pipeline scheduler (BUG-4) can never
+                # clobber each other's dedup entry.
+                add_notified_buy(symbol)
         except Exception as exc:
             logging.getLogger("ZetBot").warning(
                 "Failed to send BUY notification: %s", exc
@@ -408,9 +492,14 @@ class PaperTradingEngine:
         from telegram.formatter import fmt_holding
         return fmt_holding(td.total_seconds())
 
+    @paper_state_writes
     def _save_state(self) -> None:
         """Persist wallet, orders, positions, and equity history."""
-        os.makedirs("data", exist_ok=True)
+        # Derive the data dir from STATE_PATH so a redirected (e.g. test)
+        # STATE_PATH also redirects the companion positions.json — never
+        # write test positions into the live data/positions.json.
+        data_dir = os.path.dirname(STATE_PATH) or "data"
+        os.makedirs(data_dir, exist_ok=True)
         state = {
             "version": 1,
             "balance": self.wallet.balance,
@@ -424,36 +513,22 @@ class PaperTradingEngine:
             "equity_history": [asdict(s) for s in self.equity_history],
         }
     
-        with open(STATE_PATH, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(STATE_PATH, state, indent=2, default=str)
 
-        # Sync positions.json for Telegram/reporting
-        positions_data = {
-            "generated": datetime.now(timezone.utc).isoformat(),
-            "total_positions": len(self.positions),
-            "active_count": sum(
-                1 for vp in self.positions.values()
-                if vp.status in OPEN_STATUSES
-            ),
-            "closed_count": sum(
-                1 for vp in self.positions.values()
-                if vp.status in CLOSED_STATUSES
-            ),
-            "positions": [
-                asdict(vp)
-                for vp in self.positions.values()
-            ]
-        }
-
-        with open("data/positions.json", "w") as f:
-            json.dump(positions_data, f, indent=2, default=str)
+        # Sync positions.json for Telegram/reporting (atomic merge so a
+        # concurrent monitor/pipeline write is not clobbered — BUG-4).
+        merge_positions([
+            asdict(vp) for vp in self.positions.values()
+        ])
 
     def run(self, allow_new_positions: bool = True) -> dict[str, Any]:
         """Full paper trading pipeline."""
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PAPER TRADING ENGINE")
         print(f"  {'=' * 78}")
-        print(f"  Initial Balance : ${INITIAL_BALANCE:>8,.2f}")
+        print(f"  Current Balance : {self.wallet.balance:>8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Initial Balance : {self.wallet.initial:>8,.2f} {QUOTE_CURRENCY}")
         print(f"  Taker Fee       : {TAKER_FEE * 100:.2f}%")
         print(f"  Slippage        : {SLIPPAGE_BPS} bps")
         print()
@@ -473,6 +548,8 @@ class PaperTradingEngine:
             self.metrics = MetricsCalculator.compute(
                 self.orders, self.equity_history, self.wallet.initial,
                 unrealized_pnl=self._total_unrealized_pnl(),
+                current_balance=self.wallet.balance,
+                current_equity=self.wallet.balance + self._total_position_value(),
             )
             self._print_summary(0.0)
             print("  No READY plans.  Exiting.")
@@ -537,6 +614,8 @@ class PaperTradingEngine:
         self.metrics = MetricsCalculator.compute(
             self.orders, self.equity_history, self.wallet.initial,
             unrealized_pnl=self._total_unrealized_pnl(),
+            current_balance=self.wallet.balance,
+            current_equity=self.wallet.balance + self._total_position_value(),
         )
 
         elapsed = time.time() - t0
@@ -615,7 +694,7 @@ class PaperTradingEngine:
 
             qty = math.floor(max_affordable * 10000) / 10000
             print(f"    SCALED {symbol}: {plan_qty:.2f} -> {qty:.2f} units "
-                  f"(free=${self.wallet.free_balance:,.2f})")
+                  f"(free={self.wallet.free_balance:,.2f} {QUOTE_CURRENCY})")
         else:
             qty = plan_qty
 
@@ -899,11 +978,11 @@ class PaperTradingEngine:
         print(f"  {'=' * 78}")
         print(f"  PAPER TRADING ENGINE — RESULTS")
         print(f"  {'=' * 78}")
-        print(f"  USDT Balance     : ${m.get('final_balance', 0):>8,.2f}")
-        print(f"  Equity           : ${m.get('final_equity', 0):>8,.2f}")
-        print(f"  Realized PnL     : ${m.get('realized_pnl', 0):>+8,.2f}")
-        print(f"  Unrealized PnL   : ${m.get('unrealized_pnl', 0):>+8,.2f}")
-        print(f"  Net PnL          : ${m.get('net_pnl', 0):>+8,.2f}")
+        print(f"  {QUOTE_CURRENCY} Balance    : {m.get('final_balance', 0):>8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Equity           : {m.get('final_equity', 0):>8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Realized PnL     : {m.get('realized_pnl', 0):>+8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Unrealized PnL   : {m.get('unrealized_pnl', 0):>+8,.2f} {QUOTE_CURRENCY}")
+        print(f"  Net PnL          : {m.get('net_pnl', 0):>+8,.2f} {QUOTE_CURRENCY}")
         print(f"  Return           : {m.get('total_return_pct', 0):>+7.2f}%")
         print(f"  Open Positions   : {open_pos}")
         print(f"  Closed Positions : {closed_pos}")
@@ -912,7 +991,7 @@ class PaperTradingEngine:
             print(f"  Cancelled Orders : {len(cancelled)}")
         print(f"  Win Rate         : {m.get('win_rate', 0):.1f}%")
         print(f"  Profit Factor    : {_fmt_pf(m.get('profit_factor', 0))}")
-        print(f"  Max Drawdown     : ${m.get('max_drawdown', 0):>8,.2f} "
+        print(f"  Max Drawdown     : {m.get('max_drawdown', 0):>8,.2f} {QUOTE_CURRENCY} "
               f"({m.get('max_drawdown_pct', 0):.2f}%)")
         print(f"  Execution Time   : {elapsed:.2f}s")
         print(f"  {'=' * 78}")
@@ -934,7 +1013,7 @@ class PaperTradingEngine:
 
             hdr = (
         f"  {'#':>4s} {'Pair':>12s} {'Side':>5s} "
-        f"{'PnL $':>10s} {'PnL%':>7s} "
+        f"{'PnL':>10s} {'PnL%':>7s} "
         f"{'Entry':>10s} {'Exit':>10s} {'Fees':>7s}"
         )
 
@@ -1049,8 +1128,8 @@ class PaperExport:
             "closed_orders": closed_cnt,
             "orders": merged,
         }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data, indent=2, default=str)
         print(f"  Orders JSON    : {path}")
 
     @staticmethod
@@ -1095,17 +1174,26 @@ class PaperExport:
                 data[k] = metrics[k]
 
         # However, if the monitor increased realized_pnl beyond what
-        # the engine knows, use the higher value (monitor PnL is
-        # cumulative and includes closures the engine hasn't processed).
+        # the engine knows, use the monitor's value.  The guard must
+        # compare absolute magnitude, not raw sign: a loss written by
+        # the monitor (e.g. -2066.46) has a SMALLER raw value than the
+        # engine's 0.0, so ``file_realized > engine_realized`` is False
+        # and the engine's 0.0 incorrectly wins — resetting net_pnl to
+        # +0.00 on the next cycle and making HEALTH show the PnL as zero
+        # after a losing close (BUG-3).
+        #
+        # The authoritative source is whichever side has processed more
+        # trades: if the file has more total_trades, it has the correct
+        # cumulative realized_pnl; otherwise defer to the engine (which
+        # has just recomputed from its full order list).
         file_realized = existing.get("realized_pnl", 0.0)
         engine_realized = metrics.get("realized_pnl", 0.0)
-        if file_realized > engine_realized:
-            data["realized_pnl"] = file_realized
-
-        # Same for trade counts — monitor may have added closures
         file_trades = existing.get("total_trades", 0)
         engine_trades = metrics.get("total_trades", 0)
         if file_trades > engine_trades:
+            # Monitor has closed a trade the engine has not yet seen —
+            # keep the monitor's cumulative figures.
+            data["realized_pnl"] = file_realized
             data["total_trades"] = file_trades
             data["winning_trades"] = max(
                 existing.get("winning_trades", 0),
@@ -1140,7 +1228,7 @@ class PaperExport:
         snapshot = MetricsManager.compute_snapshot(
             cash=data.get("final_balance", 0.0),
             realized_pnl=data.get("realized_pnl", 0.0),
-            initial_balance=data.get("initial_balance", 10_000.0),
+            initial_balance=data.get("initial_balance", INITIAL_BALANCE),
             open_positions=open_positions,
             total_trades=data.get("total_trades", 0),
             winning_trades=data.get("winning_trades", 0),
@@ -1158,8 +1246,8 @@ class PaperExport:
         data["generated"] = datetime.now(timezone.utc).isoformat()
         data["equity_history"] = [asdict(s) for s in equity_history]
 
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(path, data, indent=2, default=str)
         print(f"  Balance JSON   : {path}")
 
     @staticmethod
@@ -1188,8 +1276,8 @@ class PaperExport:
 # -------------------------------------------------------------------
 
 
-def main(notifier: Any = None, allow_new_positions: bool = True) -> None:
-    engine = PaperTradingEngine(notifier=notifier)
+def main(notifier: Any = None, allow_new_positions: bool = True, account_balance: float | None = None) -> None:
+    engine = PaperTradingEngine(notifier=notifier, initial_balance=account_balance)
     metrics = engine.run(allow_new_positions=allow_new_positions)
 
     # Always persist, even when no new plans were processed.

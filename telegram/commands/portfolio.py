@@ -1,4 +1,5 @@
 from telegram.base_command import BaseCommand, CommandMeta
+from telegram.formatter import fmt_balance, fmt_pnl
 from telegram.ui import (
     compact_header, exposure_bar, pnl_emoji, build_message,
 )
@@ -46,11 +47,12 @@ class PortfolioCommand(BaseCommand):
             )
             exposure_pct = (pos_value / equity * 100) if equity > 0 else 0.0
 
+        quote = getattr(ctx.services.config, "quote_currency", "USDT") if ctx.services else "USDT"
         return build_message(
             compact_header(),
             f"👛 *Portfolio*\n"
-            f"Cash ${cash:,.2f} · Equity ${equity:,.2f}",
-            f"PnL {pnl_emoji(net_pnl)} ${net_pnl:+,.2f} · "
+            f"Cash {fmt_balance(cash, quote)} · Equity {fmt_balance(equity, quote)}",
+            f"PnL {pnl_emoji(net_pnl)} {fmt_pnl(net_pnl, quote)} · "
             f"Open positions: {open_count}",
             f"Exposure {exposure_bar(exposure_pct)}",
         )

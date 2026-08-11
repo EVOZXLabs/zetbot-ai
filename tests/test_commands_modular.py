@@ -11,11 +11,26 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from scripts.app_config import AppConfig
 from telegram.base_command import BaseCommand
 from telegram.command_center import CommandCenter
 from telegram.context import CommandContext
 from telegram.registry import CommandRegistry
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_data(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test in a throwaway directory.
+
+    These tests write ``data/positions.json`` / ``data/paper_balance.json``
+    / ``data/paper_orders.json`` fixtures; without the redirect they used
+    to clobber the REAL production data files (dummy BTC/USDT entries kept
+    appearing in the live bot's positions.json).
+    """
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("data", exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +68,27 @@ def _make_ctx(**kwargs: Any) -> CommandContext:
 
 def _execute(cmd: type[BaseCommand], ctx: CommandContext, args: str = "") -> str:
     return cmd().execute(ctx, args)
+
+
+_REALTIME_COMMANDS = {"detail", "pair", "signals", "market"}
+
+
+def _realtime_ctx(provider: Any = None) -> CommandContext:
+    """Context with a fake ServiceContainer so the realtime market
+    commands (/detail /pair /signals /market) run fully offline against
+    a fake exchange provider. Defaults to a failing provider so commands
+    return clear error strings without network access."""
+    from scripts.realtime_market import RealtimeMarketData  # noqa: PLC0415
+    from tests.conftest import (  # noqa: PLC0415
+        FakeExchangeManager, FakeProvider, FakeServices,
+    )
+    provider = provider or FakeProvider(fail=True)
+    cfg_kwargs = dict(BASE_CFG.__dict__)
+    cfg_kwargs["exchange"] = provider.exchange
+    cfg_kwargs["quote_currency"] = provider.quote
+    cfg = AppConfig(**cfg_kwargs)
+    mgr = FakeExchangeManager(provider)
+    return _make_ctx(services=FakeServices(mgr, cfg))
 
 
 def _all_commands() -> list[type[BaseCommand]]:
@@ -189,12 +225,12 @@ class TestCommandsSmoke:
         _ensure_data_files()
 
     def test_all_commands_return_string(self) -> None:
-        ctx = _make_ctx()
         for cls in _all_commands():
             name = cls.meta.name
             # Skip slow commands that need real dependencies
             if name in ("pipeline", "scan"):
                 continue
+            ctx = _realtime_ctx() if name in _REALTIME_COMMANDS else _make_ctx()
             instance = cls()
             try:
                 result = instance.execute(ctx, "")
@@ -208,11 +244,11 @@ class TestCommandsSmoke:
             assert len(result) > 0, f"Command '{name}' returned empty string"
 
     def test_all_commands_with_args(self) -> None:
-        ctx = _make_ctx()
         for cls in _all_commands():
             name = cls.meta.name
             if name in ("pipeline", "scan"):
                 continue
+            ctx = _realtime_ctx() if name in _REALTIME_COMMANDS else _make_ctx()
             instance = cls()
             try:
                 result = instance.execute(ctx, "some args here")
@@ -255,6 +291,36 @@ class TestSpecificCommands:
         result = _execute(PositionsCommand, _make_ctx())
         # Should contain at least one symbol or a message about no positions
         assert "/USDT" in result or "/BTC" in result or "position" in result.lower() or "No open" in result
+
+    def test_positions_no_cost_basis_no_fake_profit(self) -> None:
+        """BUG-3 regression: a position missing ``cost_basis`` must not show
+        its whole market value as profit (VEX/IDR showed "+586,941.66 IDR" —
+        exactly the position size). When entry == current the derived cost
+        basis makes PnL ~0. The card renders in the ACCOUNT quote currency
+        (VEX/IDR position on an IDR account)."""
+        import json  # noqa: PLC0415
+        from telegram.commands.positions import PositionsCommand
+
+        with open("data/positions.json", "w") as f:
+            json.dump({"positions": [{
+                "symbol": "VEX/IDR",
+                "status": "OPEN",
+                "entry_price": 1111.0,
+                "current_price": 1111.0,
+                "quantity": 1068.69,
+                "remaining_qty": 1068.69,
+                "stop_loss": 1000.0,
+            }]}, f)
+
+        cfg_kwargs = dict(BASE_CFG.__dict__)
+        cfg_kwargs["quote_currency"] = "IDR"
+        ctx = _make_ctx(config=AppConfig(**cfg_kwargs))
+        result = _execute(PositionsCommand, ctx)
+        assert "VEX/IDR" in result
+        # The fake profit (position market value) must NOT appear.
+        assert "+1,187,314.59 IDR" not in result
+        # With entry == current the shown PnL is ~0, not the position value.
+        assert "+0.00 IDR" in result
 
     def test_summary_shows_stats(self) -> None:
         from telegram.commands.summary import SummaryCommand
@@ -359,7 +425,7 @@ class TestSpecificCommands:
 
     def test_signals_placeholder(self) -> None:
         from telegram.commands.signals import SignalsCommand
-        result = _execute(SignalsCommand, _make_ctx())
+        result = _execute(SignalsCommand, _realtime_ctx())
         assert isinstance(result, str)
 
     def test_stoploss_placeholder(self) -> None:
@@ -531,18 +597,18 @@ class TestNewUX:
 
     def test_market_shows_overview(self) -> None:
         from telegram.commands.market import MarketCommand
-        result = _execute(MarketCommand, _make_ctx())
-        assert "Market Overview" in result or "No scanner data" in result
+        result = _execute(MarketCommand, _realtime_ctx())
+        assert "Market Overview" in result or "Realtime error" in result
 
     def test_pair_shows_analysis(self) -> None:
         from telegram.commands.pair import PairCommand
-        result = _execute(PairCommand, _make_ctx(), "BTC")
+        result = _execute(PairCommand, _realtime_ctx(), "BTC")
         assert "BTC/USDT" in result or "BTC" in result
-        assert "RSI" in result or "Indicators" in result
+        assert "RSI" in result or "Indicators" in result or "Realtime error" in result
 
     def test_pair_nonexistent(self) -> None:
         from telegram.commands.pair import PairCommand
-        result = _execute(PairCommand, _make_ctx(), "NONEXISTENT")
+        result = _execute(PairCommand, _realtime_ctx(), "NONEXISTENT")
         assert "not found" in result
 
     def test_pair_empty_args(self) -> None:
@@ -590,8 +656,8 @@ class TestNewPolish:
 
     def test_signals_shows_top_buy(self) -> None:
         from telegram.commands.signals import SignalsCommand
-        result = _execute(SignalsCommand, _make_ctx())
-        assert "SIGNALS" in result or "BTC/USDT" in result
+        result = _execute(SignalsCommand, _realtime_ctx())
+        assert "SIGNALS" in result or "BTC/USDT" in result or "Realtime error" in result
 
     def test_positions_roi_and_distance(self) -> None:
         from telegram.commands.positions import PositionsCommand

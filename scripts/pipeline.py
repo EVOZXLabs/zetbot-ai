@@ -29,7 +29,12 @@ from typing import Any, Callable, Optional
 from scripts.app_config import AppConfig
 from scripts.decision_trace import DecisionTrace, DecisionTraceEntry
 from scripts.logger import PipelineLogger
-from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES, is_open
+from scripts.paper_state_lock import (
+    add_notified_buy,
+    merge_positions,
+    paper_state_writes,
+)
 
 
 STAGE_TIMEOUT = 300  # maximum seconds per pipeline stage
@@ -93,6 +98,10 @@ _CONFIG_OVERRIDES: dict[str, dict[str, str]] = {
         "TAKER_FEE": "taker_fee",
         "MAKER_FEE": "maker_fee",
         "SLIPPAGE_BPS": "slippage_bps",
+    },
+    "scripts.execution_provider": {
+        "PAPER_INITIAL_BALANCE": "account_balance",
+        "QUOTE_CURRENCY": "quote_currency",
     },
 }
 
@@ -419,7 +428,8 @@ class Pipeline:
                     status = o.get("status", "UNKNOWN")
                     side = o.get("side", "N/A")
                     fill = o.get("fill_price", o.get("entry_price", 0))
-                    action = f"{side} {status} @ ${fill}" if status == "FILLED" else f"{side} {status}"
+                    qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+                    action = f"{side} {status} @ {fill} {qc}" if status == "FILLED" else f"{side} {status}"
                     trace.add(
                         "Paper", trace.top_candidate, status, action,
                         {k: o[k] for k in (
@@ -492,10 +502,8 @@ class Pipeline:
             existing_exposure=existing_exposure,
             risk_per_trade=self.config.max_risk_per_trade_pct,
             max_daily_loss=self.config.max_daily_loss_pct,
-            # Scale concurrent-position cap with equity instead of the
-            # fixed MAX_POSITIONS env value, so a bigger account can
-            # hold more than one position at a time.
-            max_positions=risk_manager.dynamic_max_positions(equity),
+            max_positions=self.config.max_positions,
+            max_position_size_pct=self.config.max_position_size_pct,
             mm_config=mm_config,
         )
         results = manager.run()
@@ -553,6 +561,7 @@ class Pipeline:
         The ExecutionProvider implementation (Paper vs Live) is the
         only difference — everything else is identical.
         """
+        qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
         from scripts.execution_provider import (
             PaperExecutionProvider,
             LiveExecutionProvider,
@@ -563,31 +572,19 @@ class Pipeline:
         is_live = (
             self.container is not None
             and self.container.order.mode == "LIVE"
+            # Only an ARMED live session may use the real exchange. A LIVE
+            # configured but not-armed run degrades to the paper provider
+            # (mirrors ExecutionEngine's simulation fallback) so that no
+            # real order can ever leave through this stage before the
+            # operator ran /golive + CONFIRM LIVE.
+            and self.container.order.is_live_enabled()
         )
 
-        allow_new = True
-        if self.container is not None:
-            ok, reason = self.container.safeguard.can_open_new_position()
-            if not ok:
-                self.logger.info(f"Pipeline new-order guard: {reason}")
-                allow_new = False
-
-        # Create the right provider for the mode
-        mode = "LIVE" if is_live else "PAPER"
-        if is_live:
-            provider = LiveExecutionProvider(
-                self.container.exchange,
-                self.config,
-            )
-        else:
-            provider = PaperExecutionProvider()
-
-        pipeline = ExecutionPipeline(
-            provider,
-            quote_currency=getattr(self.config, "quote_currency", "USDT"),
-        )
-
-        # Read READY plans
+        # Read READY plans (before the new-order guard so their symbols can
+        # be excluded from the max-open-positions count — the Position stage
+        # already simulated these into positions.json as OPEN, and counting
+        # them as blocking open positions would reject the very BUY that is
+        # about to execute them).
         import json, os  # noqa: PLC0415
 
         plan_path = "data/trade_plan.json"
@@ -603,6 +600,32 @@ class Pipeline:
             except (json.JSONDecodeError, OSError):
                 pass
 
+        allow_new = True
+        if self.container is not None:
+            planned_symbols = {
+                p.get("symbol", "") for p in ready_plans if p.get("symbol")
+            }
+            self.container.safeguard.set_planned_symbols(planned_symbols)
+            ok, reason = self.container.safeguard.can_open_new_position()
+            if not ok:
+                self.logger.info(f"Pipeline new-order guard: {reason}")
+                allow_new = False
+
+        mode = "LIVE" if is_live else "PAPER"
+        if is_live:
+            provider = LiveExecutionProvider(
+                self.container.exchange,
+                self.config,
+            )
+        else:
+            provider = PaperExecutionProvider()
+
+        pipeline = ExecutionPipeline(
+            provider,
+            quote_currency=getattr(self.config, "quote_currency", "USDT"),
+            notifier=self._notifier,
+        )
+
         # --- Unified BUY execution (paper or live) ---
         if allow_new:
             for plan in ready_plans:
@@ -612,7 +635,7 @@ class Pipeline:
 
                 self.logger.info(
                     f"{mode} execution: submitting BUY for {symbol} "
-                    f"${plan.get('position_size_usdt', 0):,.2f}"
+                    f"{plan.get('position_size_usdt', 0):,.2f} {qc}"
                 )
                 try:
                     result = pipeline.execute_plan(plan)
@@ -621,6 +644,37 @@ class Pipeline:
                         self.logger.info(
                             f"{mode} execution result for {symbol}: {status}"
                         )
+                        if status == "FILLED" and self._notifier is not None:
+                            try:
+                                sent = self._notifier.notify_buy_opened(
+                                    symbol=symbol,
+                                    exchange=getattr(self.config, "exchange", ""),
+                                    timeframe=getattr(self.config, "timeframe", ""),
+                                    entry_price=plan.get("entry_price", 0),
+                                    quantity=plan.get("quantity", 0),
+                                    position_size=plan.get("position_size_usdt", 0),
+                                    stop_loss=plan.get("stop_loss", 0),
+                                    take_profit=plan.get("tp1", 0),
+                                    take_profit_2=plan.get("tp2", 0),
+                                    take_profit_3=plan.get("tp3", 0),
+                                    reasons=["Pipeline execution"],
+                                )
+                                if sent:
+                                    # Only record as notified when delivery
+                                    # actually succeeded, otherwise the
+                                    # BUY_OPENED is retried on the next
+                                    # restart instead of being lost.
+                                    # Serialized + atomic via
+                                    # scripts/paper_state_lock so a
+                                    # concurrent writer (startup daemon
+                                    # thread — BUG-4) can never clobber this
+                                    # entry.
+                                    try:
+                                        add_notified_buy(symbol)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                self.logger.warning(f"BUY notification failed for {symbol}")
                 except Exception as exc:
                     self.logger.error(
                         f"{mode} execution failed for {symbol}: {exc}"
@@ -632,6 +686,60 @@ class Pipeline:
         # --- Persist paper state (for Telegram / reporting) ---
         if not is_live:
             self._persist_paper_state(provider)
+            # Clean simulated-but-never-executed positions out of
+            # positions.json: any OPEN entry with no OPEN counterpart in
+            # the authoritative paper ledger is a ghost (the Position
+            # stage simulated it, execution rejected it). Ghosts must
+            # not keep producing BUY_OPENED notifications, inflating
+            # equity/exposure, or blocking new buys (BUG-4).
+            self._prune_ghost_positions(provider)
+
+    def _prune_ghost_positions(self, provider: Any) -> None:
+        """Close positions.json OPEN entries not backed by paper_state.
+
+        paper_state.json is the authoritative ledger of executed trades.
+        positions.json is written by the Position stage from READY plans
+        BEFORE execution; if the paper stage then rejects/skips a plan
+        (guard, insufficient balance, missing price), the simulated OPEN
+        entry would otherwise linger forever as a ghost.
+        """
+        import json, os  # noqa: PLC0415
+
+        try:
+            with open("data/paper_state.json") as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        ledger_positions = state.get("positions") or {}
+
+        pos_path = "data/positions.json"
+        try:
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+
+        pruned = False
+        for p in pos_data.get("positions", []):
+            if not is_open(p.get("status")):
+                continue
+            sym = p.get("symbol", "")
+            vp = ledger_positions.get(sym)
+            if vp is not None and vp.get("status") in OPEN_STATUSES:
+                continue
+            self.logger.warning(
+                f"Pruning ghost position {sym} from positions.json "
+                "(not present as OPEN in paper_state.json — simulated but "
+                "never executed)"
+            )
+            p["status"] = "CLOSED"
+            p["remaining_qty"] = 0.0
+            p["unrealized_pnl"] = 0.0
+            pruned = True
+
+        if pruned:
+            from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+            merge_positions(pos_data.get("positions", []))
 
     def _reconcile_positions(
         self,
@@ -639,7 +747,19 @@ class Pipeline:
         provider: Any,
         is_live: bool,
     ) -> None:
-        """Reconcile all open positions — shared TP/SL logic for both modes."""
+        """Reconcile all open positions — shared TP/SL logic for both modes.
+
+        LIVE mode runs through ``scripts.exit_gate`` (per-symbol lock +
+        atomic positions.json read-modify-write) so that no two exit
+        paths can sell the same quantity, and protection orders are
+        cancelled BEFORE the market sell. PAPER mode keeps its existing
+        single-threaded batched behavior untouched.
+        """
+        if is_live:
+            self._reconcile_positions_live(pipeline)
+            return
+
+        qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
         import json, os  # noqa: PLC0415
 
         pos_path = "data/positions.json"
@@ -676,28 +796,19 @@ class Pipeline:
         if not open_positions:
             return
 
-        # Fetch prices from exchange
+        # Fetch prices from the configured exchange (indodax pairs like
+        # GOAT/IDR never resolve on binance). Shared cached client + TTL
+        # ticker cache so we never burst the exchange with concurrent
+        # /api/pairs calls (429 rate-limit fix).
         try:
-            import ccxt
-            exchange = ccxt.binance({
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-                "timeout": 15000,
-            })
+            from bot.data import fetch_tickers_cached  # noqa: PLC0415
             symbols = [p["symbol"] for p in open_positions if "symbol" in p]
-            tickers = exchange.fetch_tickers(symbols) if symbols else {}
+            tickers = fetch_tickers_cached(
+                getattr(self.config, "exchange", "binance"), symbols,
+            ) if symbols else {}
         except Exception as exc:
             self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
             return
-
-        # For LIVE mode: cancel protection orders BEFORE reconciliation
-        # so the sibling order doesn't double-fill with our market sell.
-        if is_live:
-            for pos in positions:
-                sym = pos.get("symbol", "")
-                if pos.get("status") not in OPEN_STATUSES:
-                    continue
-                self._cancel_live_protection(sym)
 
         updated_positions = []
         for pos in positions:
@@ -724,27 +835,140 @@ class Pipeline:
                 old_status = pos.get("status")
                 new_status = reconciled.get("status")
                 if old_status != new_status and new_status in CLOSED_STATUSES:
+                    if not pos.get("closure_notified", False) and self._notifier is not None:
+                        try:
+                            from datetime import datetime, timedelta
+                            entry_time = reconciled.get("entry_time") or reconciled.get("opened_at", "")
+                            holding = timedelta()
+                            if entry_time:
+                                try:
+                                    dt = datetime.fromisoformat(entry_time.split("+")[0].split("Z")[0])
+                                    holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+                                    if holding.total_seconds() < 0:
+                                        holding = timedelta()
+                                except (ValueError, TypeError):
+                                    pass
+                            exit_reason = (
+                                "Stop Loss" if new_status == "STOPPED"
+                                else "Take Profit" if new_status == "CLOSED"
+                                else "Strategy Exit"
+                            )
+                            self._notifier.notify_position_closed(
+                                symbol=sym,
+                                entry_price=reconciled.get("entry_price", 0),
+                                exit_price=current_price,
+                                pnl=reconciled.get("total_pnl", 0),
+                                pnl_pct=reconciled.get("floating_pnl_pct", 0),
+                                balance=provider.get_balance(),
+                                exit_reason=exit_reason,
+                                holding_time=holding,
+                            )
+                            pos["closure_notified"] = True
+                        except Exception:
+                            pass
                     self.logger.info(
                         f"Position {sym}: {old_status} → {new_status} "
-                        f"(PnL: ${reconciled.get('total_pnl', 0):+.2f})"
+                        f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {qc})"
                     )
             else:
                 updated_positions.append(pos)
 
-        # Write updated positions
-        pos_data["positions"] = updated_positions
-        pos_data["active_count"] = sum(
-            1 for p in updated_positions if p.get("status") in OPEN_STATUSES
-        )
-        pos_data["closed_count"] = sum(
-            1 for p in updated_positions if p.get("status") in CLOSED_STATUSES
-        )
+        # Write updated positions (atomic merge so a concurrent writer's
+        # symbols are preserved — BUG-4).
+        merge_positions(updated_positions)
+
+    def _reconcile_positions_live(self, pipeline: Any) -> None:
+        """LIVE TP/SL reconciliation — serialized per symbol via exit_gate.
+
+        Every LIVE exit path (monitor, pipeline, protection scheduler,
+        Telegram /sell) shares the same per-symbol lock and the same
+        atomic positions.json read-modify-write, so two threads can
+        never both sell the same quantity. Protection orders are
+        cancelled BEFORE the market sell (inside ``reconcile_exit``)
+        whenever an exit is about to fire.
+        """
+        from scripts.exit_gate import reconcile_exit  # noqa: PLC0415
+        import json, os  # noqa: PLC0415
+
+        qc = (getattr(self.config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
+
+        pos_path = "data/positions.json"
+        if not os.path.exists(pos_path):
+            return
+
         try:
-            os.makedirs("data", exist_ok=True)
-            with open(pos_path, "w") as f:
-                json.dump(pos_data, f, indent=2, default=str)
-        except OSError as exc:
-            self.logger.error(f"Failed to write positions.json: {exc}")
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        positions = pos_data.get("positions", [])
+        open_positions = [
+            p for p in positions if p.get("status") in OPEN_STATUSES
+        ]
+        if not open_positions:
+            return
+
+        # Load plans for TP/SL reference prices
+        plan_path = "data/trade_plan.json"
+        plans_by_symbol: dict[str, dict] = {}
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path) as f:
+                    plan_data = json.load(f)
+                for p in plan_data.get("plans", []):
+                    plans_by_symbol[p["symbol"]] = p
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Fetch current prices from the configured exchange
+        try:
+            from bot.data import fetch_tickers_cached  # noqa: PLC0415
+            symbols = [p["symbol"] for p in open_positions if "symbol" in p]
+            tickers = fetch_tickers_cached(
+                getattr(self.config, "exchange", "binance"), symbols,
+            ) if symbols else {}
+        except Exception as exc:
+            self.logger.debug(f"Reconciliation ticker fetch failed: {exc}")
+            return
+
+        for pos in positions:
+            sym = pos.get("symbol", "")
+            if pos.get("status") not in OPEN_STATUSES:
+                continue
+
+            ticker = tickers.get(sym) if sym in tickers else None
+            if ticker is None:
+                continue
+            current_price = float(ticker.get("last", 0) or 0)
+            if current_price <= 0:
+                continue
+
+            plan = plans_by_symbol.get(sym, {})
+
+            def _on_reconciled(
+                prev: dict,
+                reconciled: Any,
+                _sym: str = sym,
+            ) -> None:
+                if reconciled is None:
+                    return
+                old_status = prev.get("status")
+                new_status = reconciled.get("status")
+                if old_status != new_status and new_status in CLOSED_STATUSES:
+                    self.logger.info(
+                        f"Position {_sym}: {old_status} → {new_status} "
+                        f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {qc})"
+                    )
+
+            reconcile_exit(
+                pipeline,
+                sym,
+                current_price,
+                plan,
+                cancel_protection=self._cancel_live_protection,
+                on_reconciled=_on_reconciled,
+            )
 
     def _cancel_live_protection(self, symbol: str) -> None:
         """Cancel live protection orders for a position that just closed."""
@@ -758,27 +982,92 @@ class Pipeline:
         except Exception as exc:
             self.logger.debug(f"Cancel protection for {symbol}: {exc}")
 
+    @paper_state_writes
     def _persist_paper_state(self, provider: Any) -> None:
-        """Persist paper provider state to balance/orders JSON files."""
+        """Persist paper provider state to balance/orders JSON files.
+
+        ALL derived accounting metrics are recomputed from the canonical
+        ``MetricsManager.compute_snapshot()`` so ``paper_balance.json``
+        can never drift: ``net_pnl``, ``total_return_pct``,
+        ``realized_pnl``, ``unrealized_pnl``, trade counts, and win rate
+        are always consistent with the current balance and open positions.
+        """
         import json  # noqa: PLC0415
 
+        from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+
         balance = provider.get_balance()
+
+        realized_pnl = 0.0
+        closed_positions = []
+        open_positions = []
+        for vp in getattr(provider, "positions", {}).values():
+            status = getattr(vp, "status", "")
+            realized_pnl += getattr(vp, "realized_pnl", 0.0)
+            if status != "OPEN":
+                closed_positions.append(vp)
+            else:
+                open_positions.append({
+                    "current_price": getattr(vp, "current_price", 0.0),
+                    "remaining_qty": getattr(vp, "remaining_qty", 0.0),
+                    "unrealized_pnl": getattr(vp, "unrealized_pnl", 0.0),
+                })
+
+        total_trades = len(closed_positions)
+        winning_trades = sum(
+            1 for vp in closed_positions if getattr(vp, "total_pnl", 0) > 0
+        )
+        losing_trades = total_trades - winning_trades
+        win_rate = (winning_trades / total_trades * 100.0) if total_trades else 0.0
+        gross_profit = sum(
+            getattr(vp, "total_pnl", 0) for vp in closed_positions
+            if getattr(vp, "total_pnl", 0) > 0
+        )
+        gross_loss = abs(sum(
+            getattr(vp, "total_pnl", 0) for vp in closed_positions
+            if getattr(vp, "total_pnl", 0) <= 0
+        ))
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0
+            else (0.0 if gross_profit == 0 else 0.0)
+        )
+
+        initial = self.config.account_balance
         bal_path = "data/paper_balance.json"
         try:
             with open(bal_path) as f:
                 pb = json.load(f)
-            pb["final_balance"] = round(balance, 2)
-            pb["final_equity"] = round(balance, 2)
-            with open(bal_path, "w") as f:
-                json.dump(pb, f, indent=2)
+            initial = pb.get("initial_balance", initial)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pb = {
-                "initial_balance": 10000.0,
-                "final_balance": round(balance, 2),
-                "final_equity": round(balance, 2),
-            }
-            try:
-                with open(bal_path, "w") as f:
-                    json.dump(pb, f, indent=2)
-            except OSError:
-                pass
+            pb = {}
+
+        snapshot = MetricsManager.compute_snapshot(
+            cash=balance,
+            realized_pnl=realized_pnl,
+            initial_balance=initial,
+            open_positions=open_positions,
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=win_rate,
+            profit_factor=profit_factor,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
+        )
+
+        pb["final_balance"] = round(balance, 2)
+        pb["final_equity"] = round(snapshot.equity, 2)
+        pb["realized_pnl"] = round(realized_pnl, 2)
+        pb["unrealized_pnl"] = round(snapshot.unrealized_pnl, 2)
+        pb["net_pnl"] = round(snapshot.net_pnl, 2)
+        pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
+        pb["total_trades"] = total_trades
+        pb["winning_trades"] = winning_trades
+        pb["losing_trades"] = losing_trades
+        pb["win_rate"] = round(win_rate, 2)
+        pb["profit_factor"] = round(profit_factor, 2)
+        pb["gross_profit"] = round(gross_profit, 2)
+        pb["gross_loss"] = round(gross_loss, 2)
+
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(bal_path, pb, indent=2)

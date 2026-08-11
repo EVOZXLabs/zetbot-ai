@@ -9,6 +9,20 @@ Supported Exchanges:
 - Binance
 - Bybit
 - Tokocrypto
+- OKX
+- Gate
+- Kucoin
+- MEXC
+- Indodax (IDR-quoted pairs — set `QUOTE_CURRENCY=IDR`)
+
+---
+
+> ## 👋 Baru di sini? Pengguna HP Android?
+>
+> Baca **[Panduan Instalasi 5 Menit (QUICKSTART.md)](QUICKSTART.md)** —
+> panduan langkah demi langkah untuk **Termux**, tanpa laptop dan tanpa
+> perlu tahu Python. Semua cukup disalin-tempel: `bash install.sh` →
+> `bash run.sh`.
 
 ---
 
@@ -160,6 +174,10 @@ Available commands:
 
 # Quick Start
 
+> **On a phone (Termux)?** Follow the 5-minute guide:
+> **[QUICKSTART.md](QUICKSTART.md)** — install, configure, run, stop,
+> update, logs, and uninstall with copy-paste commands.
+
 ## Install Dependencies
 
 ```bash
@@ -193,6 +211,30 @@ TELEGRAM_CHAT_ID=
 
 ---
 
+## API Key Security
+
+**Required permissions (trading-only key):**
+
+| Permission | Required | Notes |
+|---|---|---|
+| Read / View | ✅ Yes | Balance, positions, order status |
+| Spot Trading | ✅ Yes | Place and cancel orders |
+| Withdrawal | ❌ **Never** | Must be disabled — a leaked key cannot drain funds |
+| Margin / Futures | ❌ Never | ZetBot is spot-only |
+| Transfer | ❌ Never | Not needed |
+
+Never create an API key with Withdrawal permission.
+Even a leaked key can only trade — it cannot move funds out of the exchange.
+
+**Credential safety:**
+
+- `.env` is in `.gitignore` — credentials are never committed.
+- Use `.env.example` as the template; never put real values in it.
+- Rotate your API key immediately if you suspect a leak.
+- Store the raw key+secret only in `.env` on the server — never in code, logs, or Telegram.
+
+---
+
 ## Production Health Check
 
 Run:
@@ -211,6 +253,13 @@ The setup checker validates:
 - Telegram configuration
 - Runtime directories
 - Git status
+
+To test connectivity against whichever exchange is set in `.env`
+(`EXCHANGE=...`) specifically:
+
+```bash
+python main.py --test-exchange
+```
 
 ---
 
@@ -238,6 +287,21 @@ No:
 - screen
 
 required.
+
+### Keep the bot alive (live trading)
+
+SL/TP protection on exchanges without native stop orders (e.g. indodax) only
+exists while the bot process is running — a dead bot means an unprotected live
+position. Use the bundled watchdog (`scripts/watchdog.py`) to auto-restart the
+bot within ~20 s of any crash:
+
+```bash
+./.venv/bin/python scripts/watchdog.py
+```
+
+See the **Watchdog / Auto-restart** section in `OPERATIONS.md` (including the
+systemd unit `deploy/zetbot-watchdog.service`) for full instructions and the
+crash-loop safety rules.
 
 ---
 
@@ -317,7 +381,8 @@ All settings are managed through `.env`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXCHANGE` | binance | Exchange provider |
+| `EXCHANGE` | binance | Exchange provider (binance, bybit, tokocrypto, okx, gate, kucoin, mexc, indodax) |
+| `QUOTE_CURRENCY` | USDT | Quote currency to scan/trade against (e.g. IDR for Indodax) |
 | `TIMEFRAME` | 1h | Trading timeframe |
 | `PAPER_MODE` | true | Enable paper trading |
 | `ACCOUNT_BALANCE` | 10000 | Starting paper balance |
@@ -368,6 +433,7 @@ Validation includes:
 - Position synchronization
 - Service container testing
 - Production regression testing
+- Multi-exchange provider & scanner coverage (`tests/test_exchange_providers.py`, `tests/test_scanner.py`, `tests/test_data.py`)
 
 ---
 
@@ -405,6 +471,15 @@ Blockchain trading features will be introduced after the core centralized exchan
 # Version
 
 ```
+v0.5.1
+
+Multi-Exchange Scanner Fix (Fase 0 — Web3/DEX Roadmap)
+Previously the scanner always scanned Binance/USDT regardless of the
+EXCHANGE/QUOTE_CURRENCY settings in .env. Scanner, MarketData, and the
+exchange diagnostics tools now correctly follow the configured exchange
+and quote currency across all 8 supported exchanges. See
+FASE0-SUMMARY.md for details.
+
 v0.5.0
 
 Decision Trace & Paper Trading Stability Update

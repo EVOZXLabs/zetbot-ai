@@ -1,0 +1,45 @@
+# ZetBot AI — Watchdog auto-restart supervisor (systemd unit)
+#
+# SL/TP protection on exchanges without native stop orders (e.g. indodax)
+# exists ONLY while the bot process is alive — the bot executes SL/TP through
+# its own position-monitoring loop. This unit keeps the watchdog (and thus the
+# bot) alive and restarts the bot within ~20s of any crash.
+#
+# Install:
+#   sudo cp deploy/zetbot-watchdog.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now zetbot-watchdog
+#
+# Adjust User / WorkingDirectory / ExecStart below to match your install.
+
+[Unit]
+Description=ZetBot AI Watchdog (auto-restart supervisor for the trading bot)
+Documentation=file:///opt/zetbot-ai/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zetbot
+Group=zetbot
+WorkingDirectory=/opt/zetbot-ai
+ExecStart=/opt/zetbot-ai/.venv/bin/python /opt/zetbot-ai/scripts/watchdog.py
+
+# Supervision tuning (overridable via the environment / .env is NOT read here)
+Environment=WATCHDOG_INTERVAL=20
+Environment=WATCHDOG_MAX_RESTARTS=3
+Environment=WATCHDOG_WINDOW=600
+
+# Always bring the watchdog back. After a rate-limit halt the watchdog exits
+# non-zero, systemd restarts it, and the sticky data/.watchdog_halt file keeps
+# it standing by until the operator removes the file (fix the bug first).
+Restart=always
+RestartSec=10
+
+# Kill only the watchdog on stop; the bot child keeps running so a deliberate
+# systemctl stop does not silently kill the trading bot.
+KillMode=process
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

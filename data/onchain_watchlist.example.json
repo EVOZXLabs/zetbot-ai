@@ -1,0 +1,18 @@
+{
+  "_comment": "Rename to onchain_watchlist.json (drop .example) and edit before enabling ONCHAIN_ENABLED. Only entries whose chain is listed in ONCHAIN_CHAINS get scanned. Double-check every contract/mint address yourself before trusting it — a wrong address here means scanning (and potentially trading) the wrong token.",
+  "_format_note": "This file should be a JSON *array* of entries, not an object. The two keys above are just documentation — delete them along with this note when you create the real file.",
+  "example_entries": [
+    {
+      "symbol": "WBNB/BUSD",
+      "chain": "bsc",
+      "token_address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      "quote_address": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56"
+    },
+    {
+      "symbol": "SOL/USDC",
+      "chain": "solana",
+      "token_address": "So11111111111111111111111111111111111111112",
+      "quote_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    }
+  ]
+}

@@ -12,9 +12,103 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, runtime_checkable
+import logging
+import random
+import time
+from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
 
 import ccxt  # noqa: PLC0415
+
+_log = logging.getLogger("ZetBot")
+
+T = TypeVar("T")
+
+# ---------------------------------------------------------------------------
+#  Exchange API retry helper
+# ---------------------------------------------------------------------------
+
+_MAX_EXCHANGE_RETRIES = 3
+_RETRY_BASE_DELAY = 2.0    # seconds; doubles each attempt (2s, 4s, 8s)
+_RETRY_MAX_DELAY = 30.0    # cap backoff at 30s
+
+
+def exchange_call_with_retry(
+    fn: Callable[[], T],
+    label: str = "",
+    retries: int = _MAX_EXCHANGE_RETRIES,
+    record_failure: Optional[Callable[[], None]] = None,
+    exchange: str = "",
+) -> T:
+    """Call ``fn()`` with exponential-backoff retry on transient exchange errors.
+
+    Retries up to ``retries`` times on ``ccxt.NetworkError``,
+    ``ccxt.RequestTimeout``, and ``ccxt.ExchangeNotAvailable``.
+    Permanent errors (``ccxt.AuthenticationError``, bad-symbol, etc.)
+    are re-raised immediately without retrying.
+
+    Every failure is logged with the exchange name, the method/symbol
+    label, and the CCXT exception CLASS (NetworkError / RequestTimeout /
+    ExchangeNotAvailable / …) so the root cause is visible in the log
+    without digging through tracebacks.
+
+    Args:
+        fn: Zero-argument callable that performs the exchange call.
+        label: Human-readable label for log messages (method + symbol).
+        retries: Maximum retry attempts (default 3).
+        record_failure: Optional callback called exactly once per failed
+            attempt so callers can drive ``SafeGuard.record_exchange_failure()``.
+            Total calls == number of attempts that actually raised an exception
+            (never more).
+        exchange: Exchange name (e.g. ``"binance"``) for root-cause logging.
+
+    Raises:
+        The last exception from ``fn`` when all retries are exhausted.
+    """
+    TRANSIENT = (
+        ccxt.NetworkError,
+        ccxt.RequestTimeout,
+        ccxt.ExchangeNotAvailable,
+    )
+    where = f"{exchange + ': ' if exchange else ''}{label or fn.__name__}"
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except ccxt.AuthenticationError:
+            # Permanent — don't retry, bubble up immediately.
+            raise
+        except TRANSIENT as exc:
+            last_exc = exc
+            if record_failure is not None:
+                try:
+                    record_failure()
+                except Exception:
+                    pass
+            _log.warning(
+                "Exchange call '%s' failed (attempt %d/%d): "
+                "%s — %s",
+                where, attempt, retries, type(exc).__name__, exc,
+            )
+            if attempt < retries:
+                delay = min(
+                    _RETRY_MAX_DELAY,
+                    _RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1),
+                )
+                time.sleep(delay)
+        except Exception as exc:
+            # Non-transient exchange error — log and re-raise immediately.
+            _log.warning(
+                "Exchange call '%s' non-transient error: %s — %s",
+                where, type(exc).__name__, exc,
+            )
+            raise
+
+    # All retries exhausted — re-raise the last transient exception.
+    # record_failure() was already called inside the loop for every failed
+    # attempt; do NOT call it again here to avoid a double-count on the
+    # final attempt.
+    assert last_exc is not None
+    raise last_exc
 
 
 class ExchangeAuthError(Exception):
@@ -198,9 +292,23 @@ class BaseProvider:
         """Default: unified ccxt ``clientOrderId`` param.
 
         Override per-exchange if the API needs a different key name
-        (see ``BinanceProvider``).
+        (see ``BinanceProvider``) or has no client-order-id concept at
+        all (see ``IndodaxProvider``).
         """
         return {"clientOrderId": client_order_id}
+
+    def market_buy_requires_price(self) -> bool:
+        """True when the exchange API requires a ``price`` argument to
+        submit a MARKET BUY order.
+
+        Most exchanges ignore price for market orders, but some (e.g.
+        Indodax) compute the quote amount to spend as ``amount * price``
+        and reject market buys without it. Callers must pass the resolved
+        price through to ``create_order`` only when this is True, because
+        on Binance & friends a stray price converts a market BUY into a
+        ``quoteOrderQty`` spend instead of a base-quantity order.
+        """
+        return False
 
     # -- Properties ------------------------------------------------------
 
@@ -216,7 +324,11 @@ class BaseProvider:
 
     def get_ticker(self, symbol: str) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_ticker(symbol))
+            return exchange_call_with_retry(
+                lambda: dict(self._get_exchange().fetch_ticker(symbol)),
+                label=f"get_ticker({symbol})",
+                exchange=self.name,
+            )
         except Exception:
             return {}
 
@@ -224,8 +336,12 @@ class BaseProvider:
         self, symbol: str, timeframe: str = "1h", limit: int = 200,
     ) -> list[list[float]]:
         try:
-            result = self._get_exchange().fetch_ohlcv(
-                symbol, timeframe, limit=limit,
+            result = exchange_call_with_retry(
+                lambda: self._get_exchange().fetch_ohlcv(
+                    symbol, timeframe, limit=limit,
+                ),
+                label=f"fetch_ohlcv({symbol})",
+                exchange=self.name,
             )
             return [list(map(float, r)) for r in result]
         except Exception:
@@ -233,7 +349,11 @@ class BaseProvider:
 
     def fetch_balance(self) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_balance())
+            return exchange_call_with_retry(
+                lambda: dict(self._get_exchange().fetch_balance()),
+                label="fetch_balance",
+                exchange=self.name,
+            )
         except Exception as exc:
             if self.has_credentials():
                 # We have API keys — a failure here means auth, permissions,
@@ -276,7 +396,11 @@ class BaseProvider:
 
     def load_markets(self) -> dict[str, Any]:
         try:
-            self._markets_cache = dict(self._get_exchange().load_markets())
+            self._markets_cache = dict(exchange_call_with_retry(
+                lambda: self._get_exchange().load_markets(),
+                label="load_markets",
+                exchange=self.name,
+            ))
             return self._markets_cache
         except Exception:
             return {}
@@ -285,7 +409,11 @@ class BaseProvider:
         self, symbols: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         try:
-            return dict(self._get_exchange().fetch_tickers(symbols))
+            return exchange_call_with_retry(
+                lambda: dict(self._get_exchange().fetch_tickers(symbols)),
+                label="fetch_tickers",
+                exchange=self.name,
+            )
         except Exception:
             return {}
 
@@ -384,6 +512,32 @@ class MEXCProvider(BaseProvider):
     CCXT_KWARGS = {"options": {"defaultType": "spot"}}
 
 
+class IndodaxProvider(BaseProvider):
+    """Indodax (Indonesia) — IDR-quoted spot pairs only (e.g. BTC/IDR).
+
+    Unlike Binance/Bybit/OKX etc., Indodax has no spot-vs-futures split,
+    so no ``defaultType`` option is needed. Not yet live-tested against
+    the real API in this codebase — verify with a read-only (view+trade,
+    NO withdrawal) API key on a small balance before trading real funds.
+    See: https://github.com/btcid/indodax-official-api-docs
+    """
+    CCXT_NAME = "indodax"
+
+    def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
+        # Indodax has no client-order-id concept. Its private trade
+        # endpoint signs the ENTIRE request body, so sending an
+        # unsupported param risks the order being rejected server-side —
+        # return no params rather than leak an unknown field in.
+        return {}
+
+    def market_buy_requires_price(self) -> bool:
+        # Indodax's API sizes a market BUY by the quote (IDR) amount; ccxt
+        # computes that cost as amount × price and raises InvalidOrder
+        # when price is missing. SELL is sized by base quantity and needs
+        # no price.
+        return True
+
+
 # ======================================================================
 #  Provider registry (auto-discovered)
 # ======================================================================
@@ -396,6 +550,7 @@ _BUILTIN_PROVIDERS: list[type[BaseProvider]] = [
     GateProvider,
     KucoinProvider,
     MEXCProvider,
+    IndodaxProvider,
 ]
 
 

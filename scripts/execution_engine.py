@@ -92,6 +92,9 @@ class OrderRequest:
             # Prefixed + truncated to stay within Binance's 36-char limit.
             self.client_order_id = "zb" + self.trace_id.replace("-", "")[:34]
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class OrderResult:
@@ -230,6 +233,13 @@ def _map_live_order_status(ccxt_order: dict[str, Any], requested_amount: float) 
         return "CANCELLED"
     if raw_status == "rejected":
         return "REJECTED"
+    # Some exchanges (e.g. Indodax) report a settled order as status
+    # "closed"/"filled" but omit the numeric `filled` field entirely —
+    # treat those as fully filled rather than PENDING.
+    if raw_status in ("closed", "filled"):
+        return "FILLED"
+    if raw_status in ("partial", "partially_filled"):
+        return "PARTIALLY_FILLED"
 
     if filled <= 0:
         return "PENDING"
@@ -541,6 +551,15 @@ class LiveExecutor:
                 if request.type == "LIMIT" else None
             )
 
+            # Indodax sizes a market BUY by quote (IDR) cost = amount ×
+            # price and rejects the order without a price; Binance and
+            # friends ignore price for market orders (passing it there
+            # would silently convert the order to a quoteOrderQty spend).
+            if order_type == "market" and side.lower() == "buy" and provider.market_buy_requires_price():
+                if price is None or price <= 0:
+                    raise ValueError(f"market BUY on {exchange.name} requires a price")
+                precise_price = provider.price_to_precision(symbol, price)
+
             # Tag the order with our client_order_id so a retry can check
             # "did this already land?" instead of blindly resubmitting —
             # see OrderManager._find_existing_live_order.
@@ -574,7 +593,7 @@ class LiveExecutor:
                 type=request.type,
                 amount=precise_amount,
                 filled_amount=float(ccxt_order.get("filled", 0)),
-                filled_price=float(ccxt_order.get("average") or ccxt_order.get("price", price)),
+                filled_price=float(ccxt_order.get("price", price)),
                 fee=float(ccxt_order.get("fee", {}).get("cost", 0)),
                 cost=float(ccxt_order.get("cost", 0)),
                 latency_ms=round(elapsed, 2),
@@ -589,6 +608,152 @@ class LiveExecutor:
             return OrderResult.failed(
                 request, f"Live execution error: {exc}", self.name,
             )
+
+
+class OnchainExecutor:
+    """LIVE execution for on-chain (DEX) trades.
+
+    Unlike ``LiveExecutor`` (CCXT order lifecycle: submit → poll →
+    reconcile — see its docstring), a DEX swap is a single atomic
+    transaction: it either lands in one block or it doesn't. There is
+    no order id to poll, no partial fill. This executor therefore
+    returns a settled ``OrderResult`` immediately rather than a
+    "PENDING" status implying a reconciliation pass that doesn't apply
+    here.
+
+    Single source of truth for the live-trading gate: this executor
+    keeps no separate ENABLED flag of its own. It defers entirely to
+    ``config.onchain_live_confirmed`` (``ONCHAIN_LIVE_CONFIRMED`` in
+    ``.env``) — the exact same flag ``onchain_providers.swap()``
+    itself checks — so there is exactly one switch that arms on-chain
+    live trading, never two that could drift out of sync.
+
+    Routing (which chain / contract address a symbol maps to) comes
+    from ``data/onchain_symbol_map.json``, written by the scanner
+    whenever on-chain pairs are scanned — not duplicated here.
+    """
+
+    name = "onchain"
+    ROUTE_MAP_PATH = "data/onchain_symbol_map.json"
+
+    @staticmethod
+    def is_enabled(config: Any) -> bool:
+        return bool(getattr(config, "onchain_live_confirmed", False))
+
+    def _load_route(self, symbol: str) -> Optional[dict[str, str]]:
+        try:
+            with open(self.ROUTE_MAP_PATH) as f:
+                mapping = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        return mapping.get(symbol)
+
+    def execute(
+        self,
+        request: OrderRequest,
+        config: Any,
+        exchange: ExchangeManager,
+        wallet: Any,
+    ) -> OrderResult:
+        t0 = time.time()
+        symbol = request.symbol
+        side = request.side.upper()
+
+        if side not in ("BUY", "SELL"):
+            return OrderResult.rejected(request, f"Invalid side: {side}", self.name)
+        if request.amount <= 0:
+            return OrderResult.rejected(
+                request, f"Invalid amount: {request.amount}", self.name,
+            )
+        if not self.is_enabled(config):
+            return OrderResult.rejected(
+                request,
+                "On-chain live trading is not confirmed. Set "
+                "ONCHAIN_LIVE_CONFIRMED=true in .env only after testing "
+                "on a testnet with a throwaway wallet.",
+                self.name,
+            )
+
+        route = self._load_route(symbol)
+        if not route:
+            return OrderResult.rejected(
+                request,
+                f"No on-chain route for {symbol} — run the scanner with "
+                "on-chain enabled first (it writes "
+                f"{self.ROUTE_MAP_PATH}).",
+                self.name,
+            )
+
+        chain = route.get("chain", "")
+        token_address = route.get("token_address", "")
+        quote_address = route.get("quote_address", "")
+        if not (chain and token_address and quote_address):
+            return OrderResult.rejected(
+                request, f"Incomplete on-chain route for {symbol}: {route}", self.name,
+            )
+
+        price = request.price or 0.0
+        if price <= 0:
+            return OrderResult.rejected(
+                request, f"Cannot determine price for {symbol}", self.name,
+            )
+
+        try:
+            from scripts.onchain_providers import (  # noqa: PLC0415
+                LiveNotConfirmedError, OnchainAuthError, get_onchain_provider,
+            )
+            provider = get_onchain_provider(chain, config)
+        except Exception as exc:
+            return OrderResult.failed(
+                request, f"Could not build on-chain provider for {chain}: {exc}", self.name,
+            )
+
+        try:
+            # BUY spends an exact quote-token notional to acquire
+            # whatever token amount results (matches how position
+            # sizing here works — a USD amount, not an exact token
+            # quantity). SELL disposes of an exact token quantity
+            # (the position being closed) for whatever quote it fetches.
+            if side == "BUY":
+                notional = request.amount * price
+                tx = provider.swap_exact_in(config, quote_address, token_address, notional)
+            else:
+                tx = provider.swap_exact_in(config, token_address, quote_address, request.amount)
+        except LiveNotConfirmedError as exc:
+            return OrderResult.rejected(request, str(exc), self.name)
+        except OnchainAuthError as exc:
+            return OrderResult.failed(request, str(exc), self.name)
+        except Exception as exc:
+            return OrderResult.failed(request, f"On-chain swap failed: {exc}", self.name)
+
+        elapsed = (time.time() - t0) * 1000
+        tx_ref = tx.get("tx_hash") or tx.get("tx_signature") or ""
+        settled = tx.get("status") in ("success", "submitted")
+
+        return OrderResult(
+            order_id=tx_ref or _generate_id("onchain_"),
+            trace_id=request.trace_id,
+            execution_id=_generate_id("exe_"),
+            status="FILLED" if settled else "FAILED",
+            symbol=symbol,
+            side=side,
+            type=request.type,
+            amount=request.amount,
+            filled_amount=request.amount if settled else 0.0,
+            filled_price=price,
+            # Gas is paid directly from the wallet's native balance, not
+            # deducted as a %-fee the way a CEX taker fee is — tracked
+            # on-chain via the tx itself, not modeled here.
+            fee=0.0,
+            cost=request.amount * price,
+            error=None if settled else f"swap status: {tx.get('status')}",
+            latency_ms=round(elapsed, 2),
+            retries=0,
+            executor=self.name,
+            exchange=f"onchain:{chain}",
+            mode="LIVE",
+            timestamp=_now(),
+        )
 
 
 # ======================================================================
@@ -622,6 +787,7 @@ class ExecutionEngine:
             "paper": PaperExecutor(),
             "simulation": SimulationExecutor(),
             "live": LiveExecutor(),
+            "onchain": OnchainExecutor(),
         }
 
     @property
@@ -638,13 +804,20 @@ class ExecutionEngine:
         self,
         request: OrderRequest,
     ) -> OrderResult:
-        executor = self._select_executor()
+        executor = self._select_executor(request)
         return executor.execute(request, self._config, self._exchange, self._wallet)
 
-    def _select_executor(self) -> IExecutionEngine:
+    def _select_executor(self, request: OrderRequest) -> IExecutionEngine:
         mode = self._mode
+        is_onchain = request.metadata.get("venue") == "onchain"
 
         if mode == "LIVE":
+            if is_onchain:
+                # Always routes here regardless of OnchainExecutor's own
+                # live-confirmation state — it returns a clean REJECTED
+                # OrderResult itself if ONCHAIN_LIVE_CONFIRMED isn't set,
+                # the same pattern LiveExecutor uses for CEX trades.
+                return self._executors["onchain"]
             if LiveExecutor.is_enabled():
                 return self._executors["live"]
             return self._executors["simulation"]

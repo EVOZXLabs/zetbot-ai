@@ -1,0 +1,22 @@
+# ZetBot AI — log rotation
+#
+# Rotates all logs written under logs/ (pipeline daily logs {date}.log,
+# watchdog.log, bot-console.log). copytruncate is required: the watchdog and
+# bot hold these files open via logging.FileHandler, so rotating them away
+# would not free disk space until the process reopens them.
+#
+# Install:
+#   sudo cp deploy/zetbot-logrotate /etc/logrotate.d/zetbot
+#   sudo logrotate -d /etc/logrotate.d/zetbot   # dry-run verification
+#
+# Adjust the log path to match your install (WorkingDirectory in
+# deploy/zetbot-watchdog.service).
+/opt/zetbot-ai/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

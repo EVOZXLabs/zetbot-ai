@@ -34,7 +34,7 @@ PAPER_STATE_PATH = "data/paper_state.json"
 LIVE_POSITIONS_PATH = "data/live_positions.json"
 
 # Simulated exchange requirements (Binance spot defaults)
-EXCHANGE_MIN_NOTIONAL = 10.0        # $10 minimum order value
+EXCHANGE_MIN_NOTIONAL = 10.0        # 10 USDT minimum order value
 EXCHANGE_MIN_QTY_DEFAULT = 0.00001  # default min quantity step
 
 # NOTE: max_positions and max_daily_loss are equity-relative by default
@@ -73,6 +73,7 @@ class RiskApproval:
     expected_rr: float
     approval: str
     rejection_reason: str
+    venue: str = "cex"
 
 
 @dataclass
@@ -115,6 +116,7 @@ class TradeExecution:
     signal_time: str
     status: str
     rejection_reason: str
+    venue: str = "cex"
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +151,7 @@ class DataLoader:
                 expected_rr=r.get("expected_rr", 0.0),
                 approval=r.get("approval", ""),
                 rejection_reason=r.get("rejection_reason", ""),
+                venue=r.get("venue", "cex"),
             ))
         return results
 
@@ -188,34 +191,24 @@ def _count_open_positions() -> int:
     ``MAX_OPEN_POSITIONS`` was silently reset to 0 every run and could
     never account for positions still open from earlier cycles,
     letting real exposure grow past the configured cap.
-
-    Reads only from the file matching the current trading mode
-    (paper_state.json for PAPER, live_positions.json for LIVE) to
-    avoid double-counting stale data from the other mode.
     """
-    import os
-    from scripts.position_status import is_open  # noqa: PLC0415
-
     count = 0
-    paper_mode = os.getenv("PAPER_MODE", "true").lower() in ("true", "1", "yes")
+    try:
+        with open(PAPER_STATE_PATH) as f:
+            paper_state = json.load(f)
+        for vp in paper_state.get("positions", {}).values():
+            if vp.get("status") == "OPEN":
+                count += 1
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
-    if paper_mode:
-        try:
-            with open(PAPER_STATE_PATH) as f:
-                paper_state = json.load(f)
-            for vp in paper_state.get("positions", {}).values():
-                if is_open(vp.get("status")):
-                    count += 1
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-    else:
-        try:
-            with open(LIVE_POSITIONS_PATH) as f:
-                live_positions = json.load(f)
-            if isinstance(live_positions, dict):
-                count += len(live_positions)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+    try:
+        with open(LIVE_POSITIONS_PATH) as f:
+            live_positions = json.load(f)
+        if isinstance(live_positions, dict):
+            count += len(live_positions)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
     return count
 
@@ -277,6 +270,7 @@ class ExecutionValidator:
         decision: DecisionScores | None,
     ) -> tuple[str, str]:
         """Return (status, reason)."""
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         reasons: list[str] = []
 
         # 1. Invalid price
@@ -298,8 +292,8 @@ class ExecutionValidator:
             if risk.entry_price > 0 else 0.0
         if risk.position_value < self.min_notional:
             reasons.append(
-                f"Position ${risk.position_value:.2f} "
-                f"< ${self.min_notional:.0f} min notional"
+                f"Position {risk.position_value:.2f} {_qc} "
+                f"< {self.min_notional:.0f} {_qc} min notional"
             )
 
         # 5. Duplicate symbol
@@ -398,12 +392,13 @@ class TradeExecutor:
 
     def run(self) -> list[TradeExecution]:
         """Full execution planning pipeline."""
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         print(f"\n  {'=' * 78}")
         print(f"  ZETBOT AI — PROFESSIONAL TRADE EXECUTOR")
         print(f"  {'=' * 78}")
-        print(f"  Equity           : ${self.equity:>8,.2f}")
+        print(f"  Equity           : {self.equity:>8,.2f} {_qc}")
         print(f"  Max positions    : {self.validator.max_positions}")
-        print(f"  Max daily loss   : ${self.validator.max_daily_loss:>8,.2f}  "
+        print(f"  Max daily loss   : {self.validator.max_daily_loss:>8,.2f} {_qc}  "
               f"({MAX_DAILY_LOSS_PCT:.1f}% of equity)")
         print()
 
@@ -480,7 +475,7 @@ class TradeExecutor:
                 print(f"    READY   {risk.symbol:>12s}  "
                       f"conf={confidence:.1f}  "
                       f"R:R {risk.expected_rr:.2f}  "
-                      f"${risk.position_value:>7,.2f}")
+                      f"{risk.position_value:>7,.2f} {_qc}")
             else:
                 print(f"    {status:>8s} {risk.symbol:>12s}  {reason}")
 
@@ -503,6 +498,7 @@ class TradeExecutor:
                 signal_time=previous_signal or signal_ts,
                 status=status,
                 rejection_reason=reason,
+                venue=risk.venue,
             ))
 
         plans.sort(key=lambda p: p.probability, reverse=True)
@@ -516,6 +512,7 @@ class TradeExecutor:
         return plans
 
     def _print_summary(self, elapsed: float) -> None:
+        _qc = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         ready = [p for p in self.executions if p.status == "READY"]
         rejected = [p for p in self.executions if p.status == "REJECTED"]
         skipped = [p for p in self.executions if p.status == "SKIPPED"]
@@ -543,11 +540,11 @@ class TradeExecutor:
 
             print(f"  Ready Trade Summary:")
             print(f"    Avg R:R            : {avg_rr:.2f}")
-            print(f"    Avg Position       : ${avg_pos:>8,.2f}")
-            print(f"    Largest Position   : ${largest:>8,.2f}")
-            print(f"    Smallest Position  : ${smallest:>8,.2f}")
-            print(f"    Total Risk         : ${total_risk:>8,.2f}")
-            print(f"    Total Expected Rwd : ${total_reward:>8,.2f}")
+            print(f"    Avg Position       : {avg_pos:>8,.2f} {_qc}")
+            print(f"    Largest Position   : {largest:>8,.2f} {_qc}")
+            print(f"    Smallest Position  : {smallest:>8,.2f} {_qc}")
+            print(f"    Total Risk         : {total_risk:>8,.2f} {_qc}")
+            print(f"    Total Expected Rwd : {total_reward:>8,.2f} {_qc}")
             print()
 
         print(f"  Execution time : {elapsed:.2f}s")
@@ -568,7 +565,7 @@ class TradeExecutor:
             ready.sort(key=lambda p: p.confidence, reverse=True)
             for i, p in enumerate(ready, 1):
                 qty_str = _fmt_qty(p.quantity)
-                size_str = f"${p.position_size_usdt:,.0f}"
+                size_str = f"{p.position_size_usdt:,.0f} {_qc}"
                 print(
                     f"  {i:3d} {p.symbol:>12s} {p.confidence:6.1f} "
                     f"{size_str:>10s} {qty_str:>12s} "
@@ -607,7 +604,7 @@ class PlanExport:
             "stop_loss", "tp1", "tp2", "tp3",
             "risk_amount", "reward_amount", "risk_reward",
             "probability", "recommendation", "confidence",
-            "signal_time", "status", "rejection_reason",
+            "signal_time", "status", "rejection_reason", "venue",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)

@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from scripts.exchange_manager import ExchangeManager
+from scripts.exit_gate import exit_guard
 from scripts.live_position_sync import require_entry_price
 
 LIVE_PROTECTIONS_PATH = "data/live_protections.json"
@@ -167,6 +168,27 @@ class ProtectionManager:
     ) -> dict[str, Any]:
         """Submit paired SL/TP sell orders for an existing LIVE long position.
 
+        Serialized on the same per-symbol lock used by every other exit
+        path (see ``scripts.exit_gate``) so protection creation can
+        never race a concurrent market exit for the same symbol.
+        """
+        with exit_guard(position.get("symbol", "")):
+            return self._create_protection(
+                position,
+                entry_order_id=entry_order_id,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+            )
+
+    def _create_protection(
+        self,
+        position: dict[str, Any],
+        entry_order_id: str = "",
+        stop_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Submit paired SL/TP sell orders for an existing LIVE long position.
+
         ``position`` MUST come from ``LivePositionSync`` (real exchange
         data), never from positions.json / paper state.
 
@@ -273,6 +295,15 @@ class ProtectionManager:
         """Check both legs for ``symbol``; if one filled, cancel the
         other (this bot IS the OCO logic — see module docstring).
 
+        Serialized on the same per-symbol lock as every other exit path.
+        """
+        with exit_guard(symbol):
+            return self._reconcile_protection(symbol)
+
+    def _reconcile_protection(self, symbol: str) -> Optional[dict[str, Any]]:
+        """Check both legs for ``symbol``; if one filled, cancel the
+        other (this bot IS the OCO logic — see module docstring).
+
         Returns the updated record, or None if there's nothing tracked
         for this symbol.
         """
@@ -355,6 +386,10 @@ class ProtectionManager:
     # ------------------------------------------------------------------
 
     def cancel_protection(self, symbol: str, reason: str = "manual") -> Optional[dict[str, Any]]:
+        with exit_guard(symbol):
+            return self._cancel_protection(symbol, reason)
+
+    def _cancel_protection(self, symbol: str, reason: str = "manual") -> Optional[dict[str, Any]]:
         record = self.get_protection(symbol)
         if not record:
             return None

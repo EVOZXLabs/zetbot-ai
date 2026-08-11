@@ -492,17 +492,55 @@ class TestStartupReconciliation:
         assert "equity_history" in pb2
         assert len(pb2["equity_history"]) == 1
 
-    def test_no_files_no_crash(self, monkeypatch: Any) -> None:
-        """Reconciliation handles missing files gracefully."""
+    def test_no_files_no_crash(self, monkeypatch: Any, tmp_path: Any) -> None:
+        """Reconciliation handles missing files gracefully — and now
+        funds a fresh account instead of silently leaving balance at 0
+        (see test_initializes_fresh_account_when_no_files_exist below
+        for the full behavior this replaced)."""
         import scripts.accounting_reconcile as rec_mod
 
-        empty = "/tmp/nonexistent_accounting_test_dir"
+        empty = str(tmp_path / "nonexistent_accounting_test_dir")
         monkeypatch.setattr(rec_mod, "_STATE_PATH", f"{empty}/paper_state.json")
         monkeypatch.setattr(rec_mod, "_BALANCE_PATH", f"{empty}/paper_balance.json")
         monkeypatch.setattr(rec_mod, "_POSITIONS_PATH", f"{empty}/positions.json")
 
         findings = rec_mod.reconcile()
-        assert findings["repairs_applied"] == 0
+        assert findings["repairs_applied"] == 1
+        assert findings["fresh_account_initialized"] is True
+
+    def test_initializes_fresh_account_when_no_files_exist(
+        self, monkeypatch: Any, tmp_path: Any,
+    ) -> None:
+        """Regression guard: previously a first-run (or post-reset)
+        account with no accounting files at all just got skipped,
+        which left /status, /balance and /wallet showing $0.00 cash
+        AND a nonsensical "-100% all-time" (since the % calc's
+        initial_balance fallback is 10,000 while cash/equity default
+        to 0 when the file is missing) until the bot's first pipeline
+        cycle happened to write real files."""
+        import scripts.accounting_reconcile as rec_mod
+
+        empty = str(tmp_path / "fresh_account_test_dir")
+        state_path = f"{empty}/paper_state.json"
+        balance_path = f"{empty}/paper_balance.json"
+        monkeypatch.setattr(rec_mod, "_STATE_PATH", state_path)
+        monkeypatch.setattr(rec_mod, "_BALANCE_PATH", balance_path)
+        monkeypatch.setattr(rec_mod, "_POSITIONS_PATH", f"{empty}/positions.json")
+
+        findings = rec_mod.reconcile(account_balance=6000.0)
+        assert findings["fresh_account_initialized"] is True
+
+        with open(balance_path) as f:
+            pb = json.load(f)
+        assert pb["final_balance"] == 6000.0
+        assert pb["final_equity"] == 6000.0
+        assert pb["initial_balance"] == 6000.0
+        assert pb["net_pnl"] == 0.0
+        assert pb["total_return_pct"] == 0.0  # not -100%
+
+        with open(state_path) as f:
+            state = json.load(f)
+        assert state["initial_balance"] == 6000.0
 
 
 # ============================================================================
@@ -760,7 +798,8 @@ class TestPaperExportMerge:
 
         PaperExport.orders_json(engine_orders, path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         ids = [o["id"] for o in result["orders"]]
         assert "monitor-BTCUSDT-123" in ids, "Monitor SELL order was lost!"
         assert result["open_orders"] == 1
@@ -803,7 +842,8 @@ class TestPaperExportMerge:
 
         PaperExport.orders_json(engine_orders, path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         assert len(result["orders"]) == 1
         assert result["orders"][0]["status"] == "CLOSED"
 
@@ -851,7 +891,8 @@ class TestPaperExportBalanceMerge:
 
         PaperExport.balance_json(engine_metrics, [], path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         # File's higher realized_pnl should be preserved
         assert result["realized_pnl"] == 500.0
         assert result["total_trades"] == 2
@@ -886,6 +927,7 @@ class TestPaperExportBalanceMerge:
 
         PaperExport.balance_json(engine_metrics, [], path)
 
-        result = json.loads(open(path).read())
+        with open(path) as f:
+            result = json.loads(f.read())
         assert result["realized_pnl"] == 800.0
         assert result["total_trades"] == 5

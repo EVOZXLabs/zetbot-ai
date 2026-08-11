@@ -48,6 +48,17 @@ signal.signal(signal.SIGTERM, _early_shutdown_handler)
 # import phase (e.g. by a test or external tool).
 _PROCESS_LAUNCH_TIME: float = time.time()
 
+# Watchdog heartbeat cadence.  The dedicated heartbeat thread writes
+# data/watchdog_heartbeat.json every HEARTBEAT_INTERVAL_SECONDS while the
+# process runs.  The watchdog (scripts/watchdog.py) restarts the bot when
+# that file goes stale (default HEARTBEAT_STALE_SECONDS=300), so the write
+# interval must stay far below the staleness threshold.  The heartbeat
+# intentionally does NOT depend on position monitoring: monitoring can be
+# slow, raise, or hang on an exchange call without the bot being dead.
+HEARTBEAT_INTERVAL_SECONDS: float = max(
+    1.0, float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "30"))
+)
+
 from scripts.app_config import (
     AppConfig,
     ConfigError,
@@ -60,6 +71,7 @@ from scripts.logger import PipelineLogger
 from scripts.pidfile import PidFile
 from scripts.pipeline import Pipeline, StageResult
 from scripts.position_status import is_open, OPEN_STATUSES, CLOSED_STATUSES
+from scripts.paper_state_lock import paper_state_writes, merge_positions
 
 # ---------------------------------------------------------------------------
 #  Configure the ZetBot logger — bot/notifier.py and all bot/ modules use
@@ -149,24 +161,41 @@ def _build_summary(
     lines.append(f"Open positions      : {open_positions}")
     lines.append(f"Closed positions    : {closed_positions}")
 
-    # Paper trading
-    balance = paper_balance.get("final_balance", 0.0)
-    equity = paper_balance.get("final_equity", 0.0)
-    realized = paper_balance.get("realized_pnl", 0.0)
-    unrealized = paper_balance.get("unrealized_pnl", 0.0)
-    net_pnl = paper_balance.get("net_pnl", 0.0)
-    win_rate = paper_balance.get("win_rate", 0.0)
-    total_trades = paper_balance.get("total_trades", 0)
-    wins = paper_balance.get("winning_trades", 0)
-    losses = paper_balance.get("losing_trades", 0)
+    # Paper trading — canonical MetricsManager snapshot (same source as
+    # HEALTH and the Telegram wallet/portfolio/status commands), never
+    # the raw paper_balance.json keys: net_pnl/equity are only refreshed
+    # on position closure and sit stale (or absent) between closures,
+    # which made the pipeline report disagree with every other view.
+    try:
+        from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+        snap = MetricsManager(config.data_dir).account()
+        balance = snap.balance
+        equity = snap.equity
+        realized = snap.realized_pnl
+        unrealized = snap.unrealized_pnl
+        net_pnl = snap.net_pnl
+        total_trades = snap.total_trades
+        wins = snap.winning_trades
+        losses = snap.losing_trades
+        win_rate = snap.win_rate
+    except Exception:
+        balance = paper_balance.get("final_balance", 0.0)
+        equity = paper_balance.get("final_equity", 0.0)
+        realized = paper_balance.get("realized_pnl", 0.0)
+        unrealized = paper_balance.get("unrealized_pnl", 0.0)
+        net_pnl = paper_balance.get("net_pnl", 0.0)
+        win_rate = paper_balance.get("win_rate", 0.0)
+        total_trades = paper_balance.get("total_trades", 0)
+        wins = paper_balance.get("winning_trades", 0)
+        losses = paper_balance.get("losing_trades", 0)
     lines.append(f"Today's trades      : {total_trades}  (W:{wins} L:{losses})")
     lines.append(f"Win rate            : {win_rate:.1f}%")
-    lines.append(f"Realized PnL        : ${realized:>+10,.2f}")
-    lines.append(f"Unrealized PnL      : ${unrealized:>+10,.2f}")
-    lines.append(f"Net PnL             : ${net_pnl:>+10,.2f}")
-    lines.append(f"USDT balance        : ${balance:>10,.2f}")
-    lines.append(f"Equity              : ${equity:>10,.2f}")
-    lines.append(f"Cash                : ${balance:>10,.2f}")
+    lines.append(f"Realized PnL        : {realized:>+10,.2f} {config.quote_currency}")
+    lines.append(f"Unrealized PnL      : {unrealized:>+10,.2f} {config.quote_currency}")
+    lines.append(f"Net PnL             : {net_pnl:>+10,.2f} {config.quote_currency}")
+    lines.append(f"{config.quote_currency} balance        : {balance:>10,.2f} {config.quote_currency}")
+    lines.append(f"Equity              : {equity:>10,.2f} {config.quote_currency}")
+    lines.append(f"Cash                : {balance:>10,.2f} {config.quote_currency}")
 
     # Stage execution times
     lines.append("")
@@ -208,11 +237,55 @@ def _start_worker(
     return t
 
 
+def _start_heartbeat_writer(
+    shutdown_event: threading.Event,
+    logger: Any,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    writer: Any = None,
+) -> threading.Thread:
+    """Start the watchdog heartbeat writer as a dedicated daemon thread.
+
+    Writes ``data/watchdog_heartbeat.json`` immediately (with the startup
+    log line ``[WATCHDOG] heartbeat updated``) and then every ``interval``
+    seconds until shutdown.  The heartbeat must NEVER be coupled to
+    ``_monitor_positions()``: monitoring can be slow, raise, or hang on an
+    exchange call, and none of that means the bot is dead — the Telegram
+    command center runs in its own thread and stays responsive.  A separate
+    thread keeps the heartbeat fresh for as long as the process runs, so
+    the watchdog (which restarts on stale heartbeats) cannot kill a
+    healthy bot just because position monitoring misbehaved.
+    """
+    if writer is None:
+        from scripts.pipeline_scheduler import write_heartbeat  # noqa: PLC0415
+        writer = write_heartbeat
+
+    def _writer_loop() -> None:
+        try:
+            writer()
+            logger.info("[WATCHDOG] heartbeat updated")
+        except Exception as exc:
+            logger.warning(f"[WATCHDOG] initial heartbeat write failed: {exc}")
+        while not shutdown_event.wait(interval):
+            try:
+                writer()
+            except Exception as exc:
+                logger.debug(f"[WATCHDOG] heartbeat write failed: {exc}")
+
+    thread = threading.Thread(
+        target=_writer_loop,
+        name="HeartbeatWriter",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _send_telegram(notifier: Any, lines: list[str]) -> None:
     """Send summary via Telegram using the centralized Notifier."""
     try:
+        from telegram.formatter import md_escape  # noqa: PLC0415
         msg = "\n".join(line for line in lines[:25])
-        notifier.send(f"\U0001f4ca *Pipeline Report*\n{msg}")
+        notifier.send(f"\U0001f4ca *Pipeline Report*\n{md_escape(msg)}")
     except Exception as exc:
         logger.error(f"Telegram notification failed: {exc}")
 
@@ -275,6 +348,45 @@ _exit_reason_map = {
 }
 
 
+def _holding_time_from_position(position: Any) -> "timedelta":
+    """Holding duration for a close notification, from the entry timestamp.
+
+    The reconciled position dict never carries ``holding_hours``
+    (``reconcile_position`` does not set it) and the paper engine's
+    ``VirtualPosition`` records do not persist it — so the close
+    notification used to report "0s" even for a position held for months,
+    while ``/positions`` (which reads ``opened_at``) showed the real
+    duration. Derive the duration from ``entry_time`` / ``opened_at`` the
+    same way the positions command does, falling back to ``holding_hours``
+    only when no timestamp exists.
+    """
+    from datetime import datetime, timezone, timedelta  # noqa: PLC0415
+
+    if isinstance(position, dict):
+        entry_raw = position.get("entry_time") or position.get("opened_at", "")
+        holding_hours = position.get("holding_hours", 0) or 0
+    else:
+        entry_raw = (
+            getattr(position, "entry_time", "")
+            or getattr(position, "opened_at", "")
+            or ""
+        )
+        holding_hours = getattr(position, "holding_hours", 0) or 0
+
+    if entry_raw:
+        try:
+            dt = datetime.fromisoformat(str(entry_raw).split("+")[0].split("Z")[0])
+            holding = datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)
+            if holding.total_seconds() > 0:
+                return holding
+        except (ValueError, TypeError):
+            pass
+
+    if holding_hours:
+        return timedelta(hours=float(holding_hours))
+    return timedelta()
+
+
 def _notify_closure(
     logger: Any,
     notifier: Any,
@@ -282,8 +394,10 @@ def _notify_closure(
     new_pos: Any,
     exit_price: float,
     exit_reason_map: dict[str, str],
+    config: Any = None,
 ) -> None:
     """Send Telegram notification when a position closes."""
+    quote = (getattr(config, "quote_currency", None) or os.getenv("QUOTE_CURRENCY", "USDT")).upper() if config else os.getenv("QUOTE_CURRENCY", "USDT").upper()
     exit_reason = exit_reason_map.get(new_pos.status, "Strategy Exit")
     # "CLOSED" can be from TP (tp3_hit) or trend_exit — use tp3_hit + PnL
     if exit_reason == "Take Profit":
@@ -293,7 +407,7 @@ def _notify_closure(
             exit_reason = "Strategy Exit"
     logger.info(
         f"Position {symbol}: {new_pos.status} "
-        f"(PnL: ${new_pos.total_pnl:+.2f}, {exit_reason})"
+        f"(PnL: {new_pos.total_pnl:+.2f} {quote}, {exit_reason})"
     )
 
     # Update paper balance & orders to reflect the closure
@@ -303,8 +417,6 @@ def _notify_closure(
 
     # Send Telegram notification via centralized notifier
     try:
-        from datetime import timedelta  # noqa: PLC0415
-        holding_secs = new_pos.holding_hours * 3600
         notifier.notify_position_closed(
             symbol=symbol,
             entry_price=new_pos.entry_price,
@@ -313,22 +425,13 @@ def _notify_closure(
             pnl_pct=new_pos.floating_pnl_pct,
             balance=new_balance,
             exit_reason=exit_reason,
-            holding_time=timedelta(seconds=holding_secs),
+            holding_time=_holding_time_from_position(new_pos),
         )
     except Exception as exc:
         logger.warning(f"Failed to send close notification for {symbol}: {exc}")
 
 
-def _pos_field(pos: Any, name: str, default: Any = 0) -> Any:
-    """Read a field from a position that may be a dict (from reconcile_position)
-    or an object with attributes (e.g. a Position dataclass). Handles both so
-    callers don't crash depending on which representation is passed in.
-    """
-    if isinstance(pos, dict):
-        return pos.get(name, default)
-    return getattr(pos, name, default)
-
-
+@paper_state_writes
 def _update_paper_on_closure(
     logger: Any,
     symbol: str,
@@ -338,9 +441,17 @@ def _update_paper_on_closure(
 ) -> tuple[float, float]:
     """Update paper balance and order history when a position closes.
 
-    ``new_pos`` may be either a dict (as returned by
-    ``pipeline.reconcile_position``) or a position object with attributes —
-    both are supported via ``_pos_field``.
+    Idempotency guard (BUG-2): the pipeline's reconciliation AND the
+    monitor can close the same position in the same cycle (e.g. both
+    read positions.json as OPEN, both trigger the SL). If the pipeline's
+    provider already closed and credited the position (paper_state.json
+    shows it CLOSED), this function MUST NOT credit the wallet a second
+    time — it only keeps the positions.json/order-file bookkeeping in
+    sync and returns the pnl for notification.
+
+    Ghost positions (simulated by the Position stage but never executed
+    — absent from paper_state.json) must also never credit the wallet,
+    because their buy cost was never deducted.
 
     Returns:
         Tuple of (pnl, new_balance) for the caller to use in notifications.
@@ -348,21 +459,71 @@ def _update_paper_on_closure(
     from datetime import datetime, timezone  # noqa: PLC0415
     now_ts = datetime.now(timezone.utc).isoformat()
 
-    remaining_qty = _pos_field(new_pos, "remaining_qty", 0)
-    qty = remaining_qty if remaining_qty > 0 else _pos_field(new_pos, "quantity", 0)
+    # ── Idempotency / ghost guard ────────────────────────────────────
+    # paper_state.json is the authoritative record of executed trades.
+    # A position that is CLOSED there was already credited by the
+    # provider's execute_sell; a position absent from there was never
+    # bought at all. In both cases skip every wallet mutation.
+    # When the ledger file does not exist at all (legacy/fresh setups)
+    # fall back to the old monitor-only accounting behavior.
+    try:
+        with open("data/paper_state.json") as f:
+            _state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _state = None
+    if _state is not None:
+        _vp = (_state.get("positions") or {}).get(symbol)
+        already_handled = _vp is None or _vp.get("status") == "CLOSED"
+    else:
+        _vp = None
+        already_handled = False
+    if already_handled:
+        pnl = (
+            new_pos.get("total_pnl", 0.0)
+            if isinstance(new_pos, dict)
+            else getattr(new_pos, "total_pnl", 0.0)
+        )
+        # The paper-state ledger is the engine's finalized accounting. When
+        # the engine already closed + credited this position, its persisted
+        # total_pnl is authoritative — prefer it over the reconciled value
+        # so the Telegram notification shows the SAME pnl the engine booked.
+        if _vp is not None and _vp.get("total_pnl") is not None:
+            try:
+                pnl = float(_vp["total_pnl"])
+            except (TypeError, ValueError):
+                pass
+        logger.debug(
+            f"Closure of {symbol} already handled by the pipeline "
+            f"(paper_state status={None if _vp is None else _vp.get('status')}) "
+            "— skipping wallet credit to avoid double-counting"
+        )
 
-    # Use ExecutionModel for accurate fee/slippage calculation
-    from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
-    sell_result = ExecutionModel.sell(exit_price, qty)
-    fill_price = sell_result["fill_price"]
-    fee = sell_result["fee"]
-    total_proceeds = sell_result["total_proceeds"]
+    remaining_qty = new_pos.get("remaining_qty", 0) if isinstance(new_pos, dict) else getattr(new_pos, "remaining_qty", 0)
+    quantity = new_pos.get("quantity", 0) if isinstance(new_pos, dict) else getattr(new_pos, "quantity", 0)
+    entry_price_val = new_pos.get("entry_price", 0) if isinstance(new_pos, dict) else getattr(new_pos, "entry_price", 0)
+    floating_pnl_pct_val = new_pos.get("floating_pnl_pct", 0) if isinstance(new_pos, dict) else getattr(new_pos, "floating_pnl_pct", 0)
+    entry_time_val = new_pos.get("entry_time") if isinstance(new_pos, dict) else getattr(new_pos, "entry_time", None)
 
-    # Use same ExecutionModel for cost basis so both sides include slippage
-    entry_price = _pos_field(new_pos, "entry_price", exit_price)
-    buy_result = ExecutionModel.buy(entry_price, qty)
-    cost_basis = buy_result["total_cost"]
-    pnl = total_proceeds - cost_basis
+    qty = remaining_qty if remaining_qty > 0 else quantity
+
+    if not already_handled:
+        # Use ExecutionModel for accurate fee/slippage calculation
+        from scripts.paper_trading_engine import ExecutionModel  # noqa: PLC0415
+        sell_result = ExecutionModel.sell(exit_price, qty)
+        fill_price = sell_result["fill_price"]
+        fee = sell_result["fee"]
+        total_proceeds = sell_result["total_proceeds"]
+
+        # Use same ExecutionModel for cost basis so both sides include slippage
+        buy_result = ExecutionModel.buy(entry_price_val, qty)
+        cost_basis = buy_result["total_cost"]
+        pnl = total_proceeds - cost_basis
+    else:
+        fill_price = exit_price
+        fee = 0.0
+        total_proceeds = 0.0
+        cost_basis = 0.0
+        pnl = pnl
 
     # Update paper_balance.json
     try:
@@ -370,9 +531,9 @@ def _update_paper_on_closure(
             pb = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         pb = {
-            "initial_balance": 10000.0,
-            "final_balance": 10000.0,
-            "final_equity": 10000.0,
+            "initial_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+            "final_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+            "final_equity": float(os.getenv("ACCOUNT_BALANCE", "10000")),
             "total_trades": 0,
             "winning_trades": 0,
             "losing_trades": 0,
@@ -382,15 +543,16 @@ def _update_paper_on_closure(
             "net_pnl": 0.0,
         }
 
-    pb["final_balance"] = round(pb.get("final_balance", 10000.0) + total_proceeds, 2)
-    pb["total_trades"] = pb.get("total_trades", 0) + 1
-    if pnl > 0:
-        pb["winning_trades"] = pb.get("winning_trades", 0) + 1
-    else:
-        pb["losing_trades"] = pb.get("losing_trades", 0) + 1
-    total = pb.get("total_trades", 0)
-    pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
-    pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
+    pb["final_balance"] = round(pb.get("final_balance", float(os.getenv("ACCOUNT_BALANCE", "10000"))) + total_proceeds, 2)
+    if not already_handled:
+        pb["total_trades"] = pb.get("total_trades", 0) + 1
+        if pnl > 0:
+            pb["winning_trades"] = pb.get("winning_trades", 0) + 1
+        else:
+            pb["losing_trades"] = pb.get("losing_trades", 0) + 1
+        total = pb.get("total_trades", 0)
+        pb["win_rate"] = round(pb.get("winning_trades", 0) / total * 100, 2) if total else 0.0
+        pb["realized_pnl"] = round(pb.get("realized_pnl", 0.0) + pnl, 2)
 
     # Use canonical MetricsManager.compute_snapshot() for ALL derived
     # accounting metrics (equity, unrealized_pnl, net_pnl, return_pct).
@@ -407,7 +569,7 @@ def _update_paper_on_closure(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    initial = pb.get("initial_balance", 10_000.0)
+    initial = pb.get("initial_balance", float(os.getenv("ACCOUNT_BALANCE", "10000")))
     snapshot = MetricsManager.compute_snapshot(
         cash=pb["final_balance"],
         realized_pnl=pb.get("realized_pnl", 0.0),
@@ -427,8 +589,8 @@ def _update_paper_on_closure(
     pb["total_return_pct"] = round(snapshot.total_return_pct, 2)
 
     try:
-        with open("data/paper_balance.json", "w") as f:
-            json.dump(pb, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj("data/paper_balance.json", pb, indent=2)
     except OSError as exc:
         logger.warning(f"Failed to update paper_balance.json: {exc}")
 
@@ -448,6 +610,7 @@ def _update_paper_on_closure(
                 pos_updated = True
                 break
         if pos_updated:
+            pos_data["total_positions"] = len(pos_data.get("positions", []))
             pos_data["active_count"] = sum(
                 1 for p in pos_data.get("positions", [])
                 if is_open(p.get("status"))
@@ -456,12 +619,17 @@ def _update_paper_on_closure(
                 1 for p in pos_data.get("positions", [])
                 if not is_open(p.get("status"))
             )
-            with open("data/positions.json", "w") as f:
-                json.dump(pos_data, f, indent=2, default=str)
+            from scripts.paper_state_lock import atomic_write_json as _awj
+            _awj("data/positions.json", pos_data, indent=2, default=str)
     except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
         logger.warning(f"Failed to update positions.json: {exc}")
 
-    # Append closed order to paper_orders.json
+    # Append closed order to paper_orders.json (only for a closure this
+    # monitor actually executed — a pipeline-handled closure already has
+    # its SELL order recorded by the provider's execute_sell).
+    if already_handled:
+        return pnl, pb["final_balance"]
+
     order = {
         "id": f"monitor-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
         "symbol": symbol,
@@ -469,7 +637,7 @@ def _update_paper_on_closure(
         "type": "MARKET",
         "quantity": qty,
         "filled_quantity": qty,
-        "entry_price": entry_price,
+        "entry_price": entry_price_val,
         "fill_price": round(fill_price, 6),
         "slippage": round(fill_price - exit_price, 6),
         "entry_fee": round(fee, 6),
@@ -477,10 +645,10 @@ def _update_paper_on_closure(
         "exit_fee": 0.0,
         "total_proceeds": round(total_proceeds, 2),
         "net_pnl": round(pnl, 2),
-        "net_pnl_pct": round(_pos_field(new_pos, "floating_pnl_pct", 0), 2),
+        "net_pnl_pct": round(floating_pnl_pct_val, 2),
         "status": "CLOSED",
-        "created_at": _pos_field(new_pos, "entry_time", now_ts),
-        "filled_at": _pos_field(new_pos, "entry_time", now_ts),
+        "created_at": entry_time_val,
+        "filled_at": entry_time_val,
         "closed_at": now_ts,
         "exit_reason": exit_reason,
         }
@@ -491,8 +659,8 @@ def _update_paper_on_closure(
         orders_data = {"orders": []}
     orders_data.setdefault("orders", []).append(order)
     try:
-        with open("data/paper_orders.json", "w") as f:
-            json.dump(orders_data, f, indent=2)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj("data/paper_orders.json", orders_data, indent=2)
     except OSError as exc:
         logger.warning(f"Failed to update paper_orders.json: {exc}")
 
@@ -502,6 +670,7 @@ def _update_paper_on_closure(
     return pnl, pb["final_balance"]
 
 
+@paper_state_writes
 def _sync_paper_state_on_closure(
     logger: Any,
     symbol: str,
@@ -544,8 +713,8 @@ def _sync_paper_state_on_closure(
     vp["unrealized_pnl"] = 0.0
 
     try:
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        from scripts.paper_state_lock import atomic_write_json as _awj
+        _awj(state_path, state, indent=2, default=str)
     except OSError as exc:
         logger.warning(f"Failed to sync paper_state.json for {symbol}: {exc}")
 
@@ -561,11 +730,17 @@ def _notify_buy_opened(
     tp1: float,
     tp2: float = 0.0,
     tp3: float = 0.0,
-) -> None:
-    """Send Telegram notification when a buy is opened."""
+) -> bool:
+    """Send Telegram notification when a buy is opened.
+
+    Returns True only when the notification was actually delivered, so
+    callers can decide whether to mark the symbol as notified. A failed
+    send must NOT be recorded as notified, otherwise the BUY_OPENED for
+    that position is permanently lost (never retried on the next restart).
+    """
     try:
         cfg = getattr(logger, 'config', None) or getattr(logger, '_config', None)
-        notifier.notify_buy_opened(
+        return bool(notifier.notify_buy_opened(
             symbol=symbol,
             timeframe=getattr(cfg, 'timeframe', '') if cfg else "",
             exchange=getattr(cfg, 'exchange', '') if cfg else "",
@@ -577,16 +752,25 @@ def _notify_buy_opened(
             take_profit_2=tp2,
             take_profit_3=tp3,
             reasons=["Pipeline execution"],
-        )
+        ))
     except Exception as exc:
         logger.warning(f"Failed to send buy notification for {symbol}: {exc}")
+        return False
 
 
 def _notify_existing_positions(
     logger: Any,
     notifier: Any,
 ) -> None:
-    """Send buy notifications for open positions not yet notified."""
+    """Send buy notifications for open positions not yet notified.
+
+    Only positions that actually exist in the paper ledger
+    (``paper_state.json``) are notified — a position that only exists in
+    ``positions.json`` (simulated by the Position stage but never
+    executed) is a ghost and must NOT generate a BUY_OPENED notification
+    (BUG-4: the smoke-test ghost THRESHOLD/IDR + BTC/USDT entries never
+    existed in the ledger yet still produced BUY_OPENED messages).
+    """
     NOTIFIED_FILE = "data/.notified_buys"
     try:
         notified: set[str] = set()
@@ -594,10 +778,17 @@ def _notify_existing_positions(
             with open(NOTIFIED_FILE) as f:
                 notified = set(line.strip() for line in f if line.strip())
 
+        # Authoritative ledger: only positions here were actually bought.
+        try:
+            with open("data/paper_state.json") as f:
+                _ledger = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _ledger = {}
+        ledger_positions = _ledger.get("positions") or {}
+
         with open("data/positions.json") as f:
             data = json.load(f)
 
-        new_notified = False
         for pos in data.get("positions", []):
             sym = pos.get("symbol", "")
             if sym in notified:
@@ -605,7 +796,18 @@ def _notify_existing_positions(
             if not is_open(pos.get("status")):
                 continue
 
-            _notify_buy_opened(
+            vp = ledger_positions.get(sym)
+            if vp is None or vp.get("status") != "OPEN":
+                # Ghost position — simulated by the Position stage but
+                # never executed in the paper ledger. No real BUY ever
+                # happened, so no BUY_OPENED notification may be sent.
+                logger.debug(
+                    f"Skipping BUY_OPENED for ghost position {sym} "
+                    "(not present as OPEN in paper_state.json)"
+                )
+                continue
+
+            sent = _notify_buy_opened(
                 logger, notifier,
                 symbol=sym,
                 entry_price=pos.get("entry_price", 0),
@@ -616,13 +818,26 @@ def _notify_existing_positions(
                 tp2=pos.get("tp2", 0),
                 tp3=pos.get("tp3", 0),
             )
+            if not sent:
+                # Delivery failed — do NOT record the symbol as notified,
+                # so the BUY_OPENED is retried on the next restart instead
+                # of being permanently lost.
+                logger.warning(
+                    f"BUY_OPENED delivery failed for {sym} — will retry "
+                    "on next restart"
+                )
+                continue
             notified.add(sym)
-            new_notified = True
-
-        if new_notified:
-            with open(NOTIFIED_FILE, "w") as f:
-                for sym in sorted(notified):
-                    f.write(f"{sym}\n")
+            # Record under PAPER_STATE_LOCK atomically so a concurrent
+            # writer (the pipeline scheduler — BUG-4) can never clobber
+            # this entry with a stale read-modify-write.
+            try:
+                from scripts.paper_state_lock import add_notified_buy
+                add_notified_buy(sym)
+            except Exception as exc:
+                logger.debug(
+                    f"Failed to record notified symbol {sym}: {exc}"
+                )
     except Exception as exc:
         logger.debug(f"Notify existing positions failed: {exc}")
 
@@ -673,25 +888,57 @@ def _monitor_positions(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    # Fetch current prices
+    # Fetch current prices from the configured exchange (non-binance
+    # exchanges like indodax list symbols such as GOAT/IDR). Uses the
+    # shared cached client + TTL ticker cache so the monitor, the
+    # pipeline reconciliation and the health check collapse into a
+    # single /api/pairs call and one rate-limit budget (429 fix).
     symbols = [p["symbol"] for p in active if "symbol" in p]
     try:
-        import ccxt
-        exchange = ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-            "timeout": 15000,
-        })
-        tickers = exchange.fetch_tickers(symbols)
+        from bot.data import fetch_tickers_cached
+        _cfg = getattr(container, "_config", None)
+        # Prefer the injected container config; fall back to .env file
+        # (re-loaded via dotenv so an env-var override like EXCHANGE=indodax
+        # from the shell does not silently override the configured exchange
+        # for a position that belongs to a different exchange).
+        _exchange_name = getattr(_cfg, "exchange", None) if _cfg is not None else None
+        if not _exchange_name:
+            from scripts.app_config import load_config as _load_cfg  # noqa: PLC0415
+            try:
+                _exchange_name = _load_cfg().exchange
+            except Exception:
+                _exchange_name = os.getenv("EXCHANGE", "binance")
+        tickers = fetch_tickers_cached(_exchange_name, symbols)
     except Exception as exc:
         logger.debug(f"Monitor ticker fetch failed: {exc}")
-        return
+        tickers = {}
+
+    # If tickers came back empty (network hiccup, exchange down), build a
+    # best-effort fallback from each position's last known current_price so
+    # SL/TP reconciliation can still run and protect open positions.
+    # Without this guard a transient network failure silently skips ALL
+    # position monitoring until the next cycle.
+    if not tickers:
+        for p in active:
+            sym = p.get("symbol", "")
+            if sym and p.get("current_price", 0.0) > 0:
+                tickers[sym] = {"last": p["current_price"]}
+        if tickers:
+            logger.debug(
+                "Monitor: exchange unreachable — using last known prices "
+                f"for {list(tickers.keys())}"
+            )
 
     # Get the right provider
     is_live = (
         container is not None
         and hasattr(container, "order")
         and getattr(container.order, "mode", "PAPER") == "LIVE"
+        # Same arm guard as the pipeline stage: the monitor must only use
+        # the real-exchange provider when live trading is actually armed.
+        # Otherwise TP/SL exits here would hit the exchange with real sell
+        # orders for positions that were only simulated.
+        and container.order.is_live_enabled()
     )
     if is_live:
         provider = LiveExecutionProvider(
@@ -701,7 +948,37 @@ def _monitor_positions(
     else:
         provider = PaperExecutionProvider()
 
-    pipeline = ExecutionPipeline(provider)
+    # Account quote currency drives both the TP/SL currency guard in
+    # reconcile_position (mismatched-currency positions are never closed
+    # on stale prices) and any pipeline-side rejection message.
+    _monitor_quote = None
+    if container is not None:
+        try:
+            _monitor_quote = getattr(container, "_config", None).quote_currency
+        except Exception:
+            _monitor_quote = None
+    if not _monitor_quote:
+        try:
+            from scripts.app_config import load_config as _load_cfg  # noqa: PLC0415
+            _monitor_quote = _load_cfg().quote_currency
+        except Exception:
+            _monitor_quote = os.getenv("QUOTE_CURRENCY", "USDT")
+    pipeline = ExecutionPipeline(
+        provider,
+        quote_currency=(_monitor_quote or "USDT").upper(),
+    )
+
+    if is_live:
+        # LIVE exits go through the shared per-symbol gate so a TP/SL
+        # market sell here can never duplicate the pipeline's or the
+        # protection scheduler's (BUG-2). Protection orders are cancelled
+        # BEFORE the market sell, inside the same critical section.
+        _monitor_positions_live(
+            logger, notifier, container,
+            positions, tickers, plans_by_symbol, pipeline,
+        )
+        return
+
     changed = False
 
     for pos in positions:
@@ -747,9 +1024,10 @@ def _monitor_positions(
         ):
             from datetime import datetime
             exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
+            quote = os.getenv("QUOTE_CURRENCY", "USDT").upper()
             logger.info(
                 f"Position {sym}: {old_status} → {new_status} "
-                f"(PnL: ${reconciled.get('total_pnl', 0):+.2f}, {exit_reason})"
+                f"(PnL: {reconciled.get('total_pnl', 0):+.2f} {quote}, {exit_reason})"
             )
 
             pnl, new_balance = _update_paper_on_closure(
@@ -757,8 +1035,6 @@ def _monitor_positions(
             )
 
             try:
-                from datetime import timedelta
-                holding_secs = float(reconciled.get("holding_hours", 0) * 3600)
                 notifier.notify_position_closed(
                     symbol=sym,
                     entry_price=reconciled.get("entry_price", 0),
@@ -767,7 +1043,7 @@ def _monitor_positions(
                     pnl_pct=reconciled.get("floating_pnl_pct", 0),
                     balance=new_balance,
                     exit_reason=exit_reason,
-                    holding_time=timedelta(seconds=holding_secs),
+                    holding_time=_holding_time_from_position(reconciled),
                 )
             except Exception as exc:
                 logger.warning(f"Failed to send close notification for {sym}: {exc}")
@@ -786,11 +1062,160 @@ def _monitor_positions(
                     logger.debug(f"Cancel protection for {sym}: {exc}")
 
     if changed:
+        merge_positions(data.get("positions", []))
+
+
+def _live_quote_balance(container: Any) -> float:
+    """Best-effort LIVE account balance in the quote currency.
+
+    LIVE closures must NEVER read or write the paper accounting files
+    (``paper_balance.json`` / ``paper_orders.json`` / ``paper_state.json``)
+    — BUG-3. The "Balance now ..." line in a LIVE close notification
+    therefore comes straight from the exchange, never from paper state.
+    """
+    try:
+        config = getattr(container, "_config", None)
+        quote = (
+            getattr(config, "quote_currency", None)
+            or os.getenv("QUOTE_CURRENCY", "USDT")
+        ).upper()
+        exchange = getattr(container, "exchange", None)
+        if exchange is None:
+            return 0.0
+        raw = exchange.fetch_balance()
+        bucket = raw.get(quote) if isinstance(raw, dict) else None
+        if isinstance(bucket, dict):
+            return float(bucket.get("total", 0) or 0)
         try:
-            with open("data/positions.json", "w") as f:
-                json.dump(data, f, indent=2, default=str)
-        except OSError as exc:
-            logger.error(f"Failed to write positions.json: {exc}")
+            return float(bucket or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    except Exception:
+        return 0.0
+
+
+def _monitor_positions_live(
+    logger: Any,
+    notifier: Any,
+    container: Any,
+    positions: list[Any],
+    tickers: Any,
+    plans_by_symbol: dict[str, dict],
+    pipeline: Any,
+) -> None:
+    """LIVE position monitor — serialized per symbol via exit_gate.
+
+    Uses the SAME per-symbol lock and atomic positions.json updates as
+    the pipeline reconciliation and the protection scheduler, so a TP/SL
+    market sell here can never duplicate one of theirs (BUG-2). Resting
+    protection orders are cancelled BEFORE the market sell.
+    """
+    from scripts.exit_gate import reconcile_exit  # noqa: PLC0415
+
+    def _cancel_live_protection(symbol: str) -> None:
+        try:
+            from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
+            pm = ProtectionManager(
+                container.exchange,
+                getattr(container, "_config", None),
+            )
+            pm.cancel_protection(symbol, reason="exit_gate_reconcile")
+        except Exception as exc:
+            logger.debug(f"Cancel protection for {symbol}: {exc}")
+
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        if not is_open(pos.get("status")):
+            continue
+
+        ticker = tickers.get(sym)
+        if ticker is None:
+            continue
+        current_price = float(ticker.get("last", 0) or 0)
+        if current_price <= 0:
+            continue
+
+        plan_data = plans_by_symbol.get(sym, {})
+
+        def _on_reconciled(
+            prev: dict,
+            reconciled: Any,
+            _sym: str = sym,
+            _price: float = current_price,
+        ) -> None:
+            _monitor_live_closure(
+                logger, notifier, container, _sym, _price, prev, reconciled,
+            )
+
+        reconcile_exit(
+            pipeline,
+            sym,
+            current_price,
+            plan_data,
+            cancel_protection=_cancel_live_protection,
+            on_reconciled=_on_reconciled,
+        )
+
+
+def _monitor_live_closure(
+    logger: Any,
+    notifier: Any,
+    container: Any,
+    sym: str,
+    current_price: float,
+    prev: dict,
+    reconciled: Any,
+) -> None:
+    """Closure handling for the LIVE monitor.
+
+    Runs inside the per-symbol exit lock (via ``reconcile_exit``'s
+    ``on_reconciled``), so follow-up bookkeeping (``closure_notified``)
+    is persisted atomically with the reconcile.
+
+    LIVE closures must NEVER touch the paper accounting files
+    (``paper_balance.json`` / ``paper_orders.json`` / ``paper_state.json``)
+    — BUG-3. PnL comes from the reconciled position (real fill data) and
+    the "Balance now ..." line comes from the real exchange balance, so
+    no paper file is read or written here.
+    """
+    from scripts.exit_gate import save_position  # noqa: PLC0415
+
+    if reconciled is None:
+        return
+
+    old_status = prev.get("status")
+    new_status = reconciled.get("status")
+    if (
+        old_status != new_status
+        and new_status in CLOSED_STATUSES
+        and not prev.get("closure_notified", False)
+    ):
+        exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
+        quote = os.getenv("QUOTE_CURRENCY", "USDT").upper()
+        pnl = float(reconciled.get("total_pnl", 0) or 0)
+        new_balance = _live_quote_balance(container)
+        logger.info(
+            f"Position {sym}: {old_status} → {new_status} "
+            f"(PnL: {pnl:+.2f} {quote}, {exit_reason})"
+        )
+
+        try:
+            notifier.notify_position_closed(
+                symbol=sym,
+                entry_price=reconciled.get("entry_price", 0),
+                exit_price=current_price,
+                pnl=pnl,
+                pnl_pct=reconciled.get("floating_pnl_pct", 0),
+                balance=new_balance,
+                exit_reason=exit_reason,
+                holding_time=_holding_time_from_position(reconciled),
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to send close notification for {sym}: {exc}")
+
+        merged = dict(reconciled)
+        merged["closure_notified"] = True
+        save_position(sym, merged)
 
 
 def main() -> None:
@@ -823,7 +1248,12 @@ def main() -> None:
     logger.info(f"Python : {sys.version.split()[0]}")
     logger.info(f"Exchange : {config.exchange}")
     logger.info(f"Timeframe: {config.timeframe}")
-    logger.info(f"Balance  : ${config.account_balance:>8,.2f}")
+    _pb = _read_json(os.path.join(config.data_dir, "paper_balance.json"))
+    _live_balance = _pb.get("final_balance")
+    _display_balance = (
+        _live_balance if _live_balance is not None else float(config.account_balance)
+    )
+    logger.info(f"Balance  : {_display_balance:>8,.2f} {config.quote_currency}")
     logger.info(f"Mode     : {'PAPER' if config.paper_mode else 'LIVE'}")
 
     # ------------------------------------------------------------------
@@ -892,6 +1322,20 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
+
+    # ------------------------------------------------------------------
+    #  Watchdog heartbeat — dedicated daemon thread.
+    #
+    #  Started as early as possible (before the slow ServiceContainer /
+    #  paper-engine startup) so the heartbeat is fresh from the first
+    #  second.  It runs independently of position monitoring: a monitor
+    #  that is slow, raises, or hangs on an exchange call must NEVER stop
+    #  heartbeat updates, or the watchdog kills a healthy bot (Telegram
+    #  stays responsive in its own thread while the watchdog sees a stale
+    #  heartbeat file and restarts the process).
+    # ------------------------------------------------------------------
+    _heartbeat_thread = _start_heartbeat_writer(shutdown, logger)
+    logger.info(f"Watchdog heartbeat writer started (every {HEARTBEAT_INTERVAL_SECONDS:.0f}s)")
 
     # ------------------------------------------------------------------
     #  Service Container — single source of all dependencies
@@ -1054,32 +1498,112 @@ def main() -> None:
             logger.info("Telegram disabled — command center not started")
 
     # ------------------------------------------------------------------
+    #  WhatsApp Command Center (via Twilio) — optional second channel,
+    #  runs alongside Telegram and shares the same command set/registry.
+    # ------------------------------------------------------------------
+
+    wa_center: Any = None
+    wa_thread: threading.Thread | None = None
+
+    wa_has_creds = bool(
+        config.twilio_account_sid and config.twilio_auth_token
+        and config.twilio_whatsapp_from and config.whatsapp_allowed_numbers
+    )
+
+    if test_mode or (config.whatsapp_enabled and wa_has_creds):
+        from whatsapp.whatsapp_commands import WhatsAppCommandCenter
+
+        wa_center = WhatsAppCommandCenter(
+            config,
+            test_mode=test_mode,
+            health_monitor=health,
+            shutdown_event=shutdown,
+            pid_file=pid_file,
+            services=container,
+        )
+        wa_thread = _start_worker(
+            "WhatsAppCmd",
+            wa_center.run,
+            logger,
+        )
+        if wa_thread:
+            logger.info("WhatsApp Command Center started (background thread)")
+        else:
+            logger.error("Failed to start WhatsApp Command Center")
+    else:
+        if config.whatsapp_enabled and not wa_has_creds:
+            logger.warning(
+                "WhatsApp enabled but TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN /"
+                " TWILIO_WHATSAPP_FROM / WHATSAPP_ALLOWED_NUMBERS missing"
+                " — command center disabled"
+            )
+        else:
+            logger.info("WhatsApp disabled — command center not started")
+
+    # ------------------------------------------------------------------
     #  Startup — load state, recover positions, check TP/SL, update stats
     # ------------------------------------------------------------------
 
     if config.paper_mode:
         try:
             from scripts.paper_trading_engine import main as paper_main
-            import concurrent.futures
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            fut = pool.submit(paper_main, _notifier)
-            try:
-                fut.result(timeout=10)
-            except concurrent.futures.TimeoutError:
-                logger.warning("Paper engine startup timed out — continuing")
-            except Exception as exc:
-                logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
-            pool.shutdown(wait=False, cancel_futures=True)
-            del pool
+
+            def _paper_startup_worker() -> None:
+                """Run the startup paper engine; failures are non-fatal."""
+                try:
+                    paper_main(
+                        notifier=_notifier,
+                        account_balance=config.account_balance,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Paper engine startup failed (non-fatal): {exc}"
+                    )
+
+            # Run the startup engine in a DAEMON thread. The previous
+            # ThreadPoolExecutor left a non-daemon worker alive past the 10s
+            # timeout (shutdown(wait=False, cancel_futures=True) cannot stop a
+            # running future), so it kept executing plans / reconciling TP/SL
+            # concurrently with the monitor AND blocked sys.exit(0) at
+            # shutdown. A daemon thread can never block interpreter exit.
+            startup_thread = threading.Thread(
+                target=_paper_startup_worker,
+                name="PaperStartup",
+                daemon=True,
+            )
+            startup_thread.start()
+            startup_thread.join(timeout=10)
+            if startup_thread.is_alive():
+                logger.warning(
+                    "Paper engine startup timed out — continuing "
+                    "(background daemon thread)"
+                )
             logger.info("Paper engine state restored — positions recovered, TP/SL checked")
         except Exception as exc:
             logger.warning(f"Paper engine startup failed (non-fatal): {exc}")
+
+        # Strictly reconcile positions.json against paper_state.json.
+        # Every positions.json writer merges by symbol and never removes,
+        # so a record whose symbol is absent from paper_state.json (legacy
+        # leftover, or the survivor of a partial state reset) would stay
+        # visible to /positions forever. Drop those ghosts here, on every
+        # startup, so Telegram only ever shows positions the paper engine
+        # actually knows about.
+        try:
+            from scripts.paper_state_lock import sync_positions_from_state
+            if sync_positions_from_state():
+                logger.info(
+                    "Reconciled positions.json with paper_state.json "
+                    "(ghost positions removed / counters refreshed)"
+                )
+        except Exception as exc:
+            logger.debug(f"Position state sync failed (non-fatal): {exc}")
 
         # Reconcile accounting files: detect stale equity, mismatched
         # initial_balance, invalid profit_factor, and repair in-place.
         try:
             from scripts.accounting_reconcile import reconcile
-            findings = reconcile(logger_obj=logger)
+            findings = reconcile(logger_obj=logger, account_balance=config.account_balance)
             if findings.get("repairs_applied", 0) > 0:
                 logger.info(
                     f"Accounting reconciliation applied "
@@ -1087,6 +1611,16 @@ def main() -> None:
                 )
         except Exception as exc:
             logger.warning(f"Accounting reconciliation failed (non-fatal): {exc}")
+
+        # Prune old closed positions from positions.json to keep it lean.
+        # Anything over 50 closed entries is archived to positions_archive.json.
+        try:
+            from scripts.paper_state_lock import prune_closed_positions
+            pruned = prune_closed_positions(max_closed=50)
+            if pruned > 0:
+                logger.info(f"Pruned {pruned} old closed positions to positions_archive.json")
+        except Exception as exc:
+            logger.debug(f"Position pruning failed (non-fatal): {exc}")
 
         # Send BUY notifications for any open positions from prior sessions
         # that weren't notified yet (deduplicated via data/.notified_buys).
@@ -1113,6 +1647,49 @@ def main() -> None:
         )
         container.inject_scheduler(scheduler)
         scheduler.start()
+
+    # ------------------------------------------------------------------
+    #  Daily report scheduler — sends Telegram summary at 00:00 WIB
+    # ------------------------------------------------------------------
+    daily_report_scheduler: Any = None
+    if _notifier is not None and getattr(_notifier, "enabled", False):
+        try:
+            from scripts.daily_report import DailyReportScheduler  # noqa: PLC0415
+            daily_report_scheduler = DailyReportScheduler(
+                notifier=_notifier,
+                data_dir=config.data_dir,
+                shutdown_event=shutdown,
+            )
+            daily_report_scheduler.start()
+        except Exception as exc:
+            logger.warning("DailyReportScheduler failed to start: %s", exc)
+
+    # ------------------------------------------------------------------
+    #  Backup scheduler — automatic hourly backups (P1 Reliability).
+    #
+    #  Previously the hourly BackupScheduler was never wired into the
+    #  daemon, so backups only ran when an operator triggered the manual
+    #  Telegram /backup (or `python main.py --backup`). Start it on every
+    #  run so config/data/log snapshots are taken automatically, pruning
+    #  archives older than BACKUP_RETENTION_DAYS. Honors the existing
+    #  BACKUP_INTERVAL_SECONDS / BACKUP_RETENTION_DAYS env vars via the
+    #  module defaults. A failure here must never block startup.
+    # ------------------------------------------------------------------
+    backup_scheduler: Any = None
+    try:
+        from scripts.backup_restore import (  # noqa: PLC0415
+            BackupScheduler,
+            BACKUP_INTERVAL_SECONDS,
+            BACKUP_RETENTION_DAYS,
+        )
+        backup_scheduler = BackupScheduler(
+            interval_seconds=BACKUP_INTERVAL_SECONDS,
+            retention_days=BACKUP_RETENTION_DAYS,
+            shutdown_event=shutdown,
+        )
+        backup_scheduler.start()
+    except Exception as exc:
+        logger.warning("BackupScheduler failed to start: %s", exc)
 
     # ------------------------------------------------------------------
     #  Protection reconciliation scheduler — LIVE mode only.
@@ -1168,10 +1745,12 @@ def main() -> None:
                 # Bound total shutdown time the same way the signal
                 # handlers do, in case a worker thread fails to join.
                 _arm_force_exit_timer()
-                try:
-                    os.remove("data/.shutdown_requested")
-                except OSError:
-                    pass
+                # Do NOT remove .shutdown_requested here.  The file must
+                # persist until the watchdog has observed it so that the
+                # supervisor knows the stop was deliberate (BUG A fix).
+                # Stale files from previous runs are cleaned up at next
+                # startup (lines 1033-1040) and watchdog._do_restart
+                # clears it before crash-restarts.
                 break
 
             shutdown.wait(timeout=1.0)
@@ -1182,7 +1761,16 @@ def main() -> None:
             _monitor_interval += 1
             if _monitor_interval >= 60:
                 _monitor_interval = 0
-                _monitor_positions(logger, _notifier, center, container=container)
+                # Monitoring is best-effort: an exception here must never
+                # take down the keep-alive loop (a dead monitor used to
+                # stop heartbeat writes and make the watchdog kill a
+                # healthy bot).  The heartbeat is written by its own
+                # dedicated thread (_start_heartbeat_writer), so it stays
+                # fresh even while monitoring is failing or hung.
+                try:
+                    _monitor_positions(logger, _notifier, center, container=container)
+                except Exception as exc:
+                    logger.warning(f"Position monitoring failed: {exc}")
 
             # -- Watchdog: monitor Telegram thread -----------------------
             if tg_thread is not None and not tg_thread.is_alive():
@@ -1262,6 +1850,19 @@ def main() -> None:
     if protection_scheduler:
         logger.info("Stopping Protection Scheduler...")
         protection_scheduler.stop()
+
+    if daily_report_scheduler:
+        try:
+            daily_report_scheduler.stop()
+        except Exception:
+            pass
+
+    if backup_scheduler:
+        try:
+            logger.info("Stopping Backup Scheduler...")
+            backup_scheduler.stop()
+        except Exception:
+            pass
 
     health.stop()
 

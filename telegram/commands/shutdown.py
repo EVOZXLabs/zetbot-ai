@@ -33,14 +33,19 @@ class ShutdownCommand(BaseCommand):
                 "to confirm and shut down the bot."
             )
 
-        # Confirm — initiate graceful shutdown immediately
+        # Confirm — initiate graceful shutdown immediately.
+        # Always write the shutdown signal file so the watchdog (running
+        # in child OR attached mode) sees a deliberate stop and does not
+        # auto-restart.  Write BEFORE setting the event: if the event is
+        # set first, the main loop exits before the file is created and
+        # the watchdog in attached-mode sees no file → restarts (BUG A).
+        os.makedirs(DATA_DIR, exist_ok=True)
+        import datetime  # noqa: PLC0415
+        with open(SHUTDOWN_FILE, "w") as f:
+            f.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
+
         if ctx.shutdown_event:
             ctx.shutdown_event.set()
-        else:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            import datetime  # noqa: PLC0415
-            with open(SHUTDOWN_FILE, "w") as f:
-                f.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
 
         self._pending.pop(key, None)
         return (

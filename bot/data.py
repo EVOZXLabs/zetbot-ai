@@ -7,6 +7,8 @@ ZetBot AI
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -23,7 +25,133 @@ def _get_exchange_map():
         "binance": ccxt.binance,
         "bybit": ccxt.bybit,
         "tokocrypto": ccxt.binance,
+        "okx": ccxt.okx,
+        "gate": ccxt.gate,
+        "kucoin": ccxt.kucoin,
+        "mexc": ccxt.mexc,
+        "indodax": ccxt.indodax,
     }
+
+def build_public_exchange(exchange_name: str = "binance") -> Any:
+    """Build an unauthenticated ccxt client for public price fetches.
+
+    TP/SL reconciliation and position monitoring fetch current prices
+    through this helper so symbols on non-binance exchanges (e.g. indodax
+    ``GOAT/IDR``) resolve against the right exchange instead of always
+    hitting binance. Falls back to binance when the exchange is unknown.
+    """
+    import ccxt
+    exchange_map = _get_exchange_map()
+    exchange_class = exchange_map.get((exchange_name or "binance").lower(), ccxt.binance)
+    return exchange_class({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+        "timeout": 15000,
+    })
+
+
+# ---------------------------------------------------------------------------
+#  Rate-limit safe public data access (BUG: 429 on indodax /api/pairs)
+#
+#  The monitor, the pipeline reconciliation, the paper provider and the
+#  health check each used to build their OWN ccxt client — every client
+#  then loaded markets (/api/pairs) independently at startup, so a burst
+#  of concurrent clients tripped the exchange rate limit and every
+#  ticker fetch failed (positions kept stale prices). These helpers share
+#  ONE client per exchange (one /api/pairs call, one rate-limit budget)
+#  and a short TTL ticker cache so overlapping fetches from different
+#  threads collapse into a single network call.
+# ---------------------------------------------------------------------------
+
+_client_cache: dict[str, tuple[float, Any]] = {}
+_ticker_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+# RLock: fetch_tickers_cached holds the lock while calling
+# get_cached_public_exchange, which must be able to re-acquire it.
+_data_lock = threading.RLock()
+
+PUBLIC_CLIENT_TTL = 300.0
+TICKER_TTL = 45.0
+
+
+def get_cached_public_exchange(
+    exchange_name: str = "binance", ttl: float = PUBLIC_CLIENT_TTL,
+) -> Any:
+    """Return a shared public ccxt client for ``exchange_name``.
+
+    All components that fetch public prices must use this instead of
+    ``build_public_exchange`` so the ccxt rate limiter and the markets
+    cache are shared process-wide instead of one client per caller.
+    Network calls through the returned client are serialized by
+    :func:`fetch_tickers_cached` (same lock) so a single client is
+    never hammered concurrently from several threads.
+    """
+    key = (exchange_name or "binance").lower()
+    now = time.time()
+    with _data_lock:
+        entry = _client_cache.get(key)
+        if entry is not None and now - entry[0] < ttl:
+            return entry[1]
+    client = build_public_exchange(exchange_name)
+    with _data_lock:
+        _client_cache[key] = (time.time(), client)
+    return client
+
+
+def fetch_tickers_cached(
+    exchange_name: str = "binance",
+    symbols: Optional[list[str]] = None,
+    ttl: float = TICKER_TTL,
+) -> dict[str, Any]:
+    """Fetch tickers for ``symbols`` with a TTL cache.
+
+    Returns ``{symbol: ticker}``. Fresh entries within ``ttl`` seconds
+    are served from the in-process cache; only expired/missing symbols
+    trigger ONE batched network call through the shared client. Safe to
+    call from several threads concurrently.
+    """
+    symbols = [s for s in (symbols or []) if s]
+    if not symbols:
+        return {}
+    now = time.time()
+    result: dict[str, Any] = {}
+    missing: list[str] = []
+    key_prefix = (exchange_name or "binance").lower()
+    with _data_lock:
+        for sym in symbols:
+            entry = _ticker_cache.get((key_prefix, sym))
+            if entry is not None and now - entry[0] < ttl:
+                result[sym] = entry[1]
+            else:
+                missing.append(sym)
+    if not missing:
+        return result
+    with _data_lock:
+        try:
+            exchange = get_cached_public_exchange(exchange_name)
+            fresh = exchange.fetch_tickers(missing)
+        except Exception:
+            return result
+        for sym, ticker in (fresh or {}).items():
+            if not isinstance(ticker, dict):
+                continue
+            _ticker_cache[(key_prefix, sym)] = (time.time(), dict(ticker))
+            result[sym] = ticker
+    return result
+
+
+def fetch_ticker_cached(
+    exchange_name: str = "binance", symbol: str = "", ttl: float = TICKER_TTL,
+) -> Optional[dict[str, Any]]:
+    """TTL-cached single-symbol ticker (wrapper over fetch_tickers_cached)."""
+    return fetch_tickers_cached(exchange_name, [symbol], ttl=ttl).get(symbol)
+
+
+def clear_public_data_cache() -> None:
+    """Drop cached clients/tickers (used by tests)."""
+    with _data_lock:
+        _client_cache.clear()
+        _ticker_cache.clear()
+
 
 NORMALIZED_COLUMNS: list[str] = [
     "timestamp",
@@ -38,8 +166,9 @@ NORMALIZED_COLUMNS: list[str] = [
 class MarketData:
     """Fetch and validate OHLCV market data from supported exchanges.
 
-    Supports Binance, Bybit, and Tokocrypto spot markets.
-    Data is returned as a pandas DataFrame with normalized column names.
+    Supports Binance, Bybit, Tokocrypto, OKX, Gate, Kucoin, MEXC, and
+    Indodax spot markets. Data is returned as a pandas DataFrame with
+    normalized column names.
     """
 
     def __init__(
@@ -47,17 +176,20 @@ class MarketData:
         exchange_name: str = "binance",
         api_key: str = "",
         secret: str = "",
+        exchange: Any = None,
     ) -> None:
         """Initialize the market data fetcher.
 
         Args:
             exchange_name: Exchange identifier. One of 'binance', 'bybit',
-                'tokocrypto'.
+                'tokocrypto', 'okx', 'gate', 'kucoin', 'mexc', 'indodax'.
             api_key: API key for authenticated endpoints.
             secret: API secret for authenticated endpoints.
-
-        Raises:
-            ValueError: If the exchange is not supported.
+            exchange: Pre-built ccxt exchange instance. When provided the
+                shared cached public client is used instead of building a
+                fresh instance — this collapses duplicate ``/api/pairs``
+                calls across the scanner, monitor, and pipeline into one
+                rate-limit budget per exchange.
         """
         import ccxt
         exchange_name = exchange_name.lower()
@@ -70,11 +202,14 @@ class MarketData:
             )
             raise ValueError(msg)
 
-        self.exchange: ccxt.Exchange = exchange_class({
-            "apiKey": api_key,
-            "secret": secret,
-            "enableRateLimit": True,
-        })
+        if exchange is not None:
+            self.exchange: ccxt.Exchange = exchange
+        else:
+            self.exchange = exchange_class({
+                "apiKey": api_key,
+                "secret": secret,
+                "enableRateLimit": True,
+            })
         self.exchange_name: str = exchange_name
 
         logger.info("MarketData initialized for %s", self.exchange_name)

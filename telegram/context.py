@@ -80,6 +80,25 @@ class CommandContext:
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             return {}
 
+    def entry_time_map(self) -> dict:
+        """Map symbol → earliest known position record (with ``opened_at``).
+
+        Used to resolve the real entry time of a closed trade for hold
+        math: closing orders only record the exit moment, while the
+        position record keeps ``opened_at``.  Priority: ``positions.json``,
+        then ``paper_state.json``, then the archive of pruned positions.
+        """
+        found: dict[str, dict] = {}
+        for src in ("positions.json", "paper_state.json", "positions_archive.json"):
+            data = self.read_json(src)
+            positions = data.get("positions", {})
+            if not isinstance(positions, dict):
+                positions = {p.get("symbol", ""): p for p in positions if p.get("symbol")}
+            for sym, pos in positions.items():
+                if pos and pos.get("opened_at") and sym not in found:
+                    found[sym] = pos
+        return found
+
     def runtime_formatted(self) -> str:
         rt = time.time() - self.start_time
         h, rem = divmod(int(rt), 3600)
