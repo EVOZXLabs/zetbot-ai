@@ -413,7 +413,16 @@ def reconcile(
                 open_cost += cost
 
         target_cash = initial + recon_realized - open_cost
+        needs_repair = False
         if recon_total > 0 and abs(cash - target_cash) >= 1.0:
+            needs_repair = True
+        elif (
+            recon_total == 0
+            and not open_positions
+            and cash < initial
+        ):
+            needs_repair = True
+        if needs_repair:
             log.warning(
                 f"[RECONCILE] cash drift: final_balance={cash} vs "
                 f"initial({initial}) + realized({recon_realized}) - "
@@ -466,6 +475,12 @@ def reconcile(
             if pb.get(key) != val:
                 pb[key] = val
                 findings["repairs_applied"] += 1
+
+        # Always keep paper_state.json balance in sync with
+        # paper_balance.json so the engine never loads a stale ledger.
+        if state is not None and state.get("balance") != cash:
+            state["balance"] = cash
+            state_changed = True
 
         # ------------------------------------------------------------------
         #  4. Fix Infinity / NaN profit_factor

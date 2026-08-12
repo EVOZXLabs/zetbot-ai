@@ -578,18 +578,36 @@ class PositionExport:
     @staticmethod
     def to_json(positions: list[Position], path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        positions_data: list[dict[str, Any]] = [asdict(p) for p in positions]
+        seen = {p.get("symbol") for p in positions_data if p.get("symbol")}
+        # Keep the positions.json mirror in sync with the authoritative paper
+        # engine ledger (paper_state.json).  A position that is still OPEN in
+        # paper_state but has no active trade plan this cycle (e.g. opened in a
+        # previous cycle) must survive the rewrite instead of being silently
+        # dropped — otherwise /position loses it across restarts and the
+        # mirror drifts from the engine state.
+        try:
+            with open("data/paper_state.json") as _f:
+                state = json.load(_f)
+            for vp in (state.get("positions") or {}).values():
+                sym = vp.get("symbol")
+                if sym and sym not in seen and vp.get("status") in OPEN_STATUSES:
+                    positions_data.append(dict(vp))
+                    seen.add(sym)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
         data = {
             "generated": datetime.now(timezone.utc).isoformat(),
-            "total_positions": len(positions),
+            "total_positions": len(positions_data),
             "active_count": sum(
-                1 for p in positions
-                if p.status in OPEN_STATUSES
+                1 for p in positions_data
+                if p.get("status") in OPEN_STATUSES
             ),
             "closed_count": sum(
-                1 for p in positions
-                if p.status in CLOSED_STATUSES
+                1 for p in positions_data
+                if p.get("status") not in OPEN_STATUSES
             ),
-            "positions": [asdict(p) for p in positions],
+            "positions": positions_data,
         }
         from scripts.paper_state_lock import atomic_write_json as _awj
         _awj(path, data, indent=2, default=str)

@@ -473,10 +473,40 @@ class TestStartupReconciliation:
 
         monkeypatch.setattr(rec_mod, "_ORDERS_PATH", str(tmp_path / "paper_orders.json"))
 
-        rec_mod.reconcile()
+        findings = rec_mod.reconcile()
 
         pb = json.loads((tmp_path / "paper_balance.json").read_text())
-        assert pb["total_return_pct"] == pytest.approx(-20.0)
+        # Zero-trade account with balance < initial is impossible — repaired
+        # to initial, so return_pct is 0.0 (not -20.0).
+        assert pb["total_return_pct"] == pytest.approx(0.0)
+        assert findings["repairs_applied"] >= 1
+
+    def test_repairs_zero_trade_balance_below_initial(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """Regression: a zero-trade account whose balance dropped below
+        initial without any trades is impossible and must be repaired."""
+        import scripts.accounting_reconcile as rec_mod
+
+        _write_pb(
+            tmp_path, initial=300_000, balance=9_000, equity=9_000,
+            unrealized=0, net=0,
+            return_pct=-97.0,
+        )
+        _write_positions(tmp_path, [])
+
+        monkeypatch.setattr(rec_mod, "_STATE_PATH", str(tmp_path / "paper_state.json"))
+        monkeypatch.setattr(rec_mod, "_BALANCE_PATH", str(tmp_path / "paper_balance.json"))
+        monkeypatch.setattr(rec_mod, "_POSITIONS_PATH", str(tmp_path / "positions.json"))
+        monkeypatch.setattr(rec_mod, "_ORDERS_PATH", str(tmp_path / "paper_orders.json"))
+
+        findings = rec_mod.reconcile()
+
+        pb = json.loads((tmp_path / "paper_balance.json").read_text())
+        assert pb["final_balance"] == pytest.approx(300_000.0)
+        assert pb["total_return_pct"] == pytest.approx(0.0)
+        assert findings["repairs_applied"] >= 1
+
+        state = json.loads((tmp_path / "paper_state.json").read_text())
+        assert state["balance"] == pytest.approx(300_000.0)
 
     def test_preserves_equity_history(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Reconciliation preserves equity_history in paper_balance.json."""

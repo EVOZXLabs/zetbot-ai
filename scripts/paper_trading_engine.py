@@ -383,7 +383,21 @@ class PaperTradingEngine:
         except (FileNotFoundError, json.JSONDecodeError):
             return
 
-        self.wallet.balance = state.get("balance", INITIAL_BALANCE)
+        # paper_balance.json is the accounting source of truth (AGENTS.md).
+        # Prefer its final_balance over paper_state.json's balance so a
+        # corrupted ledger can't poison the engine's in-memory wallet.
+        pb_balance = None
+        try:
+            _bal_path = os.path.join(os.path.dirname(STATE_PATH), "paper_balance.json")
+            with open(_bal_path) as _pb_f:
+                _pb = json.load(_pb_f)
+            pb_balance = _pb.get("final_balance")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        self.wallet.balance = (
+            pb_balance if pb_balance is not None
+            else state.get("balance", INITIAL_BALANCE)
+        )
         if not self._explicit_initial:
             self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
         self.wallet.margin_used = state.get("margin_used", 0.0)

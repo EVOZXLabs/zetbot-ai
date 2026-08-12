@@ -1367,13 +1367,25 @@ def main() -> None:
         except (FileNotFoundError, _json.JSONDecodeError):
             _bal = float(config.account_balance)
             _eq = float(config.account_balance)
-        _notifier.notify_bot_started(
-            symbol=f"{config.quote_currency} pairs",
-            timeframe=config.timeframe,
-            exchange=config.exchange,
-            balance=_bal,
-            equity=_eq,
+
+        def _send_bot_started() -> None:
+            try:
+                _notifier.notify_bot_started(
+                    symbol=f"{config.quote_currency} pairs",
+                    timeframe=config.timeframe,
+                    exchange=config.exchange,
+                    balance=_bal,
+                    equity=_eq,
+                )
+            except Exception:
+                pass
+
+        _tg_startup_thread = threading.Thread(
+            target=_send_bot_started,
+            name="TGStartupNotify",
+            daemon=True,
         )
+        _tg_startup_thread.start()
     except Exception:
         pass
 

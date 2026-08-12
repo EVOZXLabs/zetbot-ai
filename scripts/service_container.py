@@ -737,6 +737,12 @@ class _MetricsAdapter:
     def all_positions(self) -> list[dict[str, Any]]:
         return self._mgr.all_positions()
 
+    def trade_history(self) -> list[dict[str, Any]]:
+        return self._mgr.trade_history()
+
+    def trades_since_wib_midnight(self) -> list[dict[str, Any]]:
+        return self._mgr.trades_since_wib_midnight()
+
     def closed_orders(self) -> list[dict[str, Any]]:
         return self._mgr.closed_orders()
 
