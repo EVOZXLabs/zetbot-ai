@@ -690,6 +690,7 @@ class _MetricsAdapter:
             data_dir=(config.data_dir if config else "data"),
             wallet=wallet,
             mode_provider=mode_provider,
+            account_quote=getattr(config, "quote_currency", "USDT") or "USDT",
         )
 
     # ------------------------------------------------------------------

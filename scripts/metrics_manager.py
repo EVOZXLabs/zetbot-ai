@@ -8,7 +8,9 @@ daily/weekly/monthly aggregates).
 
 from __future__ import annotations
 
+import csv
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -17,6 +19,8 @@ from typing import Any, Optional
 
 from scripts.balance_resolver import resolve_initial_balance
 from scripts.position_status import is_open
+
+logger = logging.getLogger(__name__)
 
 
 _WIB_TZ = timezone(timedelta(hours=7))
@@ -82,6 +86,7 @@ class MetricsManager:
         data_dir: str = "data",
         wallet: Any = None,
         mode_provider: Any = None,
+        account_quote: str | None = None,
     ) -> None:
         self._data_dir = data_dir
         # ``wallet`` and ``mode_provider`` are optional so every existing
@@ -97,8 +102,16 @@ class MetricsManager:
         # even after the bot switched to live trading.
         # ``mode_provider`` — zero-arg callable returning "PAPER" or
         # "LIVE" (e.g. ``lambda: order_manager.mode``).
+        # ``account_quote`` — the account's quote currency (e.g. "IDR").
+        # When set, every open-position / closed-trade view drops symbols
+        # whose quote currency differs (legacy positions from a previous
+        # USDT exchange on an IDR account) and logs a [LEGACY-DATA] warning
+        # instead of corrupting the accounting.
         self._wallet = wallet
         self._mode_provider = mode_provider
+        self._account_quote = (
+            account_quote.upper() if account_quote else None
+        )
 
     # ------------------------------------------------------------------
     #  Mode helpers
@@ -115,6 +128,25 @@ class MetricsManager:
     # ------------------------------------------------------------------
     #  File readers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _symbol_quote(symbol: str) -> str:
+        if not symbol or "/" not in symbol:
+            return ""
+        return symbol.split("/", 1)[1].upper()
+
+    def _passes_quote_filter(self, symbol: str) -> bool:
+        """True when *symbol* is allowed on this account.
+
+        When ``account_quote`` is configured (e.g. "IDR"), a symbol quoted
+        in a different currency (e.g. ``BTC/USDT`` on an IDR account) is a
+        legacy artifact from a previous exchange and must NOT pollute the
+        accounting.  Returns True when no filter is configured so legacy
+        single-exchange setups are unaffected.
+        """
+        if not self._account_quote:
+            return True
+        return self._symbol_quote(symbol) == self._account_quote
 
     def _read_json(self, filename: str) -> dict[str, Any]:
         path = os.path.join(self._data_dir, filename)
@@ -333,10 +365,26 @@ class MetricsManager:
     # ------------------------------------------------------------------
 
     def open_positions_count(self) -> int:
-        return sum(1 for p in self._read_positions() if is_open(p.get("status")))
+        return len(self.open_positions())
 
     def open_positions(self) -> list[dict[str, Any]]:
-        return [p for p in self._read_positions() if is_open(p.get("status"))]
+        """OPEN positions = ``positions.json`` (PAPER) / ``live_positions.json``
+        (LIVE), filtered to truly-OPEN status AND to this account's quote
+        currency (legacy mismatched-quote positions are dropped + warned)."""
+        out = []
+        for p in self._read_positions():
+            if not is_open(p.get("status")):
+                continue
+            sym = p.get("symbol", "")
+            if not self._passes_quote_filter(sym):
+                logger.warning(
+                    "[LEGACY-DATA] ignored mismatched quote position: "
+                    "%s (account quote=%s)",
+                    sym, self._account_quote,
+                )
+                continue
+            out.append(p)
+        return out
 
     def all_positions(self) -> list[dict[str, Any]]:
         return self._read_positions()
@@ -352,73 +400,87 @@ class MetricsManager:
         return [o for o in self._read_orders() if o.get("side") == "BUY"]
 
     def trade_history(self) -> list[dict[str, Any]]:
-        """Return closed BUY orders enriched with a matched SELL if any.
+        """CLOSED TRADES — single source of truth = ``paper_trade_history.csv``.
 
-        Each result is one completed trade with::
-            symbol, side, entry_price, exit_price, quantity,
-            entry_time, exit_time, holding_hours,
-            net_pnl, net_pnl_pct, reason, result.
+        Every completed trade is one row; ``/history``, ``/summary`` and all
+        derived accounting (win rate, closed-trades count, realized PnL) read
+        from HERE so they can never disagree.  Legacy positions whose quote
+        currency differs from the account (e.g. ``BTC/USDT`` on an IDR
+        account) are excluded and a ``[LEGACY-DATA]`` warning is emitted so
+        they never corrupt the report.
+
+        If the canonical CSV has never been written (e.g. a fresh account or
+        a data dir migrated from a pre-CSV version), it is materialized once
+        from the authoritative ledger (``paper_state.json``) so callers always
+        read from exactly one file.
         """
-        all_orders = self._read_orders()
-        buys = [o for o in all_orders if o.get("side") == "BUY"]
-        sells = [o for o in all_orders if o.get("side") == "SELL"]
-
+        path = os.path.join(self._data_dir, "paper_trade_history.csv")
+        if not os.path.exists(path):
+            try:
+                from scripts.paper_state_lock import rebuild_trade_history_csv
+                rebuild_trade_history_csv(self._data_dir)
+            except Exception:
+                pass
         trades: list[dict[str, Any]] = []
-        matched_sells: set[int] = set()
+        try:
+            with open(path, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    sym = (row.get("symbol") or "").strip()
+                    if not sym:
+                        continue
+                    if not self._passes_quote_filter(sym):
+                        logger.warning(
+                            "[LEGACY-DATA] ignored mismatched quote trade: "
+                            "%s (account quote=%s)",
+                            sym, self._account_quote,
+                        )
+                        continue
+                    entry_time = row.get("filled_at") or row.get("created_at", "")
+                    exit_time = row.get("closed_at", "")
+                    try:
+                        net_pnl = float(row.get("net_pnl", 0) or 0)
+                    except (ValueError, TypeError):
+                        net_pnl = 0.0
+                    try:
+                        net_pnl_pct = float(row.get("net_pnl_pct", 0) or 0)
+                    except (ValueError, TypeError):
+                        net_pnl_pct = 0.0
+                    try:
+                        qty = float(row.get("quantity", 0) or 0)
+                    except (ValueError, TypeError):
+                        qty = 0.0
 
-        for b in buys:
-            bid = id(b)
-            if bid in matched_sells:
-                continue
+                    holding_hours = 0.0
+                    if entry_time and exit_time:
+                        try:
+                            fmt = "%Y-%m-%dT%H:%M:%S.%f"
+                            et = datetime.strptime(
+                                entry_time.split("+")[0].split("Z")[0], fmt)
+                            xt = datetime.strptime(
+                                exit_time.split("+")[0].split("Z")[0], fmt)
+                            holding_hours = round(
+                                (xt - et).total_seconds() / 3600, 2)
+                        except (ValueError, IndexError):
+                            pass
 
-            entry_px = b.get("fill_price", 0.0) or b.get("entry_price", 0.0)
-            entry_time = b.get("filled_at") or b.get("created_at", "")
-            symbol = b.get("symbol", "")
-            qty = b.get("quantity", 0.0) or b.get("filled_quantity", 0.0)
-
-            # Find matching sell for this buy
-            best_sell: Optional[dict[str, Any]] = None
-            for s in sells:
-                if s.get("symbol") == symbol and id(s) not in matched_sells:
-                    if best_sell is None or (s.get("closed_at") or "") > (best_sell.get("closed_at") or ""):
-                        best_sell = s
-
-            if best_sell is not None:
-                matched_sells.add(id(best_sell))
-                exit_px = best_sell.get("fill_price", 0.0) or best_sell.get("exit_price", 0.0)
-                exit_time = best_sell.get("closed_at") or best_sell.get("filled_at", "")
-                net_pnl = best_sell.get("net_pnl", 0.0)
-                net_pnl_pct = best_sell.get("net_pnl_pct", 0.0)
-                reason = best_sell.get("close_reason", "") or best_sell.get("reason", "")
-                result = "WIN" if net_pnl >= 0 else "LOSS"
-            else:
-                # BUY not yet closed
-                continue
-
-            holding_hours = 0.0
-            if entry_time and exit_time:
-                try:
-                    fmt = "%Y-%m-%dT%H:%M:%S.%f"
-                    et = datetime.strptime(entry_time.split("+")[0].split("Z")[0], fmt)
-                    xt = datetime.strptime(exit_time.split("+")[0].split("Z")[0], fmt)
-                    holding_hours = round((xt - et).total_seconds() / 3600, 2)
-                except (ValueError, IndexError):
-                    pass
-
-            trades.append({
-                "symbol": symbol,
-                "side": "SELL",
-                "entry_price": entry_px,
-                "exit_price": exit_px,
-                "quantity": qty,
-                "entry_time": entry_time,
-                "exit_time": exit_time,
-                "holding_hours": holding_hours,
-                "net_pnl": net_pnl,
-                "net_pnl_pct": net_pnl_pct,
-                "reason": reason or "TP/SL",
-                "result": result,
-            })
+                    trades.append({
+                        "symbol": sym,
+                        "side": "SELL",
+                        "entry_price": float(row.get("entry_price", 0) or 0),
+                        "exit_price": float(row.get("exit_price", 0) or 0),
+                        "quantity": qty,
+                        "entry_time": entry_time,
+                        "exit_time": exit_time,
+                        "holding_hours": holding_hours,
+                        "net_pnl": net_pnl,
+                        "net_pnl_pct": net_pnl_pct,
+                        "reason": row.get("exit_reason")
+                        or row.get("reason") or "TP/SL",
+                        "result": "WIN" if net_pnl >= 0 else "LOSS",
+                    })
+        except (FileNotFoundError, OSError):
+            return []
 
         trades.sort(key=lambda t: t.get("exit_time", ""), reverse=True)
         return trades
@@ -531,7 +593,13 @@ class MetricsManager:
         losses = sum(1 for t in trades if t.get("net_pnl", 0) <= 0)
         pnl = sum(t.get("net_pnl", 0) for t in trades)
         roi = sum(t.get("net_pnl_pct", 0) for t in trades)
+        gross_profit = sum(t["net_pnl"] for t in trades if t.get("net_pnl", 0) > 0)
+        gross_loss = abs(sum(t["net_pnl"] for t in trades if t.get("net_pnl", 0) <= 0))
         avg_hold = sum(t.get("holding_hours", 0) for t in trades) / total if total else 0.0
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0
+            else (0.0 if gross_profit == 0 else 0.0)
+        )
         return {
             "total_trades": total,
             "wins": wins,
@@ -539,6 +607,9 @@ class MetricsManager:
             "win_rate": (wins / total * 100) if total else 0.0,
             "pnl": pnl,
             "roi": roi,
+            "gross_profit": gross_profit,
+            "gross_loss": gross_loss,
+            "profit_factor": profit_factor,
             "avg_holding_hours": avg_hold,
         }
 

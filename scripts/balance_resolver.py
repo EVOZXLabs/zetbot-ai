@@ -11,11 +11,12 @@ different amount (e.g. $6,000), the fallback silently produced a
 ``/balance`` could show a large negative "Return" next to a positive
 "Net PnL": the two numbers were computed from different baselines.
 
-``paper_state.json`` is the wallet's own record of how it was funded
-(see ``scripts/accounting_reconcile.py``, which already treats it as
-authoritative when reconciling ``paper_balance.json`` at startup), so
-it is the correct fallback — a hardcoded literal should only be used
-if neither file has the value.
+``paper_balance.json`` is the account's single source of truth for
+accounting (see AGENTS.md and ``scripts/accounting_reconcile.py``,
+which syncs ``paper_state.json`` TO it at startup — never the other
+way round), so ``paper_balance.json`` takes priority; ``paper_state.json``
+is only a fallback for fresh state that predates a balance file. A
+hardcoded literal should only be used if neither file has the value.
 """
 
 from __future__ import annotations

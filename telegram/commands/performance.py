@@ -18,14 +18,15 @@ class PerformanceCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        pb = ctx.read_json("paper_balance.json")
-        orders_data = ctx.read_json("paper_orders.json")
-
-        all_closed = []
-        if orders_data:
-            for o in orders_data.get("orders", []):
-                if o.get("status") == "CLOSED":
-                    all_closed.append(o)
+        # Single source of truth for closed trades = MetricsManager
+        # (paper_trade_history.csv) — same source as /history and /summary,
+        # so /performance can never disagree with them on win rate, PnL,
+        # trade counts or holding time.
+        if ctx.services is not None:
+            all_closed = ctx.services.metrics.trade_history()
+        else:
+            from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
+            all_closed = MetricsManager("data").trade_history()
 
         if not all_closed:
             return build_message(compact_header(), "No completed trades yet.")
@@ -43,7 +44,7 @@ class PerformanceCommand(BaseCommand):
         monthly = []
 
         for o in all_closed:
-            dt = _parse_dt(o.get("closed_at", ""))
+            dt = _parse_dt(o.get("exit_time", "") or o.get("closed_at", ""))
             if not dt:
                 continue
             if dt.date() == now.date():
@@ -73,7 +74,16 @@ class PerformanceCommand(BaseCommand):
 
             hold_times = []
             for o in orders:
-                hold = order_hold_seconds(o, entry_map)
+                # Force the entry-time lookup to come from the position
+                # record (entry_map) rather than the order's own fill
+                # timestamp — a closing order records the EXIT moment, so
+                # its "entry_time" (the CSV filled_at) yields a fake "0s"
+                # hold. Strip it the same way /summary does.
+                exit_view = {
+                    "symbol": o.get("symbol", ""),
+                    "exit_time": o.get("exit_time") or o.get("closed_at", ""),
+                }
+                hold = order_hold_seconds(exit_view, entry_map)
                 if hold is not None:
                     hold_times.append(hold)
             avg_hold = sum(hold_times) / len(hold_times) if hold_times else 0.0

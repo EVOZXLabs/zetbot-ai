@@ -403,7 +403,10 @@ class TestStartupReconciliation:
 
     def test_detects_initial_balance_mismatch(self, tmp_path: Any, monkeypatch: Any) -> None:
         """When paper_state and paper_balance disagree on initial_balance,
-        reconcile uses paper_state's value."""
+        paper_balance.json is authoritative (single source of truth) and
+        paper_state.json is synced to it — never the other way round, so a
+        legacy USDT-era paper_state (10000) can't clobber a correctly-funded
+        IDR account whose paper_balance says 300000."""
         import scripts.accounting_reconcile as rec_mod
 
         _write_json(tmp_path, "paper_state.json", {
@@ -423,13 +426,17 @@ class TestStartupReconciliation:
         monkeypatch.setattr(rec_mod, "_STATE_PATH", str(tmp_path / "paper_state.json"))
         monkeypatch.setattr(rec_mod, "_BALANCE_PATH", str(tmp_path / "paper_balance.json"))
         monkeypatch.setattr(rec_mod, "_POSITIONS_PATH", str(tmp_path / "positions.json"))
+        monkeypatch.setattr(rec_mod, "_ORDERS_PATH", str(tmp_path / "paper_orders.json"))
 
         findings = rec_mod.reconcile()
 
         assert findings["initial_balance_mismatch"] is True
 
         pb = json.loads((tmp_path / "paper_balance.json").read_text())
-        assert pb["initial_balance"] == 5_000.0
+        assert pb["initial_balance"] == 10_000.0
+
+        state = json.loads((tmp_path / "paper_state.json").read_text())
+        assert state["initial_balance"] == 10_000.0
 
     def test_fixes_infinite_profit_factor(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Infinity profit_factor is reset to 0.0."""

@@ -1138,6 +1138,14 @@ def _open_paper_position_on_buy(
     except OSError:
         pass
 
+    # Keep the CLOSED-TRADES store (paper_trade_history.csv) in sync so
+    # /history, /summary and accounting always reflect this closure.
+    try:
+        from scripts.paper_state_lock import rebuild_trade_history_csv
+        rebuild_trade_history_csv(data_dir)
+    except OSError:
+        pass
+
     # Mirror the OPEN position into positions.json (Telegram view) via
     # the shared atomic merge so concurrent writers are preserved and
     # the active/closed counters stay correct.

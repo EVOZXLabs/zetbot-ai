@@ -1,4 +1,3 @@
-import csv
 from datetime import datetime, timezone
 
 from telegram.base_command import BaseCommand, CommandMeta
@@ -8,10 +7,7 @@ from telegram.formatter import (
 from telegram.ui import (
     compact_header, confidence_bar, build_message,
 )
-
-
-def _today_filter() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+from scripts.metrics_manager import MetricsManager
 
 
 class SummaryCommand(BaseCommand):
@@ -24,76 +20,73 @@ class SummaryCommand(BaseCommand):
     )
 
     def execute(self, ctx, args: str) -> str:
-        today_str = _today_filter()
+        # Single source of truth for closed trades = MetricsManager
+        # (paper_trade_history.csv).  /summary and /history therefore always
+        # agree on the closed-trade set, win rate, realized PnL and
+        # holding time — no more divergent CSV-vs-orders/legacy-state reads.
+        if ctx.services is not None:
+            manager = ctx.services.metrics
+        else:
+            manager = MetricsManager("data")
+        # entry_time_map reads positions.json / paper_state.json directly, so
+        # it works with or without a service container.
+        entry_map = ctx.entry_time_map()
 
-        trades = []
-        try:
-            with open("data/paper_trade_history.csv", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    closed = row.get("closed_at", "") or ""
-                    if today_str in closed:
-                        row["net_pnl"] = float(row.get("net_pnl", 0) or 0)
-                        row["net_pnl_pct"] = float(row.get("net_pnl_pct", 0) or 0)
-                        trades.append(row)
-        except FileNotFoundError:
-            trades = []
+        quote = getattr(ctx.config, "quote_currency", "USDT") or "USDT"
+        trades = manager.trades_since_wib_midnight()
 
-        executions = trades
-        positions = {}
-        for trade in executions:
-            trade_id = trade.get("id", "")
-            if "-" in trade_id:
-                position_id = "-".join(trade_id.split("-")[:2])
-            else:
-                position_id = trade_id
-            positions[position_id] = positions.get(position_id, 0) + trade.get("net_pnl", 0)
-
-        position_results = list(positions.values())
-        wins = [pnl for pnl in position_results if pnl >= 0]
-        losses = [pnl for pnl in position_results if pnl < 0]
-
-        positions_closed = len(position_results)
-        win_count = len(wins)
-        loss_count = len(losses)
-        win_rate = (win_count / positions_closed * 100) if positions_closed > 0 else 0.0
-        today_pnl = sum(position_results)
-        gross_profit = sum(wins)
-        gross_loss = abs(sum(losses))
-        pf = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
-
-        if not executions:
+        if not trades:
             return build_message(
                 compact_header(),
-                f"📅 *Daily Summary* — {today_str}",
+                f"📅 *Daily Summary* — {_today_str()}",
                 "No trades completed today.",
             )
 
-        quote = getattr(ctx.config, "quote_currency", "USDT") or "USDT"
+        total = len(trades)
+        wins = [t for t in trades if t.get("net_pnl", 0) > 0]
+        losses = [t for t in trades if t.get("net_pnl", 0) <= 0]
+        win_count = len(wins)
+        loss_count = len(losses)
+        win_rate = win_count / total * 100.0
+        today_pnl = sum(t.get("net_pnl", 0) for t in trades)
+        gross_profit = sum(t["net_pnl"] for t in wins)
+        gross_loss = abs(sum(t["net_pnl"] for t in losses))
+        pf = (gross_profit / gross_loss) if gross_loss > 0 else (
+            0.0 if gross_profit == 0 else 0.0
+        )
+
+        avg_hold = 0.0
+        holds = []
+        for t in trades:
+            # Force the entry-time lookup to come from the position record
+            # (entry_time_map) rather than the trade's own fill timestamp,
+            # so the displayed hold reflects the REAL position holding time,
+            # not "0s" derived from the closing order's fill time.
+            exit_view = {
+                "symbol": t.get("symbol", ""),
+                "exit_time": t.get("exit_time") or t.get("closed_at", ""),
+            }
+            h = order_hold_seconds(exit_view, entry_map)
+            if h is not None:
+                holds.append(h)
+        if holds:
+            avg_hold = sum(holds) / len(holds)
 
         blocks = [
             compact_header(),
-            f"📅 *Daily Summary* — {today_str}",
-            f"📊 Positions: {positions_closed}\n"
+            f"📅 *Daily Summary* — {_today_str()}",
+            f"📊 Positions: {total}\n"
             f"✅ Wins: {win_count}  ❌ Losses: {loss_count}\n"
             f"📈 Win Rate: {confidence_bar(win_rate)}",
             f"💰 PnL: {fmt_compact_number(today_pnl, quote)}\n"
             f"📐 Profit Factor: {fmt_pf(pf)}",
         ]
 
-        if avg_hold := self._avg_holding(executions, ctx.entry_time_map()):
-            blocks.append(f"🕒 Avg Hold: {avg_hold}")
+        if avg_hold:
+            blocks.append(f"🕒 Avg Hold: {fmt_holding(avg_hold)}")
 
         return build_message(*blocks)
 
-    @staticmethod
-    def _avg_holding(executions: list, entry_map: dict) -> str:
-        holding_times = []
-        for t in executions:
-            hold = order_hold_seconds(t, entry_map)
-            if hold is not None:
-                holding_times.append(hold)
-        if not holding_times:
-            return ""
-        avg = sum(holding_times) / len(holding_times)
-        return fmt_holding(avg)
+
+def _today_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")

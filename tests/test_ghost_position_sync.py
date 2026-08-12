@@ -38,6 +38,11 @@ def _isolated_data_dir(
     """Redirect every ``data/...`` path into ``tmp_path/data``."""
     monkeypatch.chdir(tmp_path)
     os.makedirs("data", exist_ok=True)
+    # The incident scenario runs on an IDR account: PRIME/IDR is the real
+    # position and BTC/USDT is the legacy ghost. The engine's _load_state
+    # now drops positions whose quote differs from the account currency,
+    # so this must be an IDR account for the real position to survive.
+    monkeypatch.setenv("QUOTE_CURRENCY", "IDR")
 
 
 def _write(path: Any, data: Any) -> None:

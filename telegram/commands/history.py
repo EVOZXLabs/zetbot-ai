@@ -3,6 +3,7 @@ from telegram.formatter import (
     fmt_price, fmt_holding, fmt_pnl, order_hold_seconds,
 )
 from telegram.ui import compact_header, pnl_emoji, build_message
+from scripts.metrics_manager import MetricsManager
 
 
 class HistoryCommand(BaseCommand):
@@ -20,37 +21,19 @@ class HistoryCommand(BaseCommand):
         except (ValueError, TypeError):
             limit = 10
 
-        orders_data = ctx.read_json("paper_orders.json")
-        state_data = ctx.read_json("state.json")
+        # Single source of truth for closed trades = MetricsManager
+        # (paper_trade_history.csv).  This guarantees /history shows the
+        # exact same trades as /summary and the accounting layer — no more
+        # divergent paper_orders.json / legacy state.json reads.
+        if ctx.services is not None:
+            trades = ctx.services.metrics.trade_history()
+        else:
+            trades = MetricsManager("data").trade_history()
 
-        closed_orders = []
-        if orders_data:
-            for o in orders_data.get("orders", []):
-                if o.get("status") == "CLOSED":
-                    closed_orders.append(o)
-        if not closed_orders and state_data:
-            trades = state_data.get("paper", {}).get("trades", [])
-            for t in trades:
-                closed_orders.append({
-                    "symbol": t.get("symbol", "?"),
-                    "side": "BUY",
-                    "net_pnl": t.get("net_pnl", 0),
-                    "net_pnl_pct": t.get("pnl_pct", 0),
-                    "entry_price": t.get("entry_price", 0),
-                    "exit_price": t.get("exit_price", 0),
-                    "closed_at": t.get("exit_time", ""),
-                    "filled_at": t.get("entry_time", ""),
-                    "exit_reason": t.get("exit_reason", ""),
-                    "total_cost": t.get("entry_price", 0) * t.get("quantity", 0),
-                })
-
-        if not closed_orders:
+        if not trades:
             return build_message(compact_header(), "No completed trades yet.")
 
-        closed_orders.sort(key=lambda o: o.get("closed_at", "") or "", reverse=True)
-        shown = closed_orders[:limit]
-
-        entry_map = ctx.entry_time_map()
+        shown = trades[:limit]
 
         blocks = [compact_header(), f"📋 *Trade History* (last {len(shown)})"]
 
@@ -59,11 +42,24 @@ class HistoryCommand(BaseCommand):
             entry = o.get("entry_price", 0)
             exit_p = o.get("exit_price", 0)
             pnl = o.get("net_pnl", 0)
-            reason = o.get("exit_reason", "?")
-            closed_at = o.get("closed_at", "")
+            reason = o.get("reason", "?")
+            closed_at = o.get("exit_time", "") or o.get("closed_at", "")
 
             hold = ""
-            hold_sec = order_hold_seconds(o, entry_map)
+            hold_sec = order_hold_seconds(o, {})
+            if hold_sec is None:
+                et = o.get("entry_time", "")
+                xt = o.get("exit_time", "")
+                if et and xt:
+                    try:
+                        fmt = "%Y-%m-%dT%H:%M:%S.%f"
+                        e = __import__("datetime").datetime.strptime(
+                            et.split("+")[0].split("Z")[0], fmt)
+                        x = __import__("datetime").datetime.strptime(
+                            xt.split("+")[0].split("Z")[0], fmt)
+                        hold_sec = (x - e).total_seconds()
+                    except (ValueError, IndexError):
+                        hold_sec = None
             if hold_sec is not None:
                 hold = fmt_holding(hold_sec)
 

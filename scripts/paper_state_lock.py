@@ -46,6 +46,116 @@ PAPER_STATE_LOCK = threading.RLock()
 #  Atomic JSON writer (BUG B: prevents partial-read by Telegram commands)
 # -----------------------------------------------------------------------
 
+import csv  # noqa: E402
+
+# Canonical columns for the CLOSED-TRADES store (single source of truth
+# for /history, /summary and all derived accounting).  Must stay in sync
+# with ``PaperExport.trade_history_csv`` in ``scripts/paper_trading_engine``.
+_TRADE_HISTORY_COLUMNS = [
+    "id", "symbol", "side",
+    "quantity", "entry_price", "fill_price",
+    "exit_price", "entry_fee", "exit_fee",
+    "net_pnl", "net_pnl_pct",
+    "created_at", "filled_at", "closed_at",
+]
+
+
+def rebuild_trade_history_csv(data_dir: str = "data") -> int:
+    """Rebuild ``paper_trade_history.csv`` from the authoritative ledgers.
+
+    CLOSED TRADES have exactly ONE source of truth: ``paper_trade_history.csv``.
+    It is derived from the authoritative ledgers — ``paper_state.json`` (the
+    wallet ledger) and ``paper_orders.json`` (the order ledger) — so it can
+    never drift from the engine's view of what actually closed.  This is the
+    repair path used by:
+
+      * a manual /sell closure (``order_manager._close_paper_position_on_sell``),
+      * the pipeline persist step (``pipeline._persist_paper_state``),
+      * startup reconciliation (``accounting_reconcile.reconcile``).
+
+    CLOSED SELL orders are merged from BOTH ledgers (deduped by order id,
+    ``paper_state.json`` winning) because different writers append SELL
+    records to only one of the two files.  A rebuild that ignored
+    ``paper_orders.json`` would silently erase real closed trades whenever
+    ``paper_state.json`` still held stale/legacy state — exactly the
+    corruption this repair path exists to prevent.
+
+    Returns the number of closed trades written (0 if none / no state).
+    """
+    csv_path = os.path.join(data_dir, "paper_trade_history.csv")
+
+    def _load(path: str) -> dict:
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    state = _load(os.path.join(data_dir, "paper_state.json"))
+    order_state = _load(os.path.join(data_dir, "paper_orders.json"))
+
+    state_orders = (state.get("orders") if isinstance(state, dict) else None) or []
+    order_orders = (order_state.get("orders") if isinstance(order_state, dict) else None) or []
+    positions = (state.get("positions") if isinstance(state, dict) else None) or {}
+
+    # Merge CLOSED SELL orders from both ledgers, deduped by order id
+    # (paper_state.json is authoritative when both have the same order).
+    orders_by_id: dict[str, dict] = {}
+    for o in order_orders:
+        if o.get("status") == "CLOSED" and o.get("side") == "SELL":
+            orders_by_id[o.get("id", "") or f"ord-{o.get('symbol', '')}"] = o
+    for o in state_orders:
+        if o.get("status") == "CLOSED" and o.get("side") == "SELL":
+            orders_by_id[o.get("id", "") or f"ord-{o.get('symbol', '')}"] = o
+    orders = list(orders_by_id.values())
+
+    trades: list[dict[str, Any]] = []
+    covered: set[str] = set()
+
+    # 1) CLOSED SELL orders are the primary representation of a completed
+    #    trade (they already carry entry/exit/net_pnl from the close path).
+    for o in orders:
+        sym = o.get("symbol", "")
+        covered.add(sym)
+        trades.append({k: o.get(k, "") for k in _TRADE_HISTORY_COLUMNS})
+
+    # 2) CLOSED positions that (for any reason) have no SELL order yet still
+    #    represent a realized trade — derive one so accounting stays honest.
+    for sym, p in positions.items():
+        if sym in covered:
+            continue
+        if not isinstance(p, dict) or p.get("status") != "CLOSED":
+            continue
+        exit_px = p.get("current_price") or p.get("exit_price") or p.get("entry_price", 0)
+        trades.append({
+            "id": f"pos-{sym}",
+            "symbol": sym,
+            "side": "SELL",
+            "quantity": p.get("remaining_qty", p.get("quantity", 0)),
+            "entry_price": p.get("entry_price", 0),
+            "fill_price": p.get("entry_price", 0),
+            "exit_price": exit_px,
+            "entry_fee": 0.0,
+            "exit_fee": 0.0,
+            "net_pnl": p.get("realized_pnl", p.get("total_pnl", 0)) or 0.0,
+            "net_pnl_pct": p.get("total_pnl_pct", 0) or 0.0,
+            "created_at": p.get("opened_at", p.get("entry_time", "")),
+            "filled_at": p.get("opened_at", p.get("entry_time", "")),
+            "closed_at": p.get("closed_at", ""),
+        })
+
+    try:
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        with open(csv_path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=_TRADE_HISTORY_COLUMNS)
+            w.writeheader()
+            for t in trades:
+                w.writerow(t)
+    except OSError:
+        return 0
+    return len(trades)
+
+
 def atomic_write_json(path: str, data: Any, **kwargs: Any) -> None:
     """Atomically write *data* as JSON to *path* via temp-file + ``os.replace``.
 

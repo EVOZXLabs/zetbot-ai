@@ -568,12 +568,19 @@ class TestMetricsWibDayBoundary:
                 return fixed_utc.astimezone(tz)
 
         def _order(side: str, ts: str, pnl: float) -> dict[str, Any]:
+            # Unique order id is REQUIRED: trade_history() now reads the
+            # rebuilt paper_trade_history.csv, and rebuild_trade_history_csv
+            # dedupes CLOSED SELL orders by id — without distinct ids the
+            # three SELL orders below would collapse into a single trade.
+            _order.n += 1
             return {
-                "symbol": "BTC/USDT", "side": side, "status": "CLOSED",
-                "quantity": 1.0, "filled_quantity": 1.0, "fill_price": 100.0,
-                "net_pnl": pnl, "net_pnl_pct": 1.0, "holding_hours": 1.0,
-                "created_at": ts, "filled_at": ts, "closed_at": ts,
+                "id": f"ord-{_order.n}", "symbol": "BTC/USDT", "side": side,
+                "status": "CLOSED", "quantity": 1.0, "filled_quantity": 1.0,
+                "fill_price": 100.0, "net_pnl": pnl, "net_pnl_pct": 1.0,
+                "holding_hours": 1.0, "created_at": ts, "filled_at": ts,
+                "closed_at": ts,
             }
+        _order.n = 0
 
         # 01:00 WIB Aug 6 == 18:00 UTC Aug 5 — BEFORE UTC midnight, so the
         # UTC day excludes it; AFTER WIB midnight (17:00 UTC Aug 5), so the

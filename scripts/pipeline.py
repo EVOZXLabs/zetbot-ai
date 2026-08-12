@@ -1071,3 +1071,12 @@ class Pipeline:
 
         from scripts.paper_state_lock import atomic_write_json as _awj
         _awj(bal_path, pb, indent=2)
+
+        # Keep the CLOSED-TRADES store (paper_trade_history.csv) in sync with
+        # the authoritative ledger so /history, /summary and accounting never
+        # diverge.
+        try:
+            from scripts.paper_state_lock import rebuild_trade_history_csv
+            rebuild_trade_history_csv("data")
+        except OSError:
+            pass

@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
+from scripts.accounting_reconcile import is_legacy
 from scripts.paper_state_lock import (
     add_notified_buy,
     merge_positions,
@@ -387,9 +388,18 @@ class PaperTradingEngine:
             self.wallet.initial = state.get("initial_balance", INITIAL_BALANCE)
         self.wallet.margin_used = state.get("margin_used", 0.0)
         self.orders = [self._coerce_order(o) for o in state.get("orders", [])]
+
+        # Drop positions quoted in a different currency than this account
+        # (e.g. BTC/USDT on an IDR account). Reconcile already drops them
+        # from positions.json/paper_state.json, but the engine's own
+        # in-memory state is loaded from paper_state.json, so the same
+        # filter must apply here — otherwise a legacy position from a
+        # previous exchange would be restored as OPEN and inflate equity /
+        # get managed by the engine.
         self.positions = {
             sym: VirtualPosition(**vp)
             for sym, vp in state.get("positions", {}).items()
+            if not is_legacy(sym)
         }
         self.equity_history = [
             EquitySnapshot(**s) for s in state.get("equity_history", [])
