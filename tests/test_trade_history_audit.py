@@ -274,6 +274,171 @@ class TestEngineAndManualSellTimestamps:
 
 
 # ---------------------------------------------------------------------------
+#  TP / SL Telegram notifications (engine reconcile)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingNotifier:
+    """Records all notification calls (no network)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def notify_buy_opened(self, **kwargs: Any) -> bool:
+        self.calls.append(("buy_opened", dict(kwargs)))
+        return True
+
+    def notify_position_closed(self, **kwargs: Any) -> bool:
+        self.calls.append(("position_closed", dict(kwargs)))
+        return True
+
+    def notify_take_profit(self, **kwargs: Any) -> bool:
+        self.calls.append(("take_profit", dict(kwargs)))
+        return True
+
+    def notify_stop_loss(self, **kwargs: Any) -> bool:
+        self.calls.append(("stop_loss", dict(kwargs)))
+        return True
+
+    def names(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+
+def _engine_with_notifier(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, _RecordingNotifier]:
+    """Paper engine with isolated state dir and a recording notifier."""
+    import scripts.paper_trading_engine as pte
+    monkeypatch.setattr(pte, "STATE_PATH", str(tmp_path / "paper_state.json"))
+    monkeypatch.setattr(
+        psl, "ENTRY_SNAPSHOTS_PATH", str(tmp_path / "entry_snapshots.json"),
+    )
+    engine = pte.PaperTradingEngine()
+    notifier = _RecordingNotifier()
+    engine._notifier = notifier
+    return engine, notifier
+
+
+class TestTpSlNotifications:
+    """Every TP level hit and SL stop-out must notify Telegram."""
+
+    def test_tp_level_hit_notifies_take_profit(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ):
+        engine, notifier = _engine_with_notifier(tmp_path, monkeypatch)
+        plan = {
+            "symbol": "BTC/USDT", "entry_price": 50000.0,
+            "quantity": 0.02, "position_size_usdt": 1000.0,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        }
+        engine._execute_plan(plan, None)
+
+        engine._reconcile({"symbol": "BTC/USDT"}, {
+            "symbol": "BTC/USDT", "current_price": 51000.0,
+            "status": "OPEN",
+            "tp1_hit": True, "tp2_hit": False, "tp3_hit": False,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        })
+        names = notifier.names()
+        assert "take_profit" in names
+        assert "stop_loss" not in names
+        tp_call = [
+            c for name, c in notifier.calls if name == "take_profit"
+        ][0]
+        assert tp_call["level"] == "TP1"
+        assert tp_call["symbol"] == "BTC/USDT"
+        assert tp_call["exit_price"] > tp_call["entry_price"]
+        assert tp_call["profit"] > 0
+        # partial TP does NOT close the position or send the close notice
+        assert "position_closed" not in names
+        assert engine.positions["BTC/USDT"].status == "OPEN"
+
+    def test_tp_level_notified_only_once(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A repeated reconcile with the same TP hit must not re-notify."""
+        engine, notifier = _engine_with_notifier(tmp_path, monkeypatch)
+        plan = {
+            "symbol": "BTC/USDT", "entry_price": 50000.0,
+            "quantity": 0.02, "position_size_usdt": 1000.0,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        }
+        engine._execute_plan(plan, None)
+        pos_state = {
+            "symbol": "BTC/USDT", "current_price": 51000.0,
+            "status": "OPEN",
+            "tp1_hit": True, "tp2_hit": False, "tp3_hit": False,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        }
+        engine._reconcile({"symbol": "BTC/USDT"}, dict(pos_state))
+        engine._reconcile({"symbol": "BTC/USDT"}, dict(pos_state))
+        tps = [n for n in notifier.names() if n == "take_profit"]
+        assert len(tps) == 1
+
+    def test_stop_loss_hit_notifies_stop_loss(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ):
+        engine, notifier = _engine_with_notifier(tmp_path, monkeypatch)
+        plan = {
+            "symbol": "BTC/USDT", "entry_price": 50000.0,
+            "quantity": 0.02, "position_size_usdt": 1000.0,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        }
+        engine._execute_plan(plan, None)
+
+        engine._reconcile({"symbol": "BTC/USDT"}, {
+            "symbol": "BTC/USDT", "current_price": 48000.0,
+            "status": "STOPPED",
+            "tp1_hit": False, "tp2_hit": False, "tp3_hit": False,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0, "current_stop": 49000.0,
+        })
+        names = notifier.names()
+        sl_call = [
+            c for name, c in notifier.calls if name == "stop_loss"
+        ][0]
+        assert sl_call["symbol"] == "BTC/USDT"
+        assert sl_call["exit_price"] == 49000.0
+        assert sl_call["loss"] < 0
+        # full close notice follows the SL notification
+        assert names.index("stop_loss") < names.index("position_closed")
+
+    def test_timeout_exit_notifies_only_close(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """TIMEOUT exits are Strategy Exit — no TP/SL hit notification."""
+        engine, notifier = _engine_with_notifier(tmp_path, monkeypatch)
+        plan = {
+            "symbol": "BTC/USDT", "entry_price": 50000.0,
+            "quantity": 0.02, "position_size_usdt": 1000.0,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        }
+        engine._execute_plan(plan, None)
+
+        engine._reconcile({"symbol": "BTC/USDT"}, {
+            "symbol": "BTC/USDT", "current_price": 50500.0,
+            "status": "TIMEOUT",
+            "tp1_hit": False, "tp2_hit": False, "tp3_hit": False,
+            "tp1": 51000.0, "tp2": 52000.0, "tp3": 53000.0,
+            "stop_loss": 49000.0,
+        })
+        names = notifier.names()
+        assert "stop_loss" not in names
+        assert "take_profit" not in names
+        assert names.count("position_closed") == 1
+        close_call = [
+            c for name, c in notifier.calls if name == "position_closed"
+        ][0]
+        assert close_call["exit_reason"] == "Strategy Exit"
+
+
+# ---------------------------------------------------------------------------
 #  Trade-history CSV schema + holding duration
 # ---------------------------------------------------------------------------
 

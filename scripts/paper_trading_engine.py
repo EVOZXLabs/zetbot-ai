@@ -511,6 +511,56 @@ class PaperTradingEngine:
                 "Failed to send close notification: %s", exc
             )
 
+    def _notify_tp_hit(
+        self,
+        symbol: str,
+        entry_price: float,
+        exit_price: float,
+        profit: float,
+        holding_time: timedelta,
+        level: str,
+    ) -> None:
+        """Send TAKE PROFIT HIT Telegram notification (per level, once)."""
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.notify_take_profit(
+                symbol=symbol,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                profit=profit,
+                holding_time=holding_time,
+                level=level,
+            )
+        except Exception as exc:
+            logging.getLogger("ZetBot").warning(
+                "Failed to send TP notification: %s", exc
+            )
+
+    def _notify_sl_hit(
+        self,
+        symbol: str,
+        entry_price: float,
+        exit_price: float,
+        loss: float,
+        holding_time: timedelta,
+    ) -> None:
+        """Send STOP LOSS HIT Telegram notification."""
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.notify_stop_loss(
+                symbol=symbol,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                loss=loss,
+                holding_time=holding_time,
+            )
+        except Exception as exc:
+            logging.getLogger("ZetBot").warning(
+                "Failed to send SL notification: %s", exc
+            )
+
     @staticmethod
     def _holding_str(td: timedelta) -> str:
         from telegram.formatter import fmt_holding
@@ -859,6 +909,18 @@ class PaperTradingEngine:
             setattr(vp, sold_attr, True)
             remaining_qty -= sell_qty
 
+            level_label = {
+                "tp1_sold": "TP1", "tp2_sold": "TP2", "tp3_sold": "TP3",
+            }.get(sold_attr, "")
+            self._notify_tp_hit(
+                symbol=vp.symbol,
+                entry_price=vp.entry_price,
+                exit_price=sell_result["fill_price"],
+                profit=pnl,
+                holding_time=self._calc_holding_time(vp.opened_at, now_ts),
+                level=level_label,
+            )
+
         # --- Full close (STOPPED / CLOSED / TIMEOUT) ---
         if remaining_qty <= 0:
             vp.status = "CLOSED"
@@ -946,6 +1008,14 @@ class PaperTradingEngine:
 
             holding_time = self._calc_holding_time(vp.opened_at, now_ts)
             if not vp.closure_notified:
+                if pos_status == "STOPPED":
+                    self._notify_sl_hit(
+                        symbol=vp.symbol,
+                        entry_price=vp.entry_price,
+                        exit_price=exit_price,
+                        loss=close_pnl,
+                        holding_time=holding_time,
+                    )
                 self._notify_close(
                     symbol=vp.symbol,
                     exit_price=exit_price,
