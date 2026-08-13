@@ -7,6 +7,7 @@ ZetBot AI
 """
 
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -15,6 +16,14 @@ import requests
 from bot.config import CONFIG
 
 logger = logging.getLogger("ZetBot")
+
+# requests exceptions embed the full request URL — including the bot
+# token — into str(exc); logging it verbatim would leak the token.
+_BOT_TOKEN_IN_URL = re.compile(r"bot\d{5,}:[A-Za-z0-9_\-]{20,}")
+
+
+def _redact(msg: Any) -> str:
+    return _BOT_TOKEN_IN_URL.sub("bot<REDACTED>", str(msg))
 
 
 class TelegramNotifier:
@@ -99,7 +108,7 @@ class TelegramNotifier:
                     parse_mode = ""
                 logger.warning(
                     "Telegram send attempt %d/%d failed: %s",
-                    attempt, self._max_retry, exc,
+                    attempt, self._max_retry, _redact(exc),
                 )
                 if attempt < self._max_retry:
                     import random

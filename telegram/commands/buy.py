@@ -36,6 +36,24 @@ class BuyCommand(BaseCommand):
         if ctx.services is None:
             return "\u274c Services not available."
 
+        # Hard rule (AGENTS.md): never place multiple positions for the
+        # same symbol simultaneously. Reject the manual BUY when one is
+        # already open — live reads live_positions.json (exchange truth),
+        # paper reads the paper position ledger.
+        if ctx.services.order.mode == "LIVE":
+            open_pos = self._find_live_open_position(ctx, symbol)
+        else:
+            open_pos = next(
+                (p for p in ctx.services.position.get_open_positions()
+                 if p.get("symbol") == symbol),
+                None,
+            )
+        if open_pos is not None:
+            return (
+                f"\u274c A position for {symbol} is already open. "
+                "Close it first (/sell) before opening another."
+            )
+
         # Get current price
         ticker = ctx.services.exchange.get_ticker(symbol)
         price = ticker.get("last") or ticker.get("ask") or 0.0
@@ -80,3 +98,26 @@ class BuyCommand(BaseCommand):
                 )
 
         return message
+
+    @staticmethod
+    def _find_live_open_position(ctx, symbol: str) -> dict | None:
+        """True when the exchange currently holds an open position for
+        *symbol* (fresh sync first, cached record as fallback)."""
+        try:
+            from scripts.live_position_sync import (  # noqa: PLC0415
+                LivePositionSync,
+                load_live_positions,
+            )
+
+            quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+            try:
+                syncer = LivePositionSync(ctx.services.exchange, quote_currency=quote)
+                for p in syncer.sync_positions([symbol]):
+                    if p.get("symbol") == symbol:
+                        return p
+            except Exception:
+                pass
+            cached = load_live_positions()
+            return cached.get(symbol)
+        except Exception:
+            return None

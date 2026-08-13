@@ -30,6 +30,7 @@ Commands::
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -87,9 +88,22 @@ _TEST_COMMANDS = [
 # ---------------------------------------------------------------------------
 
 
+# Telegram bot token appearing inside request URLs — requests exceptions
+# embed the full URL, including ``/bot<token>/``, and str(exc) would
+# otherwise leak the token into logs.  Matches ``bot<digits>:<secret>``.
+_BOT_TOKEN_IN_URL = re.compile(r"bot\d{5,}:[A-Za-z0-9_\-]{20,}")
+
+
+def _redact(msg: str) -> str:
+    """Remove Telegram bot tokens and obvious key material from a message."""
+    text = str(msg)
+    text = _BOT_TOKEN_IN_URL.sub("bot<REDACTED>", text)
+    return text
+
+
 def _log(msg: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    print(f"[{ts}] [TG] {msg}", flush=True)
+    print(f"[{ts}] [TG] {_redact(msg)}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +540,40 @@ class TelegramCommandCenter:
             _log(f"Replied successfully ({len(text)} chars)")
             return True
 
+        # Telegram rejects messages over 4096 chars with HTTP 400 — a
+        # reply that long would be silently dropped after all retries.
+        # Split into ≤4000-char chunks so long replies (/logs, /signals,
+        # /positions with many rows) always arrive.
+        chunks = self._chunk_text(text, 4000)
+        sent = True
+        for chunk in chunks:
+            if self._is_shutdown():
+                return False
+            if not self._send_one(chunk, parse_mode):
+                sent = False
+        return sent
+
+    @staticmethod
+    def _chunk_text(text: str, limit: int) -> list[str]:
+        """Split *text* into ≤ *limit* char pieces on line boundaries."""
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        for line in text.splitlines(keepends=True):
+            if not chunks or len(chunks[-1]) + len(line) > limit:
+                chunks.append(line)
+            else:
+                chunks[-1] += line
+        # A single over-long line (no newlines) still gets hard-split.
+        final: list[str] = []
+        for c in chunks:
+            while len(c) > limit:
+                final.append(c[:limit])
+                c = c[limit:]
+            final.append(c)
+        return final
+
+    def _send_one(self, text: str, parse_mode: Optional[str] = "Markdown") -> bool:
         url = API_BASE.format(token=self._token, method="sendMessage")
         payload: dict[str, Any] = {
             "chat_id": self._chat_id,

@@ -106,6 +106,7 @@ class ServiceContainer:
             exchange_failure_window=self._config_service.exchange_failure_window_seconds,
             exchange_max_failures=self._config_service.exchange_max_failures,
             atr_spike_multiplier=self._config_service.atr_spike_multiplier,
+            live_mode=not self._config_service.paper_mode,
         )
         self._safeguard.set_account_balance(self._config_service.account_balance)
         self._scanner = _ScannerAdapter(self._config_service, self._exchange)

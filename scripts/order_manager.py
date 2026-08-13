@@ -793,6 +793,24 @@ class OrderManager:
                 f"cannot reach exchange to verify: {exc}",
             ) from exc
 
+        # Exchanges that cannot tag orders (e.g. indodax —
+        # client_order_id_params() returns {}) can never prove whether a
+        # lost-response order reached the exchange. Retrying would risk
+        # filling twice, so the retry path must abort instead of guessing.
+        try:
+            if not provider.client_order_id_params(request.client_order_id):
+                raise OrderVerificationError(
+                    f"{provider.name} cannot tag orders with a client order "
+                    f"id — a resubmit could double-fill. Aborting retry; "
+                    f"check the previous attempt manually.",
+                )
+        except OrderVerificationError:
+            raise
+        except Exception as exc:
+            raise OrderVerificationError(
+                f"cannot verify order tagging support: {exc}",
+            ) from exc
+
         client_id = request.client_order_id
         symbol = request.symbol
         candidates: list[dict[str, Any]] = []

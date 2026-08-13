@@ -19,6 +19,10 @@ class LogsCommand(BaseCommand):
         n = 20
         if args.strip().isdigit():
             n = int(args.strip())
+        # Hard cap so a single /logs can never blow past Telegram's 4096
+        # char message limit (replies are chunked, but a bounded reply is
+        # cleaner than an unbounded stream of chunks).
+        n = max(1, min(n, 100))
 
         if not os.path.isdir(LOG_DIR):
             return "No logs directory found."

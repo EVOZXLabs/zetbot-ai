@@ -66,6 +66,7 @@ _CONFIG_OVERRIDES: dict[str, dict[str, str]] = {
         "THREADS": "scanner_threads",
         "TOP_N": "scanner_top_n",
         "MIN_VOLUME_24H": "scanner_min_volume",
+        "TIMEFRAME": "timeframe",
     },
     "scripts.decision_engine": {
         "TOP_N": "decision_top_n",
@@ -485,6 +486,17 @@ class Pipeline:
             wallet = self.container.wallet
             balance = wallet.balance
             if balance <= 0:
+                # A zero/empty balance read is NOT the same as a legit
+                # empty paper account once trading has begun — sizing risk
+                # against the ACCOUNT_BALANCE constant on stale capital
+                # silently drifts exposure. Log it loudly so the operator
+                # notices, and let the exchange-side preflights still gate.
+                self.logger.warning(
+                    "Risk stage: balance read returned <= 0 (%.2f) — "
+                    "falling back to ACCOUNT_BALANCE (%.2f). Verify the "
+                    "account state file is being written.",
+                    balance, self.config.account_balance,
+                )
                 balance = self.config.account_balance
         else:
             balance, _ = risk_manager._resolve_account_state()

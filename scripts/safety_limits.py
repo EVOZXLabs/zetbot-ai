@@ -55,6 +55,7 @@ class SafeGuard:
         exchange_max_failures: int = 3,
         atr_spike_multiplier: float = 3.0,
         max_open_positions: int | None = None,
+        live_mode: bool = False,
     ) -> None:
         self._max_daily_loss_pct = max_daily_loss_pct
         self._max_consecutive_losses = max_consecutive_losses
@@ -62,6 +63,7 @@ class SafeGuard:
         self._exchange_failure_window = exchange_failure_window
         self._exchange_max_failures = exchange_max_failures
         self._atr_spike_multiplier = atr_spike_multiplier
+        self._live_mode = live_mode
         self._account_balance: float = float(os.getenv("ACCOUNT_BALANCE", "10000"))
         # max_open_positions: read from .env MAX_POSITIONS if not provided.
         # SafeGuard enforces this as a hard gate so no new BUY is ever
@@ -77,6 +79,10 @@ class SafeGuard:
         # so the check never reads the real bot's live positions.json when
         # running in an isolated test environment.
         self._positions_path: str = "data/positions.json"
+        # LIVE mode counts open positions from live_positions.json — the
+        # exchange-truth record — never from positions.json, which is the
+        # paper/trial simulation file and is not maintained in LIVE mode.
+        self._live_positions_path: str = "data/live_positions.json"
         # Symbols for which a new position is being opened right now. The
         # Position stage simulates READY plans into positions.json BEFORE the
         # paper engine executes them; without this exclusion the guard would
@@ -90,6 +96,10 @@ class SafeGuard:
     def set_positions_path(self, path: str) -> None:
         """Override the positions.json path (used in tests)."""
         self._positions_path = path
+
+    def set_live_positions_path(self, path: str) -> None:
+        """Override the live_positions.json path (used in tests)."""
+        self._live_positions_path = path
 
     def set_planned_symbols(self, symbols: set[str]) -> None:
         """Record which symbols are mid-open so the max-open-positions guard
@@ -156,11 +166,20 @@ class SafeGuard:
     def _check_max_open_positions(self) -> tuple[bool, str]:
         """Reject new BUY when open positions >= MAX_POSITIONS (.env).
 
-        Reads the authoritative position count from positions.json so the
-        check is always against the current live state, not a stale
-        in-memory count.
+        Reads the authoritative position count from positions.json (PAPER)
+        or live_positions.json (LIVE, exchange truth) so the check is
+        always against the current live state, not a stale in-memory count.
         """
         try:
+            if self._live_mode:
+                open_count = self._count_live_open_positions()
+                limit = self._max_open_positions
+                if open_count >= limit:
+                    return False, (
+                        f"Max open positions reached: {open_count}/{limit} "
+                        f"(set MAX_POSITIONS in .env to raise this limit)"
+                    )
+                return True, ""
             with open(self._positions_path) as f:
                 pos_data = json.load(f)
             from scripts.position_status import is_open  # noqa: PLC0415
@@ -193,6 +212,31 @@ class SafeGuard:
                 f"(set MAX_POSITIONS in .env to raise this limit)"
             )
         return True, ""
+
+    def _count_live_open_positions(self) -> int:
+        """Count open symbols in live_positions.json (exchange truth)."""
+        try:
+            with open(self._live_positions_path) as f:
+                live_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return 0
+        if isinstance(live_data, dict):
+            # {"SYMBOL": {...}, ...} — every key with a non-empty record.
+            symbols = [
+                s for s, p in live_data.items()
+                if s and isinstance(p, dict)
+            ]
+        else:
+            symbols = [
+                p.get("symbol", "") for p in live_data.get("positions", [])
+                if isinstance(p, dict)
+            ]
+        open_count = 0
+        for s in symbols:
+            if not s or s in self._planned_symbols:
+                continue
+            open_count += 1
+        return open_count
 
     # ------------------------------------------------------------------
     #  Daily loss limit
