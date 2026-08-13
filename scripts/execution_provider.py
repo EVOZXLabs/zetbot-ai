@@ -340,6 +340,23 @@ def _paper_sell(price: float, qty: float) -> dict[str, float]:
     return {"fill_price": fill_price, "fee": fee, "total_proceeds": gross - fee, "slippage": slippage}
 
 
+# Business exit reason per ``OrderRequest.metadata.exit_level``.  The
+# execution pipeline stamps ``sl`` / ``tp1_hit`` / ``tp2_hit`` / ``tp3_hit``
+# when it triggers an exit — persisting that instead of a generic
+# ``market_sell`` keeps the ledger's exit_reason honest (same vocabulary as
+# ``PaperTradingEngine._reconcile``).
+_EXIT_REASON_BY_LEVEL = {
+    "sl": "Stop Loss",
+    "tp1_hit": "Take Profit",
+    "tp2_hit": "Take Profit",
+    "tp3_hit": "Take Profit",
+}
+
+
+def _exit_reason_for_level(exit_level: str) -> str:
+    return _EXIT_REASON_BY_LEVEL.get(exit_level or "", "Strategy Exit")
+
+
 class PaperExecutionProvider(ExecutionProvider):
     """Simulates orders with fee and slippage."""
 
@@ -500,6 +517,24 @@ class PaperExecutionProvider(ExecutionProvider):
             signal_time=request.metadata.get("signal_time", ""),
         )
         self._save_positions()
+        # Persist a write-once ENTRY SNAPSHOT (SL/TP + plan + decision
+        # scores + indicator values as of this fill).  decision_results.json
+        # and scanner_results.json are overwritten every pipeline run, so
+        # without this snapshot the indicator evidence behind a past entry
+        # is permanently lost.  Never fails trading — best-effort persist.
+        try:
+            from scripts.paper_state_lock import save_entry_snapshot
+            _snap_plan = dict(request.metadata)
+            _snap_plan.setdefault("entry_price", request.price or 0.0)
+            _snap_plan.setdefault("quantity", request.amount or 0.0)
+            save_entry_snapshot(
+                symbol=symbol,
+                order_id=order_id,
+                opened_at=self.positions[symbol].opened_at,
+                plan=_snap_plan,
+            )
+        except Exception:
+            pass
         emit_event(PipelineEvent("POSITION_OPENED", symbol, order_id=order_id, price=fill_price, qty=qty))
 
         return OrderResult(
@@ -578,6 +613,14 @@ class PaperExecutionProvider(ExecutionProvider):
                 vp.remaining_qty = 0.0
                 vp.unrealized_pnl = 0.0
             vp.total_pnl = round(vp.realized_pnl + vp.unrealized_pnl, 2)
+            now_ts = datetime.now(timezone.utc).isoformat()
+            # ``created_at``/``filled_at`` record the TRADE's entry moment
+            # (the position's ``opened_at``), NOT the sell submission time.
+            # Paper_trade_history.csv derives created_at/filled_at from this
+            # record, and MetricsManager computes holding time from
+            # filled_at → closed_at — stamping the sell time here made every
+            # provider-closed trade show a 0s hold while Telegram showed the
+            # real duration. ``closed_at`` is the sell fill time.
             sell_order = {
                 "id": f"po_{uuid.uuid4().hex[:12]}",
                 "symbol": symbol,
@@ -598,15 +641,16 @@ class PaperExecutionProvider(ExecutionProvider):
                     (sell_pnl / cost_part * 100.0), 2
                 ) if cost_part > 0 else 0.0,
                 "status": "CLOSED",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "filled_at": datetime.now(timezone.utc).isoformat(),
-                "closed_at": datetime.now(timezone.utc).isoformat(),
-                "exit_reason": "market_sell",
+                "created_at": vp.opened_at or now_ts,
+                "filled_at": vp.opened_at or now_ts,
+                "closed_at": now_ts,
+                "exit_reason": _exit_reason_for_level(exit_level),
             }
             self._save_positions(extra_order=sell_order)
             emit_event(PipelineEvent(
                 "POSITION_CLOSED", symbol,
                 qty=qty, price=fill_price, pnl=round(sell_pnl, 2),
+                exit_reason=sell_order["exit_reason"],
             ))
 
         return OrderResult(

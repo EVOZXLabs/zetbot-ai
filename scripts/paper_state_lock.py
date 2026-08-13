@@ -57,7 +57,20 @@ _TRADE_HISTORY_COLUMNS = [
     "exit_price", "entry_fee", "exit_fee",
     "net_pnl", "net_pnl_pct",
     "created_at", "filled_at", "closed_at",
+    "exit_reason",
 ]
+
+
+def _iso_gap_seconds(a: str, b: str) -> float | None:
+    """Seconds from ISO timestamp *a* to *b* (b - a), or None when either
+    cannot be parsed."""
+    from datetime import datetime  # noqa: PLC0415
+    try:
+        da = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+        db = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+        return (db - da).total_seconds()
+    except (ValueError, TypeError):
+        return None
 
 
 def rebuild_trade_history_csv(data_dir: str = "data") -> int:
@@ -117,7 +130,27 @@ def rebuild_trade_history_csv(data_dir: str = "data") -> int:
     for o in orders:
         sym = o.get("symbol", "")
         covered.add(sym)
-        trades.append({k: o.get(k, "") for k in _TRADE_HISTORY_COLUMNS})
+        row = {k: o.get(k, "") for k in _TRADE_HISTORY_COLUMNS}
+        # Legacy self-heal: SELL records written before the timestamp fix
+        # stamped created_at ≈ filled_at ≈ closed_at (all = the SELL
+        # moment), which collapses holding math to zero while Telegram
+        # reported the real duration.  When the authoritative position
+        # record still carries an opened_at that predates the close, restore
+        # the entry timestamps.  Only fires when the row's own entry→close
+        # gap is sub-minute — a real trade can never open and close that
+        # fast in this bot (pipeline cycles are ≥ minutes apart).
+        ct = row.get("created_at", "")
+        xt = row.get("closed_at", "")
+        if ct and xt and isinstance(positions, dict):
+            gap = _iso_gap_seconds(ct, xt)
+            pos = positions.get(sym)
+            opened = (pos or {}).get("opened_at", "") if isinstance(pos, dict) else ""
+            if gap is not None and 0 <= gap < 60 and opened and opened != ct:
+                open_before_close = _iso_gap_seconds(opened, xt)
+                if open_before_close is not None and open_before_close > 0:
+                    row["created_at"] = opened
+                    row["filled_at"] = opened
+        trades.append(row)
 
     # 2) CLOSED positions that (for any reason) have no SELL order yet still
     #    represent a realized trade — derive one so accounting stays honest.
@@ -142,6 +175,7 @@ def rebuild_trade_history_csv(data_dir: str = "data") -> int:
             "created_at": p.get("opened_at", p.get("entry_time", "")),
             "filled_at": p.get("opened_at", p.get("entry_time", "")),
             "closed_at": p.get("closed_at", ""),
+            "exit_reason": p.get("exit_reason", ""),
         })
 
     try:
@@ -454,3 +488,121 @@ def prune_closed_positions(
             return 0
 
         return len(to_archive)
+
+
+# ---------------------------------------------------------------------------
+#  Entry snapshots (historical indicator evidence at BUY time)
+# ---------------------------------------------------------------------------
+# decision_results.json (aggregate scores) and scanner_results.json (raw
+# indicators: ema50/100/200, rsi14, adx14, atr_pct, trend_alignment, …) are
+# OVERWRITTEN every pipeline run, so neither can serve as evidence of what
+# the indicators looked like when a specific position was opened.  On every
+# BUY fill we persist one write-once snapshot per order_id — the SL/TP
+# levels of the trade plus the decision scores and indicator values current
+# at that moment.  Later pipeline runs never touch it.
+
+ENTRY_SNAPSHOTS_PATH = "data/entry_snapshots.json"
+
+
+def load_entry_snapshots(path: str | None = None) -> dict[str, Any]:
+    """Read the raw entry-snapshot store (dict keyed by order_id)."""
+    path = path or ENTRY_SNAPSHOTS_PATH
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("snapshots", {}) if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_entry_snapshot(
+    symbol: str,
+    order_id: str,
+    opened_at: str,
+    plan: dict[str, Any],
+    path: str | None = None,
+) -> None:
+    """Persist a WRITE-ONCE entry snapshot for one BUY order.
+
+    Records the trade parameters (SL/TP levels, sizes, signal) plus the
+    decision scores and scanner indicators as they were at BUY time.  The
+    snapshot is keyed by ``order_id`` and never overwritten once written —
+    a later pipeline cycle must not mutate historical evidence.  Best-effort
+    and never raises: a snapshot failure must not break the fill itself.
+
+    ``plan`` should carry the trade plan fields (entry_price, quantity,
+    stop_loss, tp1..3, position_size_usdt, signal_time, confidence, …).
+    Decision/indicator context is re-read from the CURRENT
+    decision_results.json / scanner_results.json (the run that produced this
+    fill) and stored inside the snapshot for the future.
+    """
+    from datetime import datetime, timezone as _tz  # noqa: PLC0415
+
+    try:
+        path = path or ENTRY_SNAPSHOTS_PATH
+        existing = load_entry_snapshots(path)
+        if order_id in existing:
+            return  # write-once — never clobber historical evidence
+
+        data_dir = os.path.dirname(path) or "."
+        decision, indicators = _entry_context(symbol, data_dir)
+
+        snapshot = {
+            "order_id": order_id,
+            "symbol": symbol,
+            "opened_at": opened_at,
+            "signal_time": plan.get("signal_time", ""),
+            "entry_price": plan.get("entry_price", 0),
+            "quantity": plan.get("quantity", 0),
+            "stop_loss": plan.get("stop_loss", 0),
+            "tp1": plan.get("tp1", 0),
+            "tp2": plan.get("tp2", 0),
+            "tp3": plan.get("tp3", 0),
+            "position_size_usdt": plan.get("position_size_usdt", 0),
+            "confidence": plan.get("confidence", 0),
+            "recommendation": plan.get("recommendation", ""),
+            "probability": plan.get("probability", 0),
+            "decision": decision,
+            "indicators": indicators,
+            "saved_at": datetime.now(_tz.utc).isoformat(),
+        }
+        existing[order_id] = snapshot
+        atomic_write_json(
+            path,
+            {"generated": datetime.now(_tz.utc).isoformat(), "snapshots": existing},
+            indent=2,
+        )
+    except Exception:
+        pass
+
+
+def _entry_context(
+    symbol: str, data_dir: str,
+) -> tuple[Any, Any]:
+    """Pull the entry-time decision scores + indicator values for *symbol*.
+
+    Reads the CURRENT decision_results.json / scanner_results.json — i.e. the
+    pipeline run that produced this fill — and returns (decision, indicators)
+    as plain dicts, or None when the symbol/file is absent.
+    """
+    decision = None
+    indicators = None
+    try:
+        with open(os.path.join(data_dir, "decision_results.json")) as f:
+            dd = json.load(f)
+        for d in dd.get("decisions", []):
+            if d.get("symbol") == symbol:
+                decision = {k: v for k, v in d.items() if k != "symbol"}
+                break
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    try:
+        with open(os.path.join(data_dir, "scanner_results.json")) as f:
+            sd = json.load(f)
+        for p in sd.get("pairs", []):
+            if p.get("symbol") == symbol:
+                indicators = {k: v for k, v in p.items() if k != "symbol"}
+                break
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return decision, indicators

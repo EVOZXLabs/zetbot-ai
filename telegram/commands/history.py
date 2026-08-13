@@ -46,7 +46,16 @@ class HistoryCommand(BaseCommand):
             closed_at = o.get("exit_time", "") or o.get("closed_at", "")
 
             hold = ""
-            hold_sec = order_hold_seconds(o, {})
+            # Same source as /summary: resolve the real entry moment from
+            # the position records (opened_at) when available.  A legacy
+            # CSV row whose created_at/filled_at were stamped at the SELL
+            # time still shows the true holding duration instead of 0s.
+            entry_map = ctx.entry_time_map() if ctx is not None else {}
+            exit_view = {
+                "symbol": symbol,
+                "exit_time": o.get("exit_time") or o.get("closed_at", ""),
+            }
+            hold_sec = order_hold_seconds(exit_view, entry_map)
             if hold_sec is None:
                 et = o.get("entry_time", "")
                 xt = o.get("exit_time", "")

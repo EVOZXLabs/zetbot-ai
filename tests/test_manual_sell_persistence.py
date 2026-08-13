@@ -315,7 +315,9 @@ class TestPaperExecutionProviderSell:
         ]
         assert len(sell_orders) == 1
         assert sell_orders[0]["status"] == "CLOSED"
-        assert sell_orders[0]["exit_reason"] == "market_sell"
+        # Exits without an explicit level are recorded as "Strategy Exit"
+        # (the previous generic "market_sell" lost the business reason).
+        assert sell_orders[0]["exit_reason"] == "Strategy Exit"
 
         monkeypatch.undo()
 

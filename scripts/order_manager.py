@@ -1254,6 +1254,12 @@ def _close_paper_position_on_sell(
         entry_price = float(vp.get("entry_price", 0) or 0)
         net_pnl_pct = round((pnl / cost_part * 100), 2) if cost_part > 0 else 0.0
 
+        # created_at/filled_at must record the TRADE's entry moment (the
+        # position's opened_at), not the sell submission time —
+        # paper_trade_history.csv and MetricsManager derive entry/exit and
+        # holding duration from these fields.
+        opened_at = str(vp.get("opened_at", "") or "")
+
         state.setdefault("orders", []).append({
             "id": f"manual-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
             "symbol": symbol,
@@ -1272,8 +1278,8 @@ def _close_paper_position_on_sell(
             "net_pnl": round(pnl, 2),
             "net_pnl_pct": net_pnl_pct,
             "status": "CLOSED",
-            "created_at": now_ts,
-            "filled_at": now_ts,
+            "created_at": opened_at or now_ts,
+            "filled_at": opened_at or now_ts,
             "closed_at": now_ts,
             "exit_reason": "manual",
         })

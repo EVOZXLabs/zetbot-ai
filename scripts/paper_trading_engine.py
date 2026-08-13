@@ -769,6 +769,24 @@ class PaperTradingEngine:
             position_size_usdt=plan.get("position_size_usdt", 0.0),
         )
 
+        # Persist a write-once ENTRY SNAPSHOT (SL/TP + plan + decision
+        # scores + indicator values as of this fill) — the same audit
+        # record the pipeline's PaperExecutionProvider writes on its BUY
+        # path.  decision_results.json / scanner_results.json are
+        # overwritten every pipeline run, so without this the indicator
+        # evidence behind a past entry is permanently lost.  Best-effort:
+        # a snapshot failure must never break the fill.
+        try:
+            from scripts.paper_state_lock import save_entry_snapshot
+            save_entry_snapshot(
+                symbol=symbol,
+                order_id=order_id,
+                opened_at=now_ts,
+                plan=plan,
+            )
+        except Exception:
+            pass
+
         # Send BUY OPENED notification
         self._notify_buy(plan, fill_price, order_id)
 
@@ -1091,6 +1109,7 @@ class PaperExport:
             "total_cost", "total_proceeds",
             "net_pnl", "net_pnl_pct",
             "status", "created_at", "filled_at", "closed_at",
+            "exit_reason",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
@@ -1285,6 +1304,7 @@ class PaperExport:
             "exit_price", "entry_fee", "exit_fee",
             "net_pnl", "net_pnl_pct",
             "created_at", "filled_at", "closed_at",
+            "exit_reason",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
