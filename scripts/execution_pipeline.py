@@ -162,6 +162,15 @@ class ExecutionPipeline:
             else:
                 emit_event(PipelineEvent("ORDER_SUBMITTED", symbol, status=result.status))
 
+            # LIVE mode: snapshot the ACTUAL buy fill for the trade-history
+            # ledger (best-effort, never breaks trading).
+            if self._provider.mode == "LIVE" and result.status == "FILLED":
+                try:
+                    from scripts.live_trade_ledger import record_live_entry  # noqa: PLC0415
+                    record_live_entry(result)
+                except Exception:
+                    pass
+
             return result
         finally:
             sym_lock.release()
@@ -291,6 +300,19 @@ class ExecutionPipeline:
             remaining -= sell_qty
             result[hit_key] = True
 
+            # LIVE mode: accumulate the ACTUAL TP sell fill toward the
+            # trade-history ledger (best-effort, never breaks trading).
+            if self._provider.mode == "LIVE":
+                try:
+                    from scripts.live_trade_ledger import record_live_exit_fill  # noqa: PLC0415
+                    record_live_exit_fill(
+                        tp_result,
+                        reason="Take Profit",
+                        entry_fallback=position,
+                    )
+                except Exception:
+                    pass
+
             if self._notifier is not None:
                 try:
                     from datetime import datetime, timezone, timedelta
@@ -337,6 +359,19 @@ class ExecutionPipeline:
                     realized_pnl += close_pnl
                     remaining = 0
                     result["status"] = "STOPPED"
+
+                    # LIVE mode: accumulate the ACTUAL SL sell fill toward the
+                    # trade-history ledger (best-effort, never breaks trading).
+                    if self._provider.mode == "LIVE":
+                        try:
+                            from scripts.live_trade_ledger import record_live_exit_fill  # noqa: PLC0415
+                            record_live_exit_fill(
+                                sl_result,
+                                reason="Stop Loss",
+                                entry_fallback=position,
+                            )
+                        except Exception:
+                            pass
 
                     if self._notifier is not None:
                         try:
@@ -410,6 +445,14 @@ class ExecutionPipeline:
         emit_event(PipelineEvent("EXIT_SUBMITTED", symbol, reason=reason, qty=qty))
         result = self._sell(symbol, price, qty)
         if result.status == "FILLED":
+            # LIVE mode: accumulate the ACTUAL close fill toward the
+            # trade-history ledger (best-effort, never breaks trading).
+            if self._provider.mode == "LIVE":
+                try:
+                    from scripts.live_trade_ledger import record_live_exit_fill  # noqa: PLC0415
+                    record_live_exit_fill(result, reason="Manual Close")
+                except Exception:
+                    pass
             emit_event(PipelineEvent("POSITION_CLOSED", symbol, reason=reason, result=result.to_dict()))
         return result
 

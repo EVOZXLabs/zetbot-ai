@@ -335,12 +335,12 @@ class MetricsManager:
         the exchange by ``scripts.live_position_sync``), so exposure %
         and unrealized PnL reflect the real account too.
 
-        Realized PnL / win-rate / trade counts are intentionally left
-        at 0 here rather than reused from paper_balance.json — showing
-        a stale paper trade-history next to a real cash balance would
-        be its own, subtler version of the same bug. Live trade-history
-        reconciliation is a separate piece of work, not covered by this
-        fix.
+        Realized PnL / win-rate / trade counts come from the LIVE
+        trade-history ledger (``data/live_trade_history.jsonl`` — actual
+        exchange fills written by ``scripts.live_trade_ledger``), never from
+        paper_balance.json. Before the live ledger existed these were left at
+        0, so /status reported a real cash balance next to an empty
+        performance record.
         """
         cash = 0.0
         if self._wallet is not None:
@@ -353,11 +353,39 @@ class MetricsManager:
         initial = resolve_initial_balance(pb, self._read_json("paper_state.json"))
         open_positions = self.open_positions()
 
+        ledger_trades = self._live_trade_history()
+        realized = sum(float(t.get("net_pnl", 0) or 0) for t in ledger_trades)
+        total_trades = len(ledger_trades)
+        winning = sum(
+            1 for t in ledger_trades if float(t.get("net_pnl", 0) or 0) > 0
+        )
+        losing = total_trades - winning
+        gross_profit = sum(
+            float(t.get("net_pnl", 0) or 0) for t in ledger_trades
+            if float(t.get("net_pnl", 0) or 0) > 0
+        )
+        gross_loss = abs(sum(
+            float(t.get("net_pnl", 0) or 0) for t in ledger_trades
+            if float(t.get("net_pnl", 0) or 0) < 0
+        ))
+        win_rate = round(winning / total_trades * 100.0, 2) if total_trades else 0.0
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0
+            else (gross_profit if gross_profit > 0 else 0.0)
+        )
+
         return self.compute_snapshot(
             cash=cash,
-            realized_pnl=0.0,
+            realized_pnl=realized,
             initial_balance=initial,
             open_positions=open_positions,
+            total_trades=total_trades,
+            winning_trades=winning,
+            losing_trades=losing,
+            win_rate=win_rate,
+            profit_factor=profit_factor,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
         )
 
     # ------------------------------------------------------------------
@@ -400,11 +428,17 @@ class MetricsManager:
         return [o for o in self._read_orders() if o.get("side") == "BUY"]
 
     def trade_history(self) -> list[dict[str, Any]]:
-        """CLOSED TRADES — single source of truth = ``paper_trade_history.csv``.
+        """CLOSED TRADES — single source of truth, mode-aware.
+
+        PAPER mode: ``paper_trade_history.csv`` (unchanged, existing
+        behavior). LIVE mode: ``data/live_trade_history.jsonl`` — the
+        actual-exchange-fill ledger written by ``scripts.live_trade_ledger``,
+        so a live account's history, win rate and realized PnL never mix
+        with the paper ledger and never use price estimates.
 
         Every completed trade is one row; ``/history``, ``/summary`` and all
         derived accounting (win rate, closed-trades count, realized PnL) read
-        from HERE so they can never disagree.  Legacy positions whose quote
+        from HERE so they can never disagree. Legacy positions whose quote
         currency differs from the account (e.g. ``BTC/USDT`` on an IDR
         account) are excluded and a ``[LEGACY-DATA]`` warning is emitted so
         they never corrupt the report.
@@ -414,6 +448,9 @@ class MetricsManager:
         from the authoritative ledger (``paper_state.json``) so callers always
         read from exactly one file.
         """
+        if self._is_live():
+            return self._live_trade_history()
+
         path = os.path.join(self._data_dir, "paper_trade_history.csv")
         if not os.path.exists(path):
             try:
@@ -482,6 +519,50 @@ class MetricsManager:
         except (FileNotFoundError, OSError):
             return []
 
+        trades.sort(key=lambda t: t.get("exit_time", ""), reverse=True)
+        return trades
+
+    def _live_trade_history(self) -> list[dict[str, Any]]:
+        """LIVE closed trades from the actual-fill ledger
+        (``data/live_trade_history.jsonl``).
+
+        Mirrors the PAPER CSV row shape so every downstream consumer
+        (computed metrics, /history, /summary, /performance, daily report)
+        needs no mode-specific code.
+        """
+        trades: list[dict[str, Any]] = []
+        try:
+            from scripts.live_trade_ledger import load_live_trades  # noqa: PLC0415
+            for rec in load_live_trades():
+                sym = rec.get("symbol", "")
+                if not sym:
+                    continue
+                if not self._passes_quote_filter(sym):
+                    logger.warning(
+                        "[LEGACY-DATA] ignored mismatched quote trade: "
+                        "%s (account quote=%s)",
+                        sym, self._account_quote,
+                    )
+                    continue
+                holding = float(rec.get("holding_duration", 0) or 0)
+                net_pnl = float(rec.get("net_pnl", 0) or 0)
+                trades.append({
+                    "symbol": sym,
+                    "side": "SELL",
+                    "entry_price": float(rec.get("entry_price", 0) or 0),
+                    "exit_price": float(rec.get("exit_price", 0) or 0),
+                    "quantity": float(rec.get("quantity", 0) or 0),
+                    "entry_time": rec.get("opened_at", ""),
+                    "exit_time": rec.get("closed_at", ""),
+                    "holding_hours": round(holding / 3600.0, 2) if holding > 0 else 0.0,
+                    "net_pnl": net_pnl,
+                    "net_pnl_pct": float(rec.get("net_pnl_pct", 0) or 0),
+                    "reason": rec.get("exit_reason") or "TP/SL",
+                    "result": "WIN" if net_pnl >= 0 else "LOSS",
+                    "trade_id": rec.get("trade_id", ""),
+                })
+        except Exception:
+            return []
         trades.sort(key=lambda t: t.get("exit_time", ""), reverse=True)
         return trades
 

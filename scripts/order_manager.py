@@ -165,6 +165,20 @@ class OrderManager:
         ):
             self.sync_live_position(result)
             self._handle_live_protection(request, result)
+            # LIVE mode: snapshot/accumulate the ACTUAL fill for the
+            # trade-history ledger (best-effort, never breaks trading).
+            if result.status == "FILLED":
+                try:
+                    from scripts.live_trade_ledger import (  # noqa: PLC0415
+                        record_live_entry,
+                        record_live_exit_fill,
+                    )
+                    if (result.side or "").upper() == "BUY":
+                        record_live_entry(result)
+                    else:
+                        record_live_exit_fill(result, reason="Manual Close")
+                except Exception:
+                    pass
 
         # ── 3. Record & audit ──────────────────────────────────────────
         self._metrics.record(result)
