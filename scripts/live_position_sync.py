@@ -231,6 +231,16 @@ class LivePositionSync:
         if not balance:
             raise ExchangeAuthError("Position sync: balance fetch returned nothing.")
 
+        # A cached entry whose quote no longer matches the account's
+        # current quote currency (e.g. a leftover BTC/USDT record from
+        # before the account was reconfigured to IDR) can never appear
+        # in ``candidates`` below again, so ``merge_live_positions``
+        # would otherwise keep it forever — it's never in the checked
+        # set, so it's never popped. Purge it here instead, once, on
+        # every sync. This only edits the on-disk cache; it never
+        # touches the exchange or places any order.
+        purge_mismatched_quote_positions(self._quote)
+
         free = balance.get("free") if isinstance(balance.get("free"), dict) else {}
         total = balance.get("total") if isinstance(balance.get("total"), dict) else {}
         currencies = set(free.keys()) | set(total.keys())
@@ -249,6 +259,33 @@ class LivePositionSync:
         # tolerates a failed ticker/trades lookup per-symbol.
 
         return self.sync_positions(candidates)
+
+
+def purge_mismatched_quote_positions(quote_currency: str) -> list[str]:
+    """Drop cached ``live_positions.json`` entries whose symbol's quote
+    currency does not match ``quote_currency`` (e.g. a stale ``BTC/USDT``
+    record left over from before the account was reconfigured to IDR).
+
+    Such entries can never be re-synced under the current config (they
+    are not in ``sync_all_positions``'s candidate list), so without this
+    they sit in the cache forever, permanently skipped by the
+    ``ExecutionPipeline`` TP/SL currency guard on every cycle. Best-effort,
+    cache-only — never touches the exchange. Returns the removed symbols.
+    """
+    quote = (quote_currency or "").upper()
+    if not quote:
+        return []
+    current = load_live_positions()
+    stale = [
+        sym for sym in current
+        if "/" in sym and sym.split("/")[1].upper() != quote
+    ]
+    if not stale:
+        return []
+    for sym in stale:
+        current.pop(sym, None)
+    save_live_positions(current)
+    return stale
 
 
 def load_live_positions() -> dict[str, Any]:

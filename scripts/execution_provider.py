@@ -28,6 +28,12 @@ from typing import Any, Optional
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
 from scripts.paper_state_lock import paper_state_writes
+from scripts.invalid_pair_blacklist import (
+    is_invalid_pair_error,
+    is_blacklisted,
+    blacklist_symbol,
+    _BLACKLIST_TTL_DAYS,
+)
 
 
 _log = logging.getLogger("zetbot.execution_provider")
@@ -855,6 +861,20 @@ class LiveExecutionProvider(ExecutionProvider):
                 self.name,
             )
 
+        # Known-invalid-pair guard: the exchange previously rejected this
+        # exact symbol with "Invalid pair" (its market metadata said
+        # active, but the trading API disagreed). Skip re-attempting it
+        # for a while instead of burning a rate-limited call on a BUY
+        # that's guaranteed to fail again. Never applied to SELL — a held
+        # position must always be allowed an exit attempt.
+        if is_blacklisted(symbol):
+            return OrderResult.rejected(
+                request,
+                f"{symbol} is blacklisted as an invalid pair on "
+                f"{self.get_exchange_name()} (rejected previously) — no order submitted.",
+                self.name,
+            )
+
         amount_p = self.amount_to_precision(symbol, amount)
         if amount_p <= 0:
             return OrderResult.rejected(request, f"Invalid amount {amount} after precision", self.name)
@@ -927,6 +947,12 @@ class LiveExecutionProvider(ExecutionProvider):
             )
         except Exception as exc:
             _log.error("Live BUY failed for %s: %s", symbol, exc)
+            if is_invalid_pair_error(str(exc)):
+                blacklist_symbol(symbol, reason=str(exc))
+                _log.warning(
+                    "%s blacklisted for %dd — exchange reports it as an "
+                    "invalid/untradeable pair.", symbol, _BLACKLIST_TTL_DAYS,
+                )
             return OrderResult.failed(request, f"Live BUY error: {exc}", self.name)
 
     def execute_sell(self, request: OrderRequest) -> OrderResult:
@@ -1041,6 +1067,12 @@ class LiveExecutionProvider(ExecutionProvider):
             )
         except Exception as exc:
             _log.error("Live SELL failed for %s: %s", symbol, exc)
+            if is_invalid_pair_error(str(exc)):
+                # Record it (so future BUY attempts skip it) but never gate
+                # SELL on the blacklist — a held position must always be
+                # allowed an exit attempt, even for a pair the exchange
+                # considers invalid for new orders.
+                blacklist_symbol(symbol, reason=str(exc))
             return OrderResult.failed(request, f"Live SELL error: {exc}", self.name)
 
 

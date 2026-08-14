@@ -238,9 +238,7 @@ class TestReconcilePositionCurrencyGuard:
         # current_price way past TP1 — would trigger if not for the guard.
         result = pipeline.reconcile_position("BTC/USDT", 120_000.0, position)
 
-        assert result == position
-        assert result.get("tp1_hit") is False
-        assert result.get("remaining_qty") == 0.1
+        assert result is None
         assert provider.execute_sell.call_count == 0
         assert notifier.notify_take_profit.call_count == 0
 

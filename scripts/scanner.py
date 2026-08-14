@@ -626,6 +626,9 @@ class MarketScanner:
     def fetch_markets(self) -> list[PairRaw]:
         """Fetch and filter all Spot markets quoted in ``self.quote_currency``
         from the configured exchange (``self.exchange_name``)."""
+        from scripts.invalid_pair_blacklist import load_active_blacklist  # noqa: PLC0415
+        blacklisted = load_active_blacklist()
+
         raw_markets = self.md.fetch_markets()
         pairs: list[PairRaw] = []
         for m in raw_markets:
@@ -638,7 +641,15 @@ class MarketScanner:
             base = m["base"]
             if _is_leveraged(base) or _is_stablecoin(base):
                 continue
-            pairs.append(PairRaw(symbol=m["symbol"], base=base))
+            symbol = m["symbol"]
+            # Exchange market metadata can say "active" while the trading
+            # API itself still rejects the pair (e.g. Indodax "Invalid
+            # pair."). Once that's actually happened for a symbol, skip
+            # re-offering it as a candidate for a while instead of letting
+            # the scanner keep re-selecting a BUY that's guaranteed to fail.
+            if symbol in blacklisted:
+                continue
+            pairs.append(PairRaw(symbol=symbol, base=base))
         return pairs
 
     def attach_tickers(self, pairs: list[PairRaw]) -> None:

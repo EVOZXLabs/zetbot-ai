@@ -36,6 +36,40 @@ TP1_SELL_PCT = 0.30
 TP2_SELL_PCT = 0.30
 TP3_SELL_PCT = 0.40
 
+_POSITIONS_PATH = "data/positions.json"
+
+
+def _purge_legacy_position(symbol: str, positions_path: str = _POSITIONS_PATH) -> None:
+    """Remove ``symbol`` from ``positions_path`` once and for all.
+
+    Called by ``ExecutionPipeline.reconcile_position`` the moment it hits
+    the quote-currency mismatch guard, so a stray legacy record (e.g. a
+    leftover ``BTC/USDT`` position from before the account was
+    reconfigured to a different quote currency) stops reappearing on
+    every reconcile call from every caller (pipeline cycle, monitor,
+    exit_gate). Best-effort — never raises, never touches any other file
+    (paper_state.json / paper_balance.json are left alone).
+    """
+    try:
+        if not os.path.exists(positions_path):
+            return
+        with open(positions_path) as f:
+            pos_data = json.load(f)
+        positions = pos_data.get("positions", [])
+        remaining = [p for p in positions if p.get("symbol", "") != symbol]
+        if len(remaining) == len(positions):
+            return  # already gone — another caller purged it first
+        pos_data["positions"] = remaining
+        pos_data["total_positions"] = len(remaining)
+        from scripts.paper_state_lock import atomic_write_json as _awj  # noqa: PLC0415
+        _awj(positions_path, pos_data, indent=2, default=str)
+        _log.warning(
+            "[LEGACY-DATA] purged %s from positions.json (mismatched "
+            "quote currency).", symbol,
+        )
+    except Exception as exc:
+        _log.debug(f"Legacy-position purge failed for {symbol} (non-fatal): {exc}")
+
 
 class ExecutionPipeline:
     """Unified execution pipeline used by BOTH paper and live modes.
@@ -51,10 +85,12 @@ class ExecutionPipeline:
         provider: ExecutionProvider,
         quote_currency: str = "USDT",
         notifier: Any = None,
+        positions_path: str = _POSITIONS_PATH,
     ) -> None:
         self._provider = provider
         self._quote = quote_currency
         self._notifier = notifier
+        self._positions_path = positions_path
 
     # ------------------------------------------------------------------
     #  Public API
@@ -199,17 +235,27 @@ class ExecutionPipeline:
         # legacy symbol like ``BTC/USDT`` on an Indodax/IDR account would
         # otherwise be closed on prices fetched for a different market
         # (or stale last-known prices), booking a bogus PnL in the wrong
-        # units. Log once and leave the position untouched — the operator
-        # can close it manually or correct the record.
+        # units.
+        #
+        # Every LIVE exit path (the pipeline's own reconcile loop, the
+        # monitor in main.py, and exit_gate.reconcile_exit) funnels
+        # through this one method, so this is also the single place that
+        # self-heals it: purge the stray record from data/positions.json
+        # once, instead of re-warning on every call from every caller
+        # forever. Best-effort — a purge failure still returns the
+        # position untouched (old behavior) so the guard above stays in
+        # effect regardless.
         if self._quote:
             _sym_quote = symbol.split("/")[1].upper() if "/" in symbol else ""
             if _sym_quote and _sym_quote != self._quote.upper():
                 _log.warning(
                     "Skipping TP/SL for %s: symbol quote %s != account "
-                    "quote %s (mismatched/legacy position)",
+                    "quote %s (mismatched/legacy position) — purging from "
+                    "positions.json",
                     symbol, _sym_quote, self._quote.upper(),
                 )
-                return position
+                _purge_legacy_position(symbol, self._positions_path)
+                return None
 
         entry = position.get("entry_price", 0)
         qty = position.get("quantity", 0)
