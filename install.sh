@@ -12,12 +12,15 @@
 #    2.  Updates system packages (pkg / apt-get / brew)
 #    3.  Installs required system packages:
 #            git, python, clang, rust, openssl, libffi   (Termux)
+#            + tur-repo, python-numpy, python-pandas     (Termux prebuilts)
 #    4.  Creates a virtualenv (.venv/)
 #    5.  Installs requirements.txt into the virtualenv
 #    6.  Creates .env from .env.example (never overwrites an existing .env)
 #    7.  Creates the required data folders (data/ logs/ backups/)
-#    8.  Runs a self-check and shows clear PASS/FAIL status
-#    9.  Shows what to do next
+#    8.  Creates an optional Termux:Widget one-tap start shortcut
+#        (~/.shortcuts/zetbot-start.sh — only on Termux at ~/zetbot-ai)
+#    9.  Runs a self-check and shows clear PASS/FAIL status
+#    10. Shows what to do next
 #
 #  Safe to run multiple times (idempotent): nothing is overwritten, existing
 #  .env / .venv / data are reused. No manual input is required. This script
@@ -299,7 +302,44 @@ setup_folders() {
 }
 
 # ===========================================================================
-#  Step 8 — Self-check (clear PASS/FAIL)
+#  Step 8 — Optional Termux:Widget shortcut (one-tap start from the home
+#  screen — only when running on Termux with the repo at ~/zetbot-ai)
+# ===========================================================================
+setup_widget() {
+    if ! is_termux; then
+        info "Skipping Termux:Widget shortcut (not on Termux)"
+        return 0
+    fi
+    if [[ "$HOME" != *"/com.termux"* ]]; then
+        info "Skipping Termux:Widget shortcut (HOME is not a Termux home)"
+        return 0
+    fi
+    if [[ "$SCRIPT_DIR" != "$HOME/zetbot-ai" ]]; then
+        info "Skipping Termux:Widget shortcut (repo not at ~/zetbot-ai)"
+        return 0
+    fi
+    local short_dir="$HOME/.shortcuts"
+    local short_file="$short_dir/zetbot-start.sh"
+    if [[ -f "$short_file" ]]; then
+        pass "Termux:Widget shortcut already present — kept ($short_file)"
+        return 0
+    fi
+    if ! mkdir -p "$short_dir"; then
+        fail "Could not create $short_dir"
+        return 1
+    fi
+    # A widget on the home screen (Termux:Widget app) taps this to start
+    # the bot without opening Termux first. Termux:Widget is optional and
+    # never installed automatically — see QUICKSTART.md.
+    printf '#!/usr/bin/env bash\ncd ~/zetbot-ai && bash run.sh\n' > "$short_file"
+    chmod 700 "$short_file"
+    pass "Termux:Widget shortcut created — install the Termux:Widget app,"
+    pass "  add a widget on the home screen, tap it to start the bot."
+    return 0
+}
+
+# ===========================================================================
+#  Step 9 — Self-check (clear PASS/FAIL)
 # ===========================================================================
 self_check() {
     local deps_ok=0
@@ -374,13 +414,13 @@ print_summary() {
 main() {
     print_banner
 
-    step 1 9 "Checking platform (Termux / Linux / macOS)"
+    step 1 10 "Checking platform (Termux / Linux / macOS)"
     if ! detect_platform; then
         print_summary
         exit 1
     fi
 
-    step 2 9 "Updating system packages"
+    step 2 10 "Updating system packages"
     if update_system; then
         pass "System packages updated"
     else
@@ -389,7 +429,7 @@ main() {
         exit 1
     fi
 
-    step 3 9 "Installing required system packages"
+    step 3 10 "Installing required system packages"
     if install_packages; then
         pass "Required system packages installed"
     else
@@ -398,28 +438,31 @@ main() {
         exit 1
     fi
 
-    step 4 9 "Creating virtual environment"
+    step 4 10 "Creating virtual environment"
     if ! setup_venv; then
         print_summary
         exit 1
     fi
 
-    step 5 9 "Installing Python dependencies"
+    step 5 10 "Installing Python dependencies"
     if ! install_requirements; then
         print_summary
         exit 1
     fi
 
-    step 6 9 "Creating .env (if needed)"
+    step 6 10 "Creating .env (if needed)"
     setup_env || true
 
-    step 7 9 "Creating data folders"
+    step 7 10 "Creating data folders"
     setup_folders
 
-    step 8 9 "Running self-check"
+    step 8 10 "Creating optional Termux:Widget shortcut"
+    setup_widget
+
+    step 9 10 "Running self-check"
     self_check || true
 
-    step 9 9 "Summary"
+    step 10 10 "Summary"
     print_summary
     exit $(( _FAIL > 0 ? 1 : 0 ))
 }

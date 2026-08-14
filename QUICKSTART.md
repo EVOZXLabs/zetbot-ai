@@ -11,10 +11,42 @@
 - Sisa ruang penyimpanan ± 2 GB
 - ± 10–25 menit (instalasi pertama butuh waktu karena Android "memasak"
   beberapa pustaka Python dari kode sumber — tunggu saja, jangan ditutup)
+- Untuk cara tercepat: aplikasi **curl** (biasanya sudah ada di Termux;
+  kalau belum, ketik `pkg install -y curl`)
 
 **Jaminan keamanan:** bawaan bot adalah **Paper Trading** (`PAPER_MODE=true`)
 — semua transaksi **simulasi**. Tidak ada uang asli yang terpakai selama kamu
 belum mengubah pengaturan itu secara sengaja.
+
+---
+
+## 0. Cara tercepat — 1 perintah (semua otomatis)
+
+Salin **satu baris** ini ke Termux dan Enter:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EVOZXLabs/zetbot-ai/main/quickstart.sh | bash
+```
+
+Yang terjadi otomatis (tidak perlu ketik apa pun lagi kecuali **1 pilihan**):
+
+1. Unduh `quickstart.sh` dari repo resmi → clone repo → jalankan `install.sh`
+   (paket sistem, Python, dependency, virtualenv, `.env` — semua sendiri).
+2. Karena `.env` baru, kamu ditanya **satu pertanyaan** dengan pilihan angka:
+   - `1) Indodax (IDR)` atau `2) Binance (USDT)`
+   - Ketik `1` atau `2` lalu Enter.
+3. Bot langsung jalan — **PAPER MODE** (uang simulasi, aman).
+
+> **Kenapa aman?** Perintah itu hanya mengunduh file `quickstart.sh` dari
+> GitHub resmi repo ini dan menjalankannya dengan bash. Isi script-nya
+> transparan dan bisa kamu baca sendiri di
+> `https://github.com/EVOZXLabs/zetbot-ai/blob/main/quickstart.sh` — script
+> itu hanya melakukan `git clone` + `bash install.sh` (persis jalur manual di
+> bawah ini), lalu memilih exchange. **Script ini tidak pernah meminta API
+> key dan tidak pernah mengaktifkan live trading.**
+
+> **Mau kontrol penuh / tidak suka cara curl|bash?** Ikuti langkah manual
+> mulai dari bagian 2 di bawah — hasil akhirnya sama saja.
 
 ---
 
@@ -61,24 +93,26 @@ Installer melakukan semuanya sendiri — **tanpa perlu input manual**:
 
 1. Deteksi Termux
 2. `pkg update` + `pkg upgrade` otomatis
-3. Install `git`, `python`, `clang`, `rust`, `openssl`, `libffi`
+3. Install `git`, `python`, `clang`, `rust`, `openssl`, `libffi` + `tur-repo`
+   (termasuk `python-numpy` dan `python-pandas` sebagai paket siap pakai)
 4. Buat virtualenv (`.venv/`)
 5. Install semua dependency dari `requirements.txt`
 6. Buat file `.env` dari `.env.example`
 7. Buat folder `data/`, `logs/`, `backups/`
-8. Self-check dengan status PASS/FAIL
+8. Buat pintasan optional Termux:Widget (satu tap di home screen)
+9. Self-check dengan status PASS/FAIL
 
 **Contoh akhir output:**
 
 ```
-[8/9] Running self-check
+[9/10] Running self-check
   PASS  Dependencies importable (ccxt, requests, dotenv, colorama)
   PASS  .env present
   PASS  Runtime folders present
   PASS  Health check passed
 
-[9/9] Summary
-  Installer summary: 12 passed  0 failed  0 warnings  (12 checks)
+[10/10] Summary
+  Installer summary: 13 passed  0 failed  0 warnings  (14 checks)
 
   INSTALLATION: PASS
 
@@ -97,6 +131,13 @@ Yang penting: di bagian paling akhir tertulis **`INSTALLATION: PASS`**.
 ---
 
 ## 4. Edit .env (atur exchange)
+
+> **Kalau kamu pakai cara tercepat (bagian 0), langkah ini otomatis** — kamu
+> hanya memilih `1) Indodax (IDR)` atau `2) Binance (USDT)` dan `EXCHANGE`,
+> `QUOTE_CURRENCY`, serta `ACCOUNT_BALANCE` diatur sendiri dengan benar dan
+> konsisten (misalnya Indodax → `IDR`, Binance → `USDT`). Langkah manual di
+> bawah tetap berlaku kalau mau mengubah dengan tangan atau memakai exchange
+> lain yang sudah didukung.
 
 `install.sh` sudah membuat file `.env` (format aman, tidak akan di-commit).
 Sekarang kita ubah sedikit pengaturannya:
@@ -165,6 +206,12 @@ pkg install -y tmux termux-api
 3. Jalankan lagi `bash run.sh` → sekarang bot + watchdog berjalan di tmux
    (latar belakang), dan bisa dilihat dengan `tmux attach -t zetbot-bot`
    (keluar dari tmux: tekan **Ctrl+B** lalu **D**).
+
+**Mode satu tap (opsional, Termux:Widget):** kalau sudah terpasang,
+`install.sh` membuat pintasan `~/.shortcuts/zetbot-start.sh`. Install aplikasi
+**Termux:Widget** dari F-Droid (`https://f-droid.org/packages/com.termux.termuxwidget/`),
+lalu tambahkan widget **"ZetBot Start"** di home screen — tap sekali untuk
+memulai bot tanpa membuka Termux dulu.
 
 ---
 
