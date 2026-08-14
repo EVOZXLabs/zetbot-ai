@@ -89,13 +89,19 @@ class PositionsCommand(BaseCommand):
             current = p.get("current_price")
             pnl_pct = p.get("pnl_pct")
 
+            # entry_price=None means the position could not be tied to a
+            # matching fill (legacy / manual / dust exchange balance) — it
+            # is NOT bot-managed, so it gets a distinguishing label instead
+            # of being silently dropped or mistaken for a real bot trade.
+            managed = entry is not None
             emoji = pnl_emoji(pnl_pct) if pnl_pct is not None else "⚪"
             pnl_str = f"{pnl_pct:+.2f}%" if pnl_pct is not None else "N/A"
-            entry_str = fmt_price(entry) if entry else "Unknown"
+            entry_str = fmt_price(entry) if managed else "Unknown"
             curr_str = fmt_price(current) if current else "Unknown"
+            badge = "" if managed else "  ·  _exchange balance — not bot-managed_"
 
             card = (
-                f"{emoji} *{symbol}*\n"
+                f"{emoji} *{symbol}*{badge}\n"
                 f"💰 Entry {entry_str} → 📍 {curr_str}\n"
                 f"📈 PnL {pnl_str}  ·  📦 {qty:.6f} {base}  ·  🏦 {p.get('exchange', '?')}"
             )

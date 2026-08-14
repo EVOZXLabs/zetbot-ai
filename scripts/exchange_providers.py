@@ -111,6 +111,60 @@ def exchange_call_with_retry(
     raise last_exc
 
 
+# ---------------------------------------------------------------------------
+#  Market-availability guards (maintenance / suspension)
+# ---------------------------------------------------------------------------
+
+# Error phrases that indicate the exchange will not accept orders for a
+# symbol right now because it is under maintenance / suspended. Matched
+# case-insensitively against order-rejection error text so such failures
+# are surfaced clearly instead of being retried pointlessly.
+_MAINTENANCE_PHRASES = (
+    "maintenance",
+    "suspended",
+    "not trading",
+    "under maintenance",
+    "temporarily unavailable",
+    "suspend trading",
+    "market not available",
+    "inactive market",
+)
+
+
+def is_market_tradeable(provider: Any, symbol: str) -> bool:
+    """Whether ``symbol`` is currently tradeable on ``provider``'s exchange.
+
+    Returns ``True`` unless the exchange explicitly reports the market as
+    inactive — e.g. Indodax marks pairs under maintenance with
+    ``active: False`` (from the API's ``is_maintenance`` flag). When the
+    market status cannot be determined (markets failed to load, the
+    exchange doesn't report activity), the order is allowed through and a
+    real rejection is surfaced clearly by the caller instead.
+    """
+    try:
+        markets = provider.load_markets()
+    except Exception:
+        return True
+    if not markets:
+        return True
+    market = markets.get(symbol)
+    if market is None:
+        return False
+    active = market.get("active")
+    if active is None:
+        return True
+    return bool(active)
+
+
+def looks_like_maintenance_error(text: str) -> bool:
+    """True when ``text`` looks like an order rejection due to market
+    maintenance / suspension rather than a transient network failure."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _MAINTENANCE_PHRASES)
+
+
 class ExchangeAuthError(Exception):
     """Raised when a live exchange call fails despite credentials being set.
 

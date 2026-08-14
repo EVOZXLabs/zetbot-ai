@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from scripts.exchange_manager import ExchangeManager
+from scripts.exchange_providers import is_market_tradeable
 from scripts.exit_gate import exit_guard
 from scripts.live_position_sync import require_entry_price
 
@@ -151,6 +152,11 @@ class ProtectionManager:
             raise ProtectionError(
                 f"Cannot create protection for {symbol}: not a valid market on "
                 f"{provider.name}.",
+            )
+        if not is_market_tradeable(provider, symbol):
+            raise ProtectionError(
+                f"Cannot create protection for {symbol}: market is under "
+                f"maintenance/suspended on {provider.name}.",
             )
 
         return symbol, quantity, entry_price

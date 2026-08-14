@@ -38,6 +38,7 @@ existing behavior.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from contextlib import contextmanager
@@ -46,6 +47,8 @@ from typing import Any, Callable, Optional
 from scripts.position_status import OPEN_STATUSES
 
 POSITIONS_PATH = "data/positions.json"
+
+_log = logging.getLogger("ZetBot")
 
 _locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
@@ -184,6 +187,19 @@ def reconcile_exit(
     with exit_guard(symbol):
         pos = load_position(symbol)
         if pos is None or pos.get("status") not in OPEN_STATUSES:
+            return pos
+        # Defense-in-depth: a position whose entry price is unknown (never
+        # reconstructed from exchange fill history — legacy/manual/dust
+        # balance) must NOT be acted on by any exit path. The same rule
+        # guards protective orders via ``require_entry_price()`` in
+        # ``ProtectionManager._guard``; a TP/SL decision here would have
+        # nothing real to base stop/target levels on.
+        if pos.get("entry_price") is None:
+            _log.warning(
+                "reconcile_exit: skipping %s — entry price unknown "
+                "(exchange balance, not bot-managed); no SL/TP exit.",
+                symbol,
+            )
             return pos
         if cancel_protection is not None and exit_triggered(pos, current_price):
             try:

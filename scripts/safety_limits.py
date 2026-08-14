@@ -214,26 +214,19 @@ class SafeGuard:
         return True, ""
 
     def _count_live_open_positions(self) -> int:
-        """Count open symbols in live_positions.json (exchange truth)."""
-        try:
-            with open(self._live_positions_path) as f:
-                live_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return 0
-        if isinstance(live_data, dict):
-            # {"SYMBOL": {...}, ...} — every key with a non-empty record.
-            symbols = [
-                s for s, p in live_data.items()
-                if s and isinstance(p, dict)
-            ]
-        else:
-            symbols = [
-                p.get("symbol", "") for p in live_data.get("positions", [])
-                if isinstance(p, dict)
-            ]
+        """Count bot-managed open symbols in live_positions.json (exchange truth).
+
+        Only positions with a known ``entry_price`` count toward
+        MAX_POSITIONS. Legacy / manual / dust balances reconstructed
+        without a matching fill history have ``entry_price=None`` and are
+        deliberately excluded — a few stray exchange balances must never
+        permanently block every new BUY.
+        """
+        from scripts.live_position_sync import bot_managed_live_positions  # noqa: PLC0415
         open_count = 0
-        for s in symbols:
-            if not s or s in self._planned_symbols:
+        for p in bot_managed_live_positions(self._live_positions_path):
+            symbol = p.get("symbol", "")
+            if not symbol or symbol in self._planned_symbols:
                 continue
             open_count += 1
         return open_count

@@ -719,6 +719,22 @@ def _live_armed() -> bool:
     return LiveExecutor.is_enabled()
 
 
+def _market_tradeable(exchange_manager: Any, symbol: str) -> bool:
+    """True when ``symbol`` is tradeable on the live exchange right now.
+
+    Delegates to ``scripts.exchange_providers.is_market_tradeable``.
+    Any failure to determine market status is treated as tradeable — a
+    real maintenance rejection is then surfaced clearly by the caller
+    instead of being retried blindly.
+    """
+    try:
+        provider = exchange_manager.get_provider()
+    except Exception:
+        return True
+    from scripts.exchange_providers import is_market_tradeable  # noqa: PLC0415
+    return is_market_tradeable(provider, symbol)
+
+
 class LiveExecutionProvider(ExecutionProvider):
     """Executes orders on a real exchange via CCXT.
 
@@ -823,6 +839,18 @@ class LiveExecutionProvider(ExecutionProvider):
         symbol = request.symbol
         amount = request.amount
 
+        # Maintenance / suspension guard: never attempt an order for a
+        # symbol the exchange reports as inactive (e.g. VRA under Indodax
+        # maintenance). A rejection attempt would only burn rate limits
+        # and log noise; the exchange would refuse it anyway.
+        if not _market_tradeable(self._exchange, symbol):
+            return OrderResult.rejected(
+                request,
+                f"{symbol} is under maintenance/suspended on "
+                f"{self.get_exchange_name()} — no order submitted.",
+                self.name,
+            )
+
         amount_p = self.amount_to_precision(symbol, amount)
         if amount_p <= 0:
             return OrderResult.rejected(request, f"Invalid amount {amount} after precision", self.name)
@@ -907,6 +935,17 @@ class LiveExecutionProvider(ExecutionProvider):
         t0 = time.time()
         symbol = request.symbol
         amount = request.amount
+
+        # Same maintenance / suspension guard as ``execute_buy`` — a SELL
+        # for a suspended symbol would be refused by the exchange anyway,
+        # so surface a clear rejection instead of a raw retried failure.
+        if not _market_tradeable(self._exchange, symbol):
+            return OrderResult.rejected(
+                request,
+                f"{symbol} is under maintenance/suspended on "
+                f"{self.get_exchange_name()} — no order submitted.",
+                self.name,
+            )
 
         amount_p = self.amount_to_precision(symbol, amount)
         if amount_p <= 0:

@@ -429,13 +429,8 @@ def _count_open_positions() -> int:
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    try:
-        with open(LIVE_POSITIONS_PATH) as f:
-            live_positions = json.load(f)
-        if isinstance(live_positions, dict):
-            count += len(live_positions)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    from scripts.live_position_sync import count_live_open_positions  # noqa: PLC0415
+    count += count_live_open_positions()
 
     return count
 

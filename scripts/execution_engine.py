@@ -492,6 +492,19 @@ class LiveExecutor:
 
         provider = exchange.get_provider()
 
+        # Maintenance / suspension guard — never submit an order for a
+        # symbol the exchange reports as inactive (e.g. Indodax marks
+        # pairs under maintenance ``active=False``). A rejection attempt
+        # would be refused by the exchange anyway; surface it clearly.
+        from scripts.exchange_providers import is_market_tradeable  # noqa: PLC0415
+        if not is_market_tradeable(provider, symbol):
+            return OrderResult.rejected(
+                request,
+                f"{symbol} is under maintenance/suspended on {self.name} — "
+                "no order submitted.",
+                self.name,
+            )
+
         price = request.price
         if price is None:
             ticker = exchange.get_ticker(symbol)

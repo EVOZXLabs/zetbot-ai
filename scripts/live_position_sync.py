@@ -218,6 +218,55 @@ def load_live_positions() -> dict[str, Any]:
         return {}
 
 
+def bot_managed_live_positions(path: Optional[str] = None) -> list[dict[str, Any]]:
+    """Live position records whose entry price is known (bot-managed).
+
+    A position reconstructed purely from the exchange balance — legacy /
+    manual / dust holdings with no matching fill history — comes back with
+    ``entry_price=None`` (see ``LivePositionSync._reconstruct_entry_price``)
+    and is NOT considered bot-managed. Those must never count toward
+    ``MAX_POSITIONS``-style gates, or a few IDR dust balances would
+    permanently block every new BUY.
+
+    Handles both cache shapes: ``{"SYMBOL": {...}, ...}`` (what the sync
+    actually writes) and ``{"positions": [...]}`` / a bare list (legacy).
+    ``path`` defaults to ``LIVE_POSITIONS_PATH`` and is resolved at call
+    time so a test can redirect it (e.g.
+    ``SafeGuard.set_live_positions_path``) without re-importing.
+    """
+    try:
+        with open(path or LIVE_POSITIONS_PATH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    if isinstance(data, dict):
+        records = data.get("positions")
+        if not isinstance(records, list):
+            records = []
+            for key, rec in data.items():
+                if not isinstance(rec, dict):
+                    continue
+                if not rec.get("symbol"):
+                    # Legacy record missing the symbol key — fall back to
+                    # the cache key so it is never silently dropped.
+                    rec = dict(rec)
+                    rec["symbol"] = key
+                records.append(rec)
+    elif isinstance(data, list):
+        records = data
+    else:
+        return []
+    return [
+        p for p in records
+        if isinstance(p, dict) and p.get("entry_price") is not None
+    ]
+
+
+def count_live_open_positions() -> int:
+    """Number of bot-managed live positions (see ``bot_managed_live_positions``)."""
+    return len(bot_managed_live_positions())
+
+
 def save_live_positions(positions_by_symbol: dict[str, Any]) -> None:
     try:
         from scripts.paper_state_lock import atomic_write_json as _awj

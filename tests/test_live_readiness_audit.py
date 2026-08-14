@@ -13,6 +13,7 @@ Covers:
   * /restart /reload /stoploss /takeprofit no longer placeholders
 """
 
+import json
 import os
 import sys
 from typing import Any
@@ -121,8 +122,10 @@ class TestSafeGuardLiveCount:
 
         live_path = str(tmp_path / "live_positions.json")
         with open(live_path, "w") as f:
-            f.write('{"BTC/USDT": {"symbol": "BTC/USDT", "quantity": 0.1},'
-                    ' "ETH/USDT": {"symbol": "ETH/USDT", "quantity": 1.0}}')
+            f.write('{"BTC/USDT": {"symbol": "BTC/USDT", "quantity": 0.1,'
+                    ' "entry_price": 50000.0},'
+                    ' "ETH/USDT": {"symbol": "ETH/USDT", "quantity": 1.0,'
+                    ' "entry_price": 3000.0}}')
 
         sg = SafeGuard(max_open_positions=1, live_mode=True)
         sg.set_live_positions_path(live_path)
@@ -130,6 +133,73 @@ class TestSafeGuardLiveCount:
         ok, reason = sg._check_max_open_positions()
         assert not ok
         assert "Max open positions reached: 2/1" in reason
+
+    def test_entry_unknown_positions_do_not_count(self, tmp_path: Any) -> None:
+        """Regression: a stack of entry_price=None dust/exchange balances
+        (manual / legacy / no matching fill history) must NOT consume the
+        MAX_POSITIONS budget — the LIVE bot must still be able to BUY."""
+        from scripts.safety_limits import SafeGuard
+
+        live_path = str(tmp_path / "live_positions.json")
+        with open(live_path, "w") as f:
+            f.write(json.dumps({
+                "VRA/IDR": {"symbol": "VRA/IDR", "quantity": 999.0,
+                            "entry_price": None},
+                "RFC/IDR": {"symbol": "RFC/IDR", "quantity": 500.0,
+                            "entry_price": None},
+                "PLPA/IDR": {"symbol": "PLPA/IDR", "quantity": 100.0,
+                             "entry_price": None},
+            }))
+
+        sg = SafeGuard(max_open_positions=3, live_mode=True)
+        sg.set_live_positions_path(live_path)
+
+        ok, reason = sg._check_max_open_positions()
+        assert ok, reason
+
+    def test_valid_entry_positions_still_block_at_limit(self, tmp_path: Any) -> None:
+        """The fix must not loosen the guard: valid bot-managed positions
+        still consume the MAX_POSITIONS budget."""
+        from scripts.safety_limits import SafeGuard
+
+        live_path = str(tmp_path / "live_positions.json")
+        with open(live_path, "w") as f:
+            f.write(json.dumps({
+                "BTC/USDT": {"symbol": "BTC/USDT", "quantity": 0.1,
+                             "entry_price": 50000.0},
+                "ETH/USDT": {"symbol": "ETH/USDT", "quantity": 1.0,
+                             "entry_price": 3000.0},
+                "SOL/USDT": {"symbol": "SOL/USDT", "quantity": 5.0,
+                             "entry_price": 150.0},
+                "VRA/IDR": {"symbol": "VRA/IDR", "quantity": 999.0,
+                            "entry_price": None},
+            }))
+
+        sg = SafeGuard(max_open_positions=3, live_mode=True)
+        sg.set_live_positions_path(live_path)
+
+        ok, reason = sg._check_max_open_positions()
+        assert not ok
+        assert "3/3" in reason
+
+    def test_entry_unknown_excluded_from_planned_symbols_path(self, tmp_path: Any) -> None:
+        """List-shaped live_positions.json is parsed correctly too."""
+        from scripts.safety_limits import SafeGuard
+
+        live_path = str(tmp_path / "live_positions.json")
+        with open(live_path, "w") as f:
+            f.write(json.dumps({"positions": [
+                {"symbol": "BTC/USDT", "quantity": 0.1,
+                 "entry_price": 50000.0},
+                {"symbol": "VRA/IDR", "quantity": 999.0,
+                 "entry_price": None},
+            ]}))
+
+        sg = SafeGuard(max_open_positions=3, live_mode=True)
+        sg.set_live_positions_path(live_path)
+
+        ok, reason = sg._check_max_open_positions()
+        assert ok, reason
 
     def test_live_mode_ignores_paper_positions_json(self, tmp_path: Any) -> None:
         """In LIVE mode a busy paper ledger must not block new entries."""

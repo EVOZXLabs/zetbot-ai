@@ -763,6 +763,36 @@ class OrderManager:
                 return result
 
             last_error = result.error
+            # A maintenance / suspension rejection is NOT transient — the
+            # exchange refuses the symbol until it reopens, so retrying
+            # (up to RETRY_MAX times, sleeping between attempts) is wasted
+            # rate-limit budget and noise. Surface it clearly and stop.
+            from scripts.exchange_providers import (  # noqa: PLC0415
+                looks_like_maintenance_error,
+            )
+            if looks_like_maintenance_error(last_error):
+                if self._safeguard is not None:
+                    self._safeguard.record_exchange_failure()
+                return OrderResult(
+                    order_id=_generate_id("fail_"),
+                    trace_id=request.trace_id,
+                    execution_id=_generate_id("exe_"),
+                    status="FAILED",
+                    symbol=request.symbol,
+                    side=request.side,
+                    type=request.type,
+                    amount=request.amount,
+                    error=(
+                        f"Order rejected — {request.symbol} is under "
+                        f"maintenance/suspended on the exchange "
+                        f"({last_error}). Not retrying."
+                    ),
+                    retries=attempt + 1,
+                    executor="order_manager",
+                    exchange=self._exchange.name,
+                    mode=self._engine.mode,
+                    timestamp=_now(),
+                )
             if attempt < max_retries - 1:
                 time.sleep(RETRY_DELAY_SEC * (attempt + 1))
 
