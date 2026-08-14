@@ -104,20 +104,21 @@ class TestInstallSh:
 
     def test_installs_required_system_packages(self) -> None:
         text = _read("install.sh")
-        assert (
-            "pkg install -y git python clang rust openssl libffi "
-            "python-numpy python-pandas" in text
-        )
+        assert "pkg install -y git python clang rust openssl libffi" in text
+        assert "pkg install -y tur-repo" in text
+        assert "pkg install -y python-numpy python-pandas" in text
 
     def test_installs_numpy_pandas_via_pkg_not_pip_build(self) -> None:
         # Regression: on Termux, pip building numpy/pandas from source
         # (because no wheel matches the phone's Python/libc) fails —
         # e.g. it first tries to compile cmake from source, which itself
-        # fails. python-numpy/python-pandas must come from pkg so pip
-        # never has to build them.
+        # fails. python-numpy comes from Termux's main repo; pandas has
+        # no prebuilt package there, only via TUR (Termux User
+        # Repository), so tur-repo must be subscribed first.
         text = _read("install.sh")
         assert "python-numpy" in text
         assert "python-pandas" in text
+        assert "tur-repo" in text
 
     def test_venv_uses_system_site_packages_on_termux(self) -> None:
         # So the pkg-installed numpy/pandas above are visible inside the
@@ -317,10 +318,13 @@ class TestInstallBehavior:
         pkg_calls = [l for l in log.read_text().splitlines() if l.startswith("pkg ")]
         assert "pkg update -y" in pkg_calls
         assert "pkg upgrade -y" in pkg_calls
-        assert any(
-            "pkg install -y git python clang rust openssl libffi "
-            "python-numpy python-pandas" == c
-            for c in pkg_calls
+        assert "pkg install -y git python clang rust openssl libffi" in pkg_calls
+        assert "pkg install -y tur-repo" in pkg_calls
+        assert "pkg install -y python-numpy python-pandas" in pkg_calls
+        # tur-repo (which provides pandas) must be subscribed BEFORE
+        # trying to install python-pandas from it.
+        assert pkg_calls.index("pkg install -y tur-repo") < pkg_calls.index(
+            "pkg install -y python-numpy python-pandas"
         )
 
         venv_calls = [l for l in log.read_text().splitlines() if "-m venv" in l]
