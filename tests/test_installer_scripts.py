@@ -104,11 +104,33 @@ class TestInstallSh:
 
     def test_installs_required_system_packages(self) -> None:
         text = _read("install.sh")
-        assert "pkg install -y git python clang rust openssl libffi" in text
+        assert (
+            "pkg install -y git python clang rust openssl libffi "
+            "python-numpy python-pandas" in text
+        )
+
+    def test_installs_numpy_pandas_via_pkg_not_pip_build(self) -> None:
+        # Regression: on Termux, pip building numpy/pandas from source
+        # (because no wheel matches the phone's Python/libc) fails —
+        # e.g. it first tries to compile cmake from source, which itself
+        # fails. python-numpy/python-pandas must come from pkg so pip
+        # never has to build them.
+        text = _read("install.sh")
+        assert "python-numpy" in text
+        assert "python-pandas" in text
+
+    def test_venv_uses_system_site_packages_on_termux(self) -> None:
+        # So the pkg-installed numpy/pandas above are visible inside the
+        # venv, and pip install -r requirements.txt doesn't try to
+        # rebuild them in isolation.
+        text = _read("install.sh")
+        assert "--system-site-packages" in text
+        assert 'PKG_MGR" == "pkg"' in text
 
     def test_creates_virtualenv(self) -> None:
         text = _read("install.sh")
-        assert "-m venv .venv" in text
+        assert "-m venv" in text
+        assert ".venv" in text
         assert "[ ! -d .venv ]" in text or "[[ -d .venv ]]" in text
 
     def test_installs_requirements(self) -> None:
@@ -295,7 +317,14 @@ class TestInstallBehavior:
         pkg_calls = [l for l in log.read_text().splitlines() if l.startswith("pkg ")]
         assert "pkg update -y" in pkg_calls
         assert "pkg upgrade -y" in pkg_calls
-        assert any("pkg install -y git python clang rust openssl libffi" == c for c in pkg_calls)
+        assert any(
+            "pkg install -y git python clang rust openssl libffi "
+            "python-numpy python-pandas" == c
+            for c in pkg_calls
+        )
+
+        venv_calls = [l for l in log.read_text().splitlines() if "-m venv" in l]
+        assert any("--system-site-packages" in c for c in venv_calls), venv_calls
 
         py_calls = log.read_text()
         assert "-m pip install -r requirements.txt" in py_calls
