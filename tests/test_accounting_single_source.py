@@ -188,7 +188,13 @@ class TestClosedTradeConsistency:
         # UTC when WIB has already rolled to the next day.
         from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc)
-        base = now - timedelta(hours=3)
+        # Anchor to the most recent 00:00 WIB instead of ``now - 3h``: the
+        # naive offset breaks between 17:00-20:00 UTC (WIB already on the
+        # next calendar day, but now-3h still lands on the previous one),
+        # which makes the "same closed count" assertion flaky by run hour.
+        now_wib = now + timedelta(hours=7)
+        wib_midnight = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+        base = wib_midnight.astimezone(timezone.utc) + timedelta(hours=1)
         trades = [
             {"symbol": "XAUT/IDR", "net_pnl": 120.0, "entry_price": 77023101,
              "exit_price": 78000000, "quantity": 0.0012,
