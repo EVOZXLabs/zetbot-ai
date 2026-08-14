@@ -43,6 +43,14 @@ class SellCommand(BaseCommand):
                 (p for p in positions if p.get("symbol") == symbol), None,
             )
         if position is None:
+            from scripts.live_position_sync import parse_exclude_symbols  # noqa: PLC0415
+            exclude = getattr(ctx.services.config, "exclude_symbols", "") or ""
+            if symbol.split("/")[0].upper() in parse_exclude_symbols(exclude):
+                return (
+                    f"\u274c {symbol} is on EXCLUDE_SYMBOLS — the bot won't "
+                    "touch it. Sell it directly on the exchange, or remove "
+                    "it from EXCLUDE_SYMBOLS if you want the bot to manage it."
+                )
             return f"\u274c No open position for {symbol}."
 
         quantity = position.get("remaining_qty", position.get("quantity", 0))
@@ -116,9 +124,10 @@ class SellCommand(BaseCommand):
             from scripts.exchange_providers import ExchangeAuthError  # noqa: PLC0415
 
             quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+            exclude = getattr(ctx.services.config, "exclude_symbols", "") or ""
             # Fresh sync first (single symbol), cached record as fallback.
             try:
-                syncer = LivePositionSync(ctx.services.exchange, quote_currency=quote)
+                syncer = LivePositionSync(ctx.services.exchange, quote_currency=quote, exclude_symbols=exclude)
                 fresh = syncer.sync_positions([symbol])
                 for p in fresh:
                     if p.get("symbol") == symbol:

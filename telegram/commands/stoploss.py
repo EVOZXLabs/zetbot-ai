@@ -10,8 +10,9 @@ def _live_position(ctx, symbol: str) -> dict | None:
         )
 
         quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+        exclude = getattr(ctx.services.config, "exclude_symbols", "") or ""
         try:
-            syncer = LivePositionSync(ctx.services.exchange, quote_currency=quote)
+            syncer = LivePositionSync(ctx.services.exchange, quote_currency=quote, exclude_symbols=exclude)
             for p in syncer.sync_positions([symbol]):
                 if p.get("symbol") == symbol:
                     return p

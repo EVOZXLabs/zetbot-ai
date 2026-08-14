@@ -46,17 +46,26 @@ class PositionsCommand(BaseCommand):
         """LIVE positions — reconstructed straight from the exchange."""
         from scripts.live_position_sync import (  # noqa: PLC0415
             LivePositionSync,
+            load_live_positions,
             merge_live_positions,
         )
         from scripts.exchange_providers import ExchangeAuthError  # noqa: PLC0415
 
         exchange = ctx.services.exchange
         quote = getattr(ctx.services.config, "quote_currency", "USDT") or "USDT"
+        exclude = getattr(ctx.services.config, "exclude_symbols", "") or ""
 
         try:
-            syncer = LivePositionSync(exchange, quote_currency=quote)
+            syncer = LivePositionSync(exchange, quote_currency=quote, exclude_symbols=exclude)
             fresh = syncer.sync_all_positions()
-            merge_live_positions(fresh, synced_symbols=[p["symbol"] for p in fresh])
+            # Union with whatever was previously cached (not just the fresh
+            # symbols) so a symbol that's now on EXCLUDE_SYMBOLS — and
+            # therefore absent from ``fresh`` — is actually purged from the
+            # on-disk cache instead of lingering there as stale bot-managed.
+            previously_cached = set(load_live_positions().keys())
+            fresh_symbols = {p["symbol"] for p in fresh}
+            synced_symbols = list(previously_cached | fresh_symbols)
+            merge_live_positions(fresh, synced_symbols=synced_symbols)
             positions = fresh
             sync_error = None
         except ExchangeAuthError as exc:
@@ -106,6 +115,11 @@ class PositionsCommand(BaseCommand):
                 f"📈 PnL {pnl_str}  ·  📦 {qty:.6f} {base}  ·  🏦 {p.get('exchange', '?')}"
             )
             cards.append(card)
+
+        from scripts.live_position_sync import parse_exclude_symbols  # noqa: PLC0415
+        excluded = sorted(parse_exclude_symbols(exclude))
+        if excluded:
+            cards.append(f"🚫 Excluded from bot management: {', '.join(excluded)}")
 
         return build_message(*cards)
 
