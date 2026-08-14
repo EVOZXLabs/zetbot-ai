@@ -33,6 +33,25 @@ DUST_THRESHOLD = 1e-8
 TRADE_HISTORY_LIMIT = 200
 
 
+def parse_exclude_symbols(raw: Optional[str]) -> set[str]:
+    """Parse ``EXCLUDE_SYMBOLS`` (comma-separated base currencies, e.g.
+    ``"RFC,JELLYJELLY"``) into a normalized set of uppercase base symbols.
+
+    Accepts either the bare base currency (``"RFC"``) or a full pair
+    (``"RFC/IDR"``) — only the base is kept, since the exclusion is
+    about the *coin*, not one specific quote pairing of it.
+    """
+    if not raw:
+        return set()
+    out: set[str] = set()
+    for chunk in raw.split(","):
+        sym = chunk.strip().upper()
+        if not sym:
+            continue
+        out.add(sym.split("/")[0])
+    return out
+
+
 class MissingEntryPriceError(Exception):
     """Raised by ``require_entry_price()`` when a position has no known
     entry price. Protective orders (SL/TP / OCO) MUST NOT be submitted
@@ -68,9 +87,20 @@ def _now() -> str:
 class LivePositionSync:
     """Rebuilds live spot positions directly from the exchange."""
 
-    def __init__(self, exchange: ExchangeManager, quote_currency: str = "USDT") -> None:
+    def __init__(
+        self,
+        exchange: ExchangeManager,
+        quote_currency: str = "USDT",
+        exclude_symbols: Optional[set[str] | list[str] | str] = None,
+    ) -> None:
         self._exchange = exchange
         self._quote = (quote_currency or "USDT").upper()
+        if isinstance(exclude_symbols, str):
+            self._exclude = parse_exclude_symbols(exclude_symbols)
+        elif exclude_symbols:
+            self._exclude = {s.split("/")[0].strip().upper() for s in exclude_symbols if s}
+        else:
+            self._exclude = set()
 
     @staticmethod
     def _extract(balance: dict[str, Any], currency: str, field: str) -> Optional[float]:
@@ -132,7 +162,15 @@ class LivePositionSync:
 
     def sync_positions(self, symbols: list[str]) -> list[dict[str, Any]]:
         """Return the CURRENT live position for each symbol (skips any
-        with no meaningful — i.e. above-dust — balance)."""
+        with no meaningful — i.e. above-dust — balance).
+
+        Symbols whose base currency is in ``exclude_symbols`` are skipped
+        entirely — the bot will not surface a position for them, will not
+        reconstruct an entry price for them, and will not auto-manage or
+        auto-sell them. This is a hard "hands off" list, so it applies
+        here regardless of which caller (auto-discovery, /positions,
+        TP/SL reconciliation, /buy, /sell) invoked the sync.
+        """
         provider = self._exchange.get_provider()
         balance = provider.fetch_balance()  # raises ExchangeAuthError w/ creds set
         if not balance:
@@ -141,6 +179,8 @@ class LivePositionSync:
         results: list[dict[str, Any]] = []
         for symbol in symbols:
             base = symbol.split("/")[0]
+            if base.upper() in self._exclude:
+                continue
             free = self._extract(balance, base, "free")
             total = self._extract(balance, base, "total")
             qty = total if total is not None else free
@@ -195,6 +235,7 @@ class LivePositionSync:
         total = balance.get("total") if isinstance(balance.get("total"), dict) else {}
         currencies = set(free.keys()) | set(total.keys())
         currencies.discard(self._quote)
+        currencies = {c for c in currencies if c.upper() not in self._exclude}
 
         markets = provider.load_markets()
         candidates = [f"{c}/{self._quote}" for c in sorted(currencies)]

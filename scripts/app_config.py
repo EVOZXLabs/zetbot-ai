@@ -43,6 +43,15 @@ class AppConfig:
     api_secret: str = ""
     quote_currency: str = "USDT"
 
+    # Comma-separated base symbols (e.g. "RFC,JELLYJELLY") that the bot
+    # must never surface as a live position and must never auto-manage
+    # or auto-sell. Spot exchanges (e.g. Indodax) don't distinguish
+    # manual-trade balances from bot-driven ones — everything is just
+    # "wallet balance" — so this is the only way to tell the bot
+    # "hands off this coin, it's mine, not yours". See
+    # scripts/live_position_sync.py for where this is enforced.
+    exclude_symbols: str = ""
+
     # Live protective orders (SL/TP) — off by default; a live BUY fill
     # will NOT get automatic protection orders unless explicitly enabled.
     auto_protect: bool = False
@@ -159,6 +168,7 @@ def load_config() -> AppConfig:
         api_key=os.getenv("API_KEY", ""),
         api_secret=os.getenv("API_SECRET", ""),
         quote_currency=os.getenv("QUOTE_CURRENCY", "USDT").upper(),
+        exclude_symbols=os.getenv("EXCLUDE_SYMBOLS", ""),
         auto_protect=os.getenv("AUTO_PROTECT", "false").lower() == "true",
         default_stop_pct=float(os.getenv("DEFAULT_STOP_PCT", "3.0")),
         default_take_profit_pct=float(os.getenv("DEFAULT_TAKE_PROFIT_PCT", "6.0")),
