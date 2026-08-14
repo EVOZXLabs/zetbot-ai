@@ -341,13 +341,14 @@ class OrderManager:
         side = (request.side or "").upper()
         symbol = request.symbol
         quote = getattr(self._config, "quote_currency", "USDT")
+        exclude = getattr(self._config, "exclude_symbols", "") or ""
         pm = ProtectionManager(self._exchange, self._config)
 
         if side == "BUY":
             if not getattr(self._config, "auto_protect", False):
                 return
             try:
-                syncer = LivePositionSync(self._exchange, quote_currency=quote)
+                syncer = LivePositionSync(self._exchange, quote_currency=quote, exclude_symbols=exclude)
                 positions = syncer.sync_positions([symbol])
                 position = next((p for p in positions if p["symbol"] == symbol), None)
                 if position is None:
@@ -373,7 +374,7 @@ class OrderManager:
 
         elif side == "SELL":
             try:
-                syncer = LivePositionSync(self._exchange, quote_currency=quote)
+                syncer = LivePositionSync(self._exchange, quote_currency=quote, exclude_symbols=exclude)
                 remaining = syncer.sync_positions([symbol])
                 still_held = any(
                     p["symbol"] == symbol and (p.get("quantity") or 0) > 1e-8
@@ -419,7 +420,8 @@ class OrderManager:
             from scripts.protection_manager import ProtectionManager  # noqa: PLC0415
             from scripts.live_position_sync import LivePositionSync  # noqa: PLC0415
             quote = getattr(self._config, "quote_currency", "USDT")
-            syncer = LivePositionSync(self._exchange, quote_currency=quote)
+            exclude = getattr(self._config, "exclude_symbols", "") or ""
+            syncer = LivePositionSync(self._exchange, quote_currency=quote, exclude_symbols=exclude)
             positions = syncer.sync_all_positions()
             return ProtectionManager(self._exchange, self._config).find_unprotected_positions(
                 positions,
@@ -636,6 +638,7 @@ class OrderManager:
             syncer = LivePositionSync(
                 self._exchange,
                 quote_currency=getattr(self._config, "quote_currency", "USDT"),
+                exclude_symbols=getattr(self._config, "exclude_symbols", "") or "",
             )
             fresh = syncer.sync_positions([symbol])
             merge_live_positions(fresh, synced_symbols=[symbol])

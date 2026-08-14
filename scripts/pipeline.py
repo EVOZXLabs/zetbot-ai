@@ -280,7 +280,8 @@ class Pipeline:
                 merge_live_positions,
             )
 
-            syncer = LivePositionSync(exchange, quote_currency=quote)
+            exclude = getattr(self.config, "exclude_symbols", "") or ""
+            syncer = LivePositionSync(exchange, quote_currency=quote, exclude_symbols=exclude)
             fresh = syncer.sync_all_positions()
 
             # Union of what's cached now + what came back fresh — so a
