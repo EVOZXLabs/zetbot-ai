@@ -160,7 +160,7 @@ class ExecutionPipeline:
             elif result.status == "REJECTED":
                 emit_event(PipelineEvent("ORDER_REJECTED", symbol, reason=result.error))
             else:
-                emit_event(PipelineEvent("ORDER_SUBMITTED", symbol, status=result.status))
+                emit_event(PipelineEvent("ORDER_SUBMITTED", symbol, status=result.status, error=result.error))
 
             # LIVE mode: snapshot the ACTUAL buy fill for the trade-history
             # ledger (best-effort, never breaks trading).

@@ -351,6 +351,16 @@ class BaseProvider:
         """
         return {"clientOrderId": client_order_id}
 
+    def market_order_params(self) -> dict[str, Any]:
+        """Extra ``params`` every MARKET order must carry on this exchange.
+
+        Returns ``{}`` by default — most exchanges infer the order type
+        from ccxt's ``type="market"`` argument. Exchanges that need an
+        explicit type marker on the wire override this (see
+        ``IndodaxProvider``).
+        """
+        return {}
+
     def market_buy_requires_price(self) -> bool:
         """True when the exchange API requires a ``price`` argument to
         submit a MARKET BUY order.
@@ -605,6 +615,17 @@ class IndodaxProvider(BaseProvider):
         # unsupported param risks the order being rejected server-side —
         # return no params rather than leak an unknown field in.
         return {}
+
+    def market_order_params(self) -> dict[str, Any]:
+        # Indodax's /trade endpoint defaults ``order_type`` to ``limit``
+        # when the field is absent (API change 10 Sep 2022). A market
+        # order sent without it is therefore treated as a LIMIT order —
+        # and a limit buy sized by quote (``idr``) amount is rejected
+        # server-side ("Request will be rejected if you send BUY order
+        # request with both idr set & order_type set to LIMIT"), which
+        # surfaced as an opaque FAILED on every live BUY. Declare the
+        # market type explicitly on the wire.
+        return {"order_type": "market"}
 
     def market_buy_requires_price(self) -> bool:
         # Indodax's API sizes a market BUY by the quote (IDR) amount; ccxt

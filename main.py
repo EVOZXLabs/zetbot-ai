@@ -1465,7 +1465,7 @@ def main() -> None:
     #  Health Monitor — background thread
     # ------------------------------------------------------------------
 
-    health = HealthMonitor(logger, config, interval=60.0, shutdown_event=shutdown)
+    health = HealthMonitor(logger, config, interval=60.0, shutdown_event=shutdown, wallet=container.wallet)
     health.start()
     container.inject_health(health)
     logger.info("Health Monitor started (every 60s)")

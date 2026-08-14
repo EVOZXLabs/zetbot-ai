@@ -52,11 +52,13 @@ class HealthMonitor:
         config: AppConfig,
         interval: float = 60.0,
         shutdown_event: threading.Event | None = None,
+        wallet: Any = None,
     ) -> None:
         self._logger = logger
         self._config = config
         self._interval = interval
         self._shutdown_event = shutdown_event
+        self._wallet = wallet
         self._start_time: float = time.time()
         self._running: bool = False
         self._thread: threading.Thread | None = None
@@ -125,7 +127,9 @@ class HealthMonitor:
         # matched nothing in the actual account or in /wallet.
         try:
             from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
-            snap = MetricsManager(self._config.data_dir).account()
+            snap = MetricsManager(
+                self._config.data_dir, wallet=self._wallet,
+            ).account()
             net_pnl = round(snap.net_pnl, 2)
             balance = round(snap.balance, 2)
             equity = round(snap.equity, 2)

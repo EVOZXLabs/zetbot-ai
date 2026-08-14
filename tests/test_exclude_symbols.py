@@ -29,8 +29,15 @@ import types
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # scripts.exchange_providers imports ccxt at module load time; stub it so
-# these tests don't require the real dependency to be installed.
-if "ccxt" not in sys.modules:
+# these tests still run where ccxt isn't installed. IMPORTANT: only stub
+# when the real package is truly unavailable — installing a bare module
+# while ccxt is importable poisons ``sys.modules`` for every test module
+# imported later (ccxt gets shadowed by the empty stub, so exchange calls
+# like ``getattr(ccxt, "indodax")`` return None and balance/price lookups
+# fail with 0 balance).
+try:
+    import ccxt  # noqa: F401
+except ImportError:  # pragma: no cover - depends on environment
     sys.modules["ccxt"] = types.ModuleType("ccxt")
 
 from scripts.live_position_sync import (  # noqa: E402

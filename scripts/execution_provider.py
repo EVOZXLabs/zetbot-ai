@@ -16,6 +16,7 @@ code path. Only the bottom-level order submission differs.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import time
@@ -27,6 +28,9 @@ from typing import Any, Optional
 
 from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
 from scripts.paper_state_lock import paper_state_writes
+
+
+_log = logging.getLogger("zetbot.execution_provider")
 
 
 # ======================================================================
@@ -882,7 +886,8 @@ class LiveExecutionProvider(ExecutionProvider):
             # friends ignore price for market orders (passing it there
             # would silently convert the order to a quoteOrderQty spend).
             price_p = price if provider.market_buy_requires_price() else None
-            id_params = provider.client_order_id_params(request.client_order_id)
+            id_params = dict(provider.client_order_id_params(request.client_order_id))
+            id_params.update(getattr(provider, "market_order_params", lambda: {})())
             ccxt_order = ex.create_order(
                 symbol=symbol,
                 type="market",
@@ -921,6 +926,7 @@ class LiveExecutionProvider(ExecutionProvider):
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as exc:
+            _log.error("Live BUY failed for %s: %s", symbol, exc)
             return OrderResult.failed(request, f"Live BUY error: {exc}", self.name)
 
     def execute_sell(self, request: OrderRequest) -> OrderResult:
@@ -994,7 +1000,8 @@ class LiveExecutionProvider(ExecutionProvider):
             provider = self._exchange.get_provider()
             ex = provider._get_exchange()
             price_p = None
-            id_params = provider.client_order_id_params(request.client_order_id)
+            id_params = dict(provider.client_order_id_params(request.client_order_id))
+            id_params.update(getattr(provider, "market_order_params", lambda: {})())
             ccxt_order = ex.create_order(
                 symbol=symbol,
                 type="market",
@@ -1033,6 +1040,7 @@ class LiveExecutionProvider(ExecutionProvider):
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as exc:
+            _log.error("Live SELL failed for %s: %s", symbol, exc)
             return OrderResult.failed(request, f"Live SELL error: {exc}", self.name)
 
 

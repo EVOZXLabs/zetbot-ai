@@ -203,6 +203,17 @@ class TestIndodaxCapabilities:
     def test_indodax_sends_no_client_order_id_param(self) -> None:
         assert IndodaxProvider().client_order_id_params("abc") == {}
 
+    def test_indodax_market_orders_declare_order_type(self) -> None:
+        # Indodax's /trade endpoint defaults order_type to "limit" when
+        # absent (API change 10 Sep 2022), so a market order sent without
+        # it is treated as a limit buy sized by idr — which the server
+        # rejects ("both idr set & order_type LIMIT"). The provider must
+        # always tag market orders explicitly.
+        assert IndodaxProvider().market_order_params() == {"order_type": "market"}
+
+    def test_binance_market_orders_need_no_extra_params(self) -> None:
+        assert BinanceProvider().market_order_params() == {}
+
     def test_binance_sends_client_order_id_param(self) -> None:
         assert BinanceProvider().client_order_id_params("abc") == {"newClientOrderId": "abc"}
 
@@ -282,7 +293,7 @@ class TestLiveIndodaxExecution:
         assert order["type"] == "market"
         assert order["side"] == "buy"
         assert order["price"] == pytest.approx(245.0)
-        assert order["params"] == {}
+        assert order["params"] == {"order_type": "market"}
 
     def test_live_buy_without_price_resolves_from_ticker(self, _live_env, monkeypatch) -> None:
         recording = _RecordingIndodax()
