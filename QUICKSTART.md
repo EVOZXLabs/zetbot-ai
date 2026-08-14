@@ -254,7 +254,8 @@ cp .uninstall-backup-*/ .env   # ikuti petunjuk yang muncul di layar
 | `git: command not found` | Jalankan `pkg install -y git` |
 | Instalasi lama (10–25 menit) | Normal — jangan tutup Termux, pastikan internet stabil |
 | `INSTALLATION: FAIL` | Jalankan ulang `bash install.sh` (aman diulang) |
-| `Failed building wheel for cmake` / gagal install numpy atau pandas | Jalankan `pkg install -y python-numpy python-pandas` lalu ulangi `bash install.sh`. Jika masih gagal, hapus dulu `.venv` (`rm -rf .venv`) baru jalankan `bash install.sh` lagi supaya venv baru dibuat setelah numpy/pandas terpasang |
+| `Failed building wheel for cmake` / gagal install numpy atau pandas | Jalankan `pkg install -y tur-repo && pkg install -y python-numpy python-pandas` lalu ulangi `bash install.sh`. Jika masih gagal, hapus dulu `.venv` (`rm -rf .venv`) baru jalankan `bash install.sh` lagi supaya venv baru dibuat setelah numpy/pandas terpasang |
+| `Unable to locate package python-pandas` | Jalankan `pkg install -y tur-repo` dulu (pandas cuma tersedia lewat repo komunitas TUR, bukan repo utama Termux), baru ulangi `pkg install -y python-numpy python-pandas` |
 | Bot berhenti tiba-tiba tanpa error | Android mematikan Termux — whitelist baterai Termux (lihat `OPERATIONS.md`) |
 | Exchange menolak koneksi (rate limit) | Tunggu beberapa menit lalu `bash run.sh` lagi |
 

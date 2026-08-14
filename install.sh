@@ -166,21 +166,24 @@ install_packages() {
     case "$PKG_MGR" in
         pkg)
             # Termux package names — matches INSTALL.md / spec exactly.
-            #
-            # python-numpy / python-pandas are installed here (as prebuilt
-            # Termux binaries) rather than left to pip. On newer Termux
-            # Python builds, PyPI has no manylinux/musllinux wheel that's
-            # compatible with Android's bionic libc, so `pip install
-            # numpy/pandas` falls back to compiling from source — which
-            # first needs to build `cmake` itself from source (requires
-            # ninja, a C++ toolchain, and several minutes of CPU on a
-            # phone), and frequently fails outright. Termux's own
-            # python-numpy/python-pandas packages are pre-built for this
-            # exact environment, so installing them via pkg avoids that
-            # whole failure mode. setup_venv() below makes sure the venv
-            # can see them (--system-site-packages).
-            info "Installing: git python clang rust openssl libffi python-numpy python-pandas"
-            pkg install -y git python clang rust openssl libffi python-numpy python-pandas || return 1
+            info "Installing: git python clang rust openssl libffi"
+            pkg install -y git python clang rust openssl libffi || return 1
+
+            # numpy/pandas: PyPI has no manylinux/musllinux wheel that's
+            # compatible with Termux's Python + Android's bionic libc, so
+            # `pip install numpy/pandas` falls back to compiling from
+            # source — which needs to bootstrap `cmake`/`ninja` itself
+            # first and frequently fails outright on a phone. Termux's
+            # main repo ships a prebuilt python-numpy, but NOT pandas —
+            # pandas is only available prebuilt via the community Termux
+            # User Repository (TUR: https://github.com/termux-user-repository/tur),
+            # so subscribe to that first, then install both from pkg.
+            # setup_venv() below makes sure the venv can see them
+            # (--system-site-packages).
+            info "Installing: tur-repo (provides a prebuilt python-pandas)"
+            pkg install -y tur-repo || return 1
+            info "Installing: python-numpy python-pandas (prebuilt — no source compile)"
+            pkg install -y python-numpy python-pandas || return 1
             ;;
         apt)
             DEBIAN_FRONTEND=noninteractive apt-get install -y \
