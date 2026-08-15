@@ -90,8 +90,14 @@ class PositionsCommand(BaseCommand):
         if warning:
             cards.append(warning)
 
+        # Live-sync records only carry ``synced_at`` (fresh every sync) —
+        # the stable "since when" is the managed record's ``entry_time``
+        # in positions.json. Fall back to it so hold duration is stable
+        # across resyncs instead of resetting every 5 minutes.
+        from scripts.exit_gate import load_position  # noqa: PLC0415
+
         for p in positions:
-            symbol = p.get("symbol", "?")
+            symbol = p.get("symbol", "")
             base = symbol.split("/")[0]
             qty = p.get("quantity", 0) or 0
             entry = p.get("entry_price")
@@ -110,7 +116,11 @@ class PositionsCommand(BaseCommand):
             badge = "" if managed else "  ·  _exchange balance — not bot-managed_"
 
             holding = ""
-            et = _parse_timestamp(p.get("entry_time", "")) if p.get("entry_time") else None
+            et = _parse_timestamp(p.get("entry_time") or "")
+            if et is None and symbol:
+                managed = load_position(symbol)
+                if managed:
+                    et = _parse_timestamp(managed.get("entry_time") or "")
             if et is not None:
                 secs = max(0, (datetime.now(timezone.utc) - et).total_seconds())
                 holding = f"  ·  ⏱ {fmt_holding(secs)}"
