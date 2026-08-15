@@ -372,16 +372,23 @@ def merge_live_positions(
     current = load_live_positions()
     # Snapshot management levels BEFORE the stale entries are popped so a
     # freshly-synced record can carry them over (a sync only knows
-    # price/quantity, not adopted stop/TP levels).
+    # price/quantity, not adopted stop/TP levels or a previously known
+    # entry price). The sync's own reconstruction can legitimately return
+    # ``None`` for the entry (e.g. Indodax has no fetchMyTrades) — the
+    # cached entry must never be overwritten with ``None`` on those
+    # exchanges, or PnL and stop/target sizing lose their baseline.
     extras = {
-        sym: {k: rec.get(k) for k in ("stop_loss", "tp1", "tp2", "tp3") if rec.get(k)}
+        sym: {
+            k: rec.get(k) for k in ("entry_price", "stop_loss", "tp1", "tp2", "tp3")
+            if rec.get(k) is not None
+        }
         for sym, rec in current.items() if isinstance(rec, dict)
     }
     for sym in synced_symbols:
         current.pop(sym, None)
     for pos in new_positions:
         for key, val in extras.get(pos["symbol"], {}).items():
-            if val and not pos.get(key):
+            if val is not None and pos.get(key) is None:
                 pos[key] = val
         current[pos["symbol"]] = pos
     save_live_positions(current)

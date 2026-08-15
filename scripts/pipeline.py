@@ -874,9 +874,33 @@ class Pipeline:
             if sym_quote and sym_quote != qc:
                 continue
             if sym in managed_by_sym:
+                # Already managed: never let a level-less exchange sync
+                # zero out the plan's stop/TP, and self-heal the case
+                # where an earlier buggy sync already did (managed record
+                # lost its stop but the live cache still knows it).
+                existing = managed_by_sym[sym]
+                healed = False
+                for key in ("stop_loss", "tp1", "tp2", "tp3"):
+                    if float(existing.get(key) or 0) <= 0 \
+                            and float(p.get(key) or 0) > 0:
+                        existing[key] = float(p[key])
+                        healed = True
+                if float(existing.get("entry_price") or 0) <= 0 \
+                        and float(p.get("entry_price") or 0) > 0:
+                    existing["entry_price"] = float(p["entry_price"])
+                    healed = True
+                if healed:
+                    from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+                    merge_positions(managed)
                 continue
-            entry = p.get("entry_price") or p.get("current_price")
-            if entry is None:
+            entry = p.get("entry_price")
+            if entry is None or float(entry) <= 0:
+                # Unknown entry = NOT bot-managed. Adopting it with the
+                # current price as a fake entry (stop 0 / TP 0) would
+                # create an unprotected, unmanageable OPEN record that
+                # counts against MAX_POSITIONS and blocks every future
+                # buy. Leave it in live_positions.json only — /positions
+                # still shows it, but nothing auto-trades it.
                 continue
             adopted.append({
                 "symbol": sym,
