@@ -188,6 +188,12 @@ class LivePositionSync:
                 continue
 
             entry_price = self._reconstruct_entry_price(provider, symbol, qty)
+            if entry_price is None:
+                # The exchange cannot reconstruct an entry (e.g. Indodax
+                # has no fetchMyTrades), but a previously-known entry must
+                # not be lost — PnL/management baseline stays stable.
+                cached = load_live_positions().get(symbol, {})
+                entry_price = cached.get("entry_price")
 
             current_price = None
             try:
@@ -364,9 +370,19 @@ def merge_live_positions(
     sold), instead of lingering there stale forever.
     """
     current = load_live_positions()
+    # Snapshot management levels BEFORE the stale entries are popped so a
+    # freshly-synced record can carry them over (a sync only knows
+    # price/quantity, not adopted stop/TP levels).
+    extras = {
+        sym: {k: v for k in ("stop_loss", "tp1", "tp2", "tp3") if v}
+        for sym, rec in current.items() if isinstance(rec, dict)
+    }
     for sym in synced_symbols:
         current.pop(sym, None)
     for pos in new_positions:
+        for key, val in extras.get(pos["symbol"], {}).items():
+            if val and not pos.get(key):
+                pos[key] = val
         current[pos["symbol"]] = pos
     save_live_positions(current)
     return current

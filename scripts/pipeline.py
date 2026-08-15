@@ -747,6 +747,8 @@ class Pipeline:
                     )
 
         # --- Unified TP/SL reconciliation (paper or live) ---
+        if is_live:
+            self._merge_live_positions_into_managed()
         self._reconcile_positions(pipeline, provider, is_live)
 
         # --- Persist paper state (for Telegram / reporting) ---
@@ -818,6 +820,100 @@ class Pipeline:
         if pruned:
             from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
             merge_positions(pos_data.get("positions", []))
+
+    def _merge_live_positions_into_managed(self) -> None:
+        """Track exchange-confirmed holdings in positions.json so they are
+        managed by the same TP/SL reconcile as plan-derived positions.
+
+        Without this a holding that has no plan entry (a BUY whose record
+        was wrongly pruned, a position bought before arming, or a fill the
+        strategy no longer signals) stays invisible to TP/SL management and
+        to ``/positions`` forever. EXCLUDE_SYMBOLS coins and mismatched-
+        quote symbols are never adopted. Existing managed entries win.
+        """
+        import json, os  # noqa: PLC0415
+
+        pos_path = "data/positions.json"
+        try:
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pos_data = {}
+
+        try:
+            with open("data/live_positions.json") as f:
+                live = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        if not isinstance(live, dict) or not live:
+            return
+
+        try:
+            from scripts.live_position_sync import parse_exclude_symbols  # noqa: PLC0415
+            excluded = parse_exclude_symbols(os.getenv("EXCLUDE_SYMBOLS", ""))
+        except Exception:
+            excluded = set()
+
+        qc = (getattr(self.config, "quote_currency", None)
+              or os.getenv("QUOTE_CURRENCY", "USDT")).upper()
+
+        managed = pos_data.get("positions", [])
+        managed_by_sym = {p.get("symbol"): p for p in managed}
+
+        adopted = []
+        for sym, p in live.items():
+            if not isinstance(p, dict) or not sym:
+                continue
+            qty = float(p.get("quantity", 0) or 0)
+            if qty <= 0:
+                continue
+            base = sym.split("/")[0].upper()
+            if base in excluded:
+                continue
+            sym_quote = sym.split("/")[1].upper() if "/" in sym else ""
+            if sym_quote and sym_quote != qc:
+                continue
+            if sym in managed_by_sym:
+                continue
+            entry = p.get("entry_price") or p.get("current_price")
+            if entry is None:
+                continue
+            adopted.append({
+                "symbol": sym,
+                "entry_price": float(entry),
+                "current_price": float(p.get("current_price") or entry),
+                "quantity": qty,
+                "remaining_qty": qty,
+                "remaining_pct": 100.0,
+                "cost_basis": float(entry) * qty,
+                "stop_loss": float(p.get("stop_loss") or 0),
+                "current_stop": float(p.get("stop_loss") or 0),
+                "tp1": float(p.get("tp1") or 0),
+                "tp2": float(p.get("tp2") or 0),
+                "tp3": float(p.get("tp3") or 0),
+                "tp1_hit": False,
+                "tp2_hit": False,
+                "tp3_hit": False,
+                "floating_pnl": 0.0,
+                "floating_pnl_pct": 0.0,
+                "realized_pnl": 0.0,
+                "total_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "status": "OPEN",
+                "entry_time": p.get("synced_at") or p.get("entry_time", ""),
+                "exchange": p.get("exchange", ""),
+                "source": p.get("source", "live_exchange_adoption"),
+            })
+
+        if adopted:
+            managed.extend(adopted)
+            from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+            merge_positions(managed)
+            self.logger.info(
+                "Adopted %d exchange-held position(s) into managed set: %s",
+                len(adopted),
+                ", ".join(a["symbol"] for a in adopted),
+            )
 
     def _prune_live_ghost_positions(
         self,

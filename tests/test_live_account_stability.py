@@ -210,6 +210,74 @@ class TestLiveGhostPrune:
         assert entries[0]["status"] == "OPEN"
 
 
+class TestLiveAdoption:
+    """Exchange-held holdings without a plan entry must still be tracked
+    and TP/SL-managed, or a buy whose record was lost (prune bug) or a
+    pre-arming holding is never sold."""
+
+    def _pipeline(self, tmp_path):
+        from scripts.pipeline import Pipeline
+
+        logger = MagicMock()
+        cfg = SimpleNamespace(
+            quote_currency="IDR",
+            data_dir=str(tmp_path / "data"),
+            exchange="indodax",
+            timeframe="1h",
+        )
+        p = Pipeline.__new__(Pipeline)
+        p.logger = logger
+        p.config = cfg
+        return p
+
+    def test_exchange_holding_is_adopted_into_managed(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": [], "active_count": 0, "closed_count": 0},
+        ))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "KOMA/IDR": {
+                "symbol": "KOMA/IDR", "quantity": 782.0,
+                "entry_price": 248.587, "current_price": 242.304,
+                "stop_loss": 243.6315, "tp1": 253.5425,
+                "source": "live_exchange_sync",
+            },
+        }))
+
+        self._pipeline(tmp_path)._merge_live_positions_into_managed()
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        k = entries["KOMA/IDR"]
+        assert k["status"] == "OPEN"
+        assert k["remaining_qty"] == 782.0
+        assert k["entry_price"] == 248.587
+        assert k["stop_loss"] == 243.6315
+        assert k["tp1"] == 253.5425
+
+    def test_managed_entries_win_over_re_adoption(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": [{
+                "symbol": "KOMA/IDR", "status": "OPEN", "remaining_qty": 782.0,
+                "stop_loss": 200.0, "entry_price": 250.0,
+            }]},
+        ))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "KOMA/IDR": {"symbol": "KOMA/IDR", "quantity": 782.0,
+                         "entry_price": 248.587, "current_price": 242.304},
+        }))
+
+        self._pipeline(tmp_path)._merge_live_positions_into_managed()
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = json.load(f)["positions"]
+        assert len(entries) == 1
+        assert entries[0]["stop_loss"] == 200.0
+
+
 # ---------------------------------------------------------------------------
 #  Wallet holds last known balance on transient failure
 # ---------------------------------------------------------------------------
