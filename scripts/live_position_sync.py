@@ -374,7 +374,7 @@ def merge_live_positions(
     # freshly-synced record can carry them over (a sync only knows
     # price/quantity, not adopted stop/TP levels).
     extras = {
-        sym: {k: v for k in ("stop_loss", "tp1", "tp2", "tp3") if v}
+        sym: {k: rec.get(k) for k in ("stop_loss", "tp1", "tp2", "tp3") if rec.get(k)}
         for sym, rec in current.items() if isinstance(rec, dict)
     }
     for sym in synced_symbols:
