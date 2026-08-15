@@ -609,6 +609,28 @@ class IndodaxProvider(BaseProvider):
     """
     CCXT_NAME = "indodax"
 
+    def _get_exchange(self) -> Any:
+        ex = super()._get_exchange()
+        try:
+            ex.load_markets()
+        except Exception:
+            return ex
+        # ccxt 4.5.x collapses Indodax pair ids to "{base}{quote}"
+        # (``btcidr``), but the private /tapi endpoint only accepts the
+        # underscore form (``btc_idr``) — every order, cancel and order
+        # lookup sent the id-less form and Indodax answered
+        # ``{"success":0,"error":"Invalid pair.}`` for ALL symbols
+        # (verified live: pair=btcidr → error, pair=btc_idr → success).
+        # Rewrite the cached market ids once so every ccxt call (public
+        # tickers accept both forms; private calls need the underscore)
+        # uses the correct pair id.
+        for market in ex.markets.values():
+            base = market.get("base")
+            quote = market.get("quote")
+            if base and quote:
+                market["id"] = f"{base}_{quote}".lower()
+        return ex
+
     def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
         # Indodax has no client-order-id concept. Its private trade
         # endpoint signs the ENTIRE request body, so sending an
