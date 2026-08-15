@@ -157,6 +157,58 @@ class TestLiveGhostPrune:
             entries = json.load(f)["positions"]
         assert entries[0]["status"] == "CLOSED"
 
+    def test_just_filled_position_never_pruned(self, tmp_path, monkeypatch) -> None:
+        """Regression: a BUY that FILLED this cycle must survive the prune.
+
+        The prune runs in the SAME pipeline cycle as the BUY, but
+        live_positions.json is resynced at the START of the cycle (before
+        the BUY) — so a just-filled position is not yet in it. Pruning
+        against that stale snapshot killed a real filled KOMA position 2s
+        after a successful BUY (the coins stayed on the exchange but the
+        position was marked CLOSED and never managed/sold).
+        """
+        monkeypatch.chdir(tmp_path)
+        _write_positions(tmp_path, [
+            {"symbol": "KOMA/IDR", "status": "OPEN", "remaining_qty": 782.0},
+        ])
+        # Stale exchange snapshot from BEFORE the BUY — KOMA absent.
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({}))
+        # No exchange_manager passed => no live balance check (test env).
+
+        self._pipeline(tmp_path)._prune_live_ghost_positions(
+            recently_filled={"KOMA/IDR"},
+        )
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = json.load(f)["positions"]
+        assert entries[0]["status"] == "OPEN"
+        assert entries[0]["remaining_qty"] == 782.0
+
+    def test_position_held_on_exchange_never_pruned(self, tmp_path, monkeypatch) -> None:
+        """Even without the filled-set, an OPEN entry whose base asset has
+        a non-zero exchange balance is real, not a ghost."""
+        monkeypatch.chdir(tmp_path)
+        _write_positions(tmp_path, [
+            {"symbol": "KOMA/IDR", "status": "OPEN", "remaining_qty": 782.0},
+        ])
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({}))
+
+        class _EM:
+            class _P:
+                @staticmethod
+                def fetch_balance():
+                    return {"free": {"KOMA": 782.0, "IDR": 301003.0}}
+            def get_provider(self):
+                return self._P()
+
+        self._pipeline(tmp_path)._prune_live_ghost_positions(
+            exchange_manager=_EM(),
+        )
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = json.load(f)["positions"]
+        assert entries[0]["status"] == "OPEN"
+
 
 # ---------------------------------------------------------------------------
 #  Wallet holds last known balance on transient failure

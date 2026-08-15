@@ -425,7 +425,7 @@ class TestPipelineLiveIndodax:
             "status": "READY",
             "entry_price": 245.0,
             "quantity": 1.0,
-            "position_size_usdt": 245.0,
+            "position_size_usdt": 10000.0,
             "stop_loss": 220.0,
             "tp1": 0.0,
             "tp2": 0.0,

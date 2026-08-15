@@ -624,6 +624,7 @@ class Pipeline:
                 self.logger.info(f"Pipeline new-order guard: {reason}")
                 allow_new = False
 
+        filled_symbols: set[str] = set()
         mode = "LIVE" if is_live else "PAPER"
         if is_live:
             provider = LiveExecutionProvider(
@@ -640,10 +641,60 @@ class Pipeline:
         )
 
         # --- Unified BUY execution (paper or live) ---
+        min_notional = float(
+            os.getenv(
+                "MIN_ORDER_NOTIONAL",
+                "10000" if qc == "IDR" else "10",
+            )
+        )
+        open_held_bases: set[str] = set()
+        try:
+            # Symbols about to be bought THIS cycle are excluded: the
+            # Position stage simulates their OPEN entry in positions.json
+            # BEFORE execution, so they must not count as "already held"
+            # (that would make the pipeline skip every buy). Only genuinely
+            # held symbols — confirmed by the exchange sync
+            # (live_positions.json) or by older managed positions — block
+            # a re-entry.
+            _plan_bases = {
+                str(p.get("symbol", "")).split("/")[0].upper()
+                for p in ready_plans if p.get("symbol")
+            }
+            for src in ("positions.json", "live_positions.json"):
+                _data = json.load(open(src)) if os.path.exists(src) else {}
+                if src == "positions.json":
+                    _items = _data.get("positions", []) if isinstance(_data, dict) else []
+                else:
+                    _items = list(_data.values()) if isinstance(_data, dict) else []
+                for _p in _items:
+                    if not is_open(_p.get("status")):
+                        continue
+                    _b = str(_p.get("symbol", "")).split("/")[0].upper()
+                    if _b and _b not in _plan_bases:
+                        open_held_bases.add(_b)
+        except Exception:
+            pass
         if allow_new:
             for plan in ready_plans:
                 symbol = plan.get("symbol", "")
                 if not symbol:
+                    continue
+
+                plan_size = float(plan.get("position_size_usdt", 0) or 0)
+                if plan_size < min_notional:
+                    self.logger.info(
+                        f"{mode} execution: SKIP {symbol} order size "
+                        f"{plan_size:,.0f} {qc} < exchange minimum "
+                        f"{min_notional:,.0f} {qc} (MIN_ORDER_NOTIONAL)"
+                    )
+                    continue
+
+                held_base = symbol.split("/")[0].upper()
+                if held_base in open_held_bases:
+                    self.logger.info(
+                        f"{mode} execution: SKIP {symbol} — already holding "
+                        f"{held_base} (no double positions allowed)"
+                    )
                     continue
 
                 self.logger.info(
@@ -657,37 +708,39 @@ class Pipeline:
                         self.logger.info(
                             f"{mode} execution result for {symbol}: {status}"
                         )
-                        if status == "FILLED" and self._notifier is not None:
-                            try:
-                                sent = self._notifier.notify_buy_opened(
-                                    symbol=symbol,
-                                    exchange=getattr(self.config, "exchange", ""),
-                                    timeframe=getattr(self.config, "timeframe", ""),
-                                    entry_price=plan.get("entry_price", 0),
-                                    quantity=plan.get("quantity", 0),
-                                    position_size=plan.get("position_size_usdt", 0),
-                                    stop_loss=plan.get("stop_loss", 0),
-                                    take_profit=plan.get("tp1", 0),
-                                    take_profit_2=plan.get("tp2", 0),
-                                    take_profit_3=plan.get("tp3", 0),
-                                    reasons=["Pipeline execution"],
-                                )
-                                if sent:
-                                    # Only record as notified when delivery
-                                    # actually succeeded, otherwise the
-                                    # BUY_OPENED is retried on the next
-                                    # restart instead of being lost.
-                                    # Serialized + atomic via
-                                    # scripts/paper_state_lock so a
-                                    # concurrent writer (startup daemon
-                                    # thread — BUG-4) can never clobber this
-                                    # entry.
-                                    try:
-                                        add_notified_buy(symbol)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                self.logger.warning(f"BUY notification failed for {symbol}")
+                        if status == "FILLED":
+                            filled_symbols.add(symbol)
+                            if self._notifier is not None:
+                                try:
+                                    sent = self._notifier.notify_buy_opened(
+                                        symbol=symbol,
+                                        exchange=getattr(self.config, "exchange", ""),
+                                        timeframe=getattr(self.config, "timeframe", ""),
+                                        entry_price=plan.get("entry_price", 0),
+                                        quantity=plan.get("quantity", 0),
+                                        position_size=plan.get("position_size_usdt", 0),
+                                        stop_loss=plan.get("stop_loss", 0),
+                                        take_profit=plan.get("tp1", 0),
+                                        take_profit_2=plan.get("tp2", 0),
+                                        take_profit_3=plan.get("tp3", 0),
+                                        reasons=["Pipeline execution"],
+                                    )
+                                    if sent:
+                                        # Only record as notified when delivery
+                                        # actually succeeded, otherwise the
+                                        # BUY_OPENED is retried on the next
+                                        # restart instead of being lost.
+                                        # Serialized + atomic via
+                                        # scripts/paper_state_lock so a
+                                        # concurrent writer (startup daemon
+                                        # thread — BUG-4) can never clobber this
+                                        # entry.
+                                        try:
+                                            add_notified_buy(symbol)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    self.logger.warning(f"BUY notification failed for {symbol}")
                 except Exception as exc:
                     self.logger.error(
                         f"{mode} execution failed for {symbol}: {exc}"
@@ -714,7 +767,10 @@ class Pipeline:
             # counts and makes TP/SL reconciliation chase balances that
             # do not exist. live_positions.json is exchange-confirmed
             # truth, so prune OPEN entries with no counterpart there.
-            self._prune_live_ghost_positions()
+            self._prune_live_ghost_positions(
+                filled_symbols,
+                exchange_manager=getattr(self.container, "exchange", None),
+            )
 
     def _prune_ghost_positions(self, provider: Any) -> None:
         """Close positions.json OPEN entries not backed by paper_state.
@@ -763,7 +819,11 @@ class Pipeline:
             from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
             merge_positions(pos_data.get("positions", []))
 
-    def _prune_live_ghost_positions(self) -> None:
+    def _prune_live_ghost_positions(
+        self,
+        recently_filled: set[str] | None = None,
+        exchange_manager: Any = None,
+    ) -> None:
         """Close positions.json OPEN entries not backed by the exchange.
 
         The Position stage simulates every READY plan into positions.json
@@ -776,9 +836,22 @@ class Pipeline:
         entry without an OPEN counterpart there is a ghost and must be
         closed. EXCLUDE_SYMBOLS holdings (the operator's own coins) are
         never touched.
+
+        CRITICAL: this runs in the SAME cycle as the BUY, so
+        ``live_positions.json`` (resynced at the START of the cycle, i.e.
+        BEFORE the BUY) is already stale for a position that JUST filled.
+        Pruning against it destroyed a real filled KOMA position 2s after
+        a successful BUY (2026-08-15): the coins remained on the exchange
+        but positions.json showed CLOSED, so the position was never
+        managed/sold and the strategy re-signalled the same symbol. Two
+        guards therefore protect recently-created positions:
+          1. symbols that FILLED in this cycle are never pruned;
+          2. the live exchange balance is checked fresh — a position whose
+             base asset still has a non-zero free balance is NOT a ghost.
         """
         import json, os  # noqa: PLC0415
 
+        recently_filled = recently_filled or set()
         pos_path = "data/positions.json"
         if not os.path.exists(pos_path):
             return
@@ -801,6 +874,20 @@ class Pipeline:
         except Exception:
             excluded = set()
 
+        held_on_exchange: set[str] = set()
+        if exchange_manager is not None:
+            try:
+                _bal = exchange_manager.get_provider().fetch_balance()
+                _free = _bal.get("free", _bal) if isinstance(_bal, dict) else {}
+                for _coin, _qty in (_free or {}).items():
+                    try:
+                        if float(_qty or 0) > 0:
+                            held_on_exchange.add(str(_coin).upper())
+                    except (TypeError, ValueError):
+                        pass
+            except Exception as exc:
+                self.logger.debug(f"Ghost-prune balance check failed: {exc}")
+
         pruned = False
         for p in pos_data.get("positions", []):
             if not is_open(p.get("status")):
@@ -810,6 +897,10 @@ class Pipeline:
             if base in excluded:
                 continue
             if sym in live or base in live:
+                continue
+            if sym in recently_filled or base in recently_filled:
+                continue
+            if base in held_on_exchange:
                 continue
             self.logger.warning(
                 f"Pruning live ghost position {sym} from positions.json "
