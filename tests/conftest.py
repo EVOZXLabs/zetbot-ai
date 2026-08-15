@@ -30,6 +30,36 @@ _ORIGINAL_POST = _requests.post
 _ENV_BASELINE = os.environ.copy()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _restore_data_dir_after_session():
+    """Snapshot ``data/`` before the suite runs and restore it afterwards.
+
+    Many tests deliberately write into ``data/`` (paper_state.json,
+    positions.json, live_trade_history.jsonl, .notified_buys, …) to pin
+    regression fixes. When the suite runs where the LIVE bot's data dir
+    lives, that residue corrupts live accounting: fake ``BTC/USDT``
+    ``repro1``/``repro2`` ledger records, phantom OPEN paper positions
+    that consume MAX_POSITIONS slots and silently block every new BUY
+    (seen 2026-08-15: stale ``paper_state.json`` fixture counted as an
+    open position next to ALICE/IDR). Snapshot once at session start,
+    restore once at session end.
+    """
+    import shutil
+    import tempfile
+
+    src = os.path.abspath("data")
+    backup = tempfile.mkdtemp(prefix="zetbot_data_backup_")
+    if os.path.isdir(src):
+        shutil.copytree(src, os.path.join(backup, "data"), dirs_exist_ok=True)
+    yield
+    if os.path.isdir(src):
+        shutil.rmtree(src, ignore_errors=True)
+    saved = os.path.join(backup, "data")
+    if os.path.isdir(saved):
+        shutil.move(saved, src)
+    shutil.rmtree(backup, ignore_errors=True)
+
+
 def _no_real_telegram_post(*args: Any, **kwargs: Any) -> Any:
     url = str(kwargs.get("url") or (args[0] if args else ""))
     if "api.telegram.org" in url:

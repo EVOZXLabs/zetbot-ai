@@ -418,16 +418,24 @@ def _count_open_positions() -> int:
     was silently reset to 0 every run and could never account for
     positions still open from earlier cycles, letting real exposure
     grow past the configured cap.
+
+    Mode-aware: in LIVE mode the paper ledger is irrelevant (it is only
+    ever written while the engine mode is PAPER) — counting it would let
+    a stale/foreign ``paper_state.json`` (e.g. a leftover test fixture
+    written into the live data dir) silently consume MAX_POSITIONS slots
+    and block every new BUY.
     """
     count = 0
-    try:
-        with open(PAPER_STATE_PATH) as f:
-            paper_state = json.load(f)
-        for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") == "OPEN":
-                count += 1
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    live = os.getenv("PAPER_MODE", "true").strip().lower() == "false"
+    if not live:
+        try:
+            with open(PAPER_STATE_PATH) as f:
+                paper_state = json.load(f)
+            for vp in paper_state.get("positions", {}).values():
+                if vp.get("status") == "OPEN":
+                    count += 1
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
 
     from scripts.live_position_sync import count_live_open_positions  # noqa: PLC0415
     count += count_live_open_positions()
