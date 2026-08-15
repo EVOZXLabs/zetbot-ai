@@ -109,10 +109,17 @@ class PositionsCommand(BaseCommand):
             curr_str = fmt_price(current) if current else "Unknown"
             badge = "" if managed else "  ·  _exchange balance — not bot-managed_"
 
+            holding = ""
+            et = _parse_timestamp(p.get("entry_time", "")) if p.get("entry_time") else None
+            if et is not None:
+                secs = max(0, (datetime.now(timezone.utc) - et).total_seconds())
+                holding = f"  ·  ⏱ {fmt_holding(secs)}"
+
             card = (
                 f"{emoji} *{symbol}*{badge}\n"
                 f"💰 Entry {entry_str} → 📍 {curr_str}\n"
                 f"📈 PnL {pnl_str}  ·  📦 {qty:.6f} {base}  ·  🏦 {p.get('exchange', '?')}"
+                f"{holding}"
             )
             cards.append(card)
 
