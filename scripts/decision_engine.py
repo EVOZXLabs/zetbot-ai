@@ -39,6 +39,25 @@ PROB_STRONG_BUY = 75.0
 PROB_GOOD = 55.0
 PROB_WATCHLIST = 35.0
 
+# Hard "do-not-buy" gates (env-configurable). These reject a coin outright
+# BEFORE any scoring can approve it, so the bot never chases a pump that
+# already happened or a coin with no follow-through:
+#   * REL_VOLUME_MIN          — relative_volume < this = volume dried up
+#                               (typical right after a pump ends). Buying
+#                               into dead volume = buying a local top.
+#   * MAX_ATR_PCT             — reject coins that swing too violently for
+#                               a sane stop (ATR% is the stop-distance base).
+#   * MAX_RSI_ENTRY           — overbought: buy-the-dip only, never
+#                               buy-the-top.
+#   * MAX_24H_PUMP_PCT        — already pumped this much in 24h = chase risk.
+#   * MAX_EMA200_EXTENSION_PCT— price stretched too far above the trend
+#                               mean-reversion level.
+REL_VOLUME_MIN = float(os.getenv("REL_VOLUME_MIN", "0.8"))
+MAX_ATR_PCT = float(os.getenv("MAX_ATR_PCT", "6.0"))
+MAX_RSI_ENTRY = float(os.getenv("MAX_RSI_ENTRY", "78.0"))
+MAX_24H_PUMP_PCT = float(os.getenv("MAX_24H_PUMP_PCT", "12.0"))
+MAX_EMA200_EXTENSION_PCT = float(os.getenv("MAX_EMA200_EXTENSION_PCT", "25.0"))
+
 
 # ---------------------------------------------------------------------------
 #  Data types
@@ -85,6 +104,7 @@ class Decision:
     volatility_score: float
     expected_rr: float
     overall_score: float
+    gate_reasons: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +409,47 @@ class RewardAnalyzer:
 # ---------------------------------------------------------------------------
 
 
+def _gate_reasons(pair: ScannerPair) -> list[str]:
+    """Hard "do-not-buy" checks. Returns human-readable reasons; empty
+    list means the coin passes all gates. These run BEFORE the weighted
+    probability so a coin that just finished pumping can never be bought
+    on a bullish-looking chart — chasing tops is how the bot racks up
+    -2% losses within minutes of entry.
+    """
+    reasons: list[str] = []
+
+    rv = pair.relative_volume
+    if rv is not None and rv < REL_VOLUME_MIN:
+        reasons.append(
+            f"volume dried up (rel_volume {rv:.2f} < {REL_VOLUME_MIN:.1f})"
+        )
+
+    atr = pair.atr_pct
+    if atr is not None and atr > MAX_ATR_PCT:
+        reasons.append(
+            f"too volatile for entry (ATR {atr:.1f}% > {MAX_ATR_PCT:.1f}%)"
+        )
+
+    rsi = pair.rsi14
+    if rsi is not None and rsi > MAX_RSI_ENTRY:
+        reasons.append(f"overbought (RSI {rsi:.0f} > {MAX_RSI_ENTRY:.0f})")
+
+    chg = pair.change_24h
+    if chg is not None and chg > MAX_24H_PUMP_PCT:
+        reasons.append(
+            f"already pumped +{chg:.1f}% in 24h (cap {MAX_24H_PUMP_PCT:.0f}%)"
+        )
+
+    d = _ema_distance(pair.price, pair.ema200)
+    if d > MAX_EMA200_EXTENSION_PCT:
+        reasons.append(
+            f"overextended {d:.1f}% above EMA200 "
+            f"(cap {MAX_EMA200_EXTENSION_PCT:.0f}%)"
+        )
+
+    return reasons
+
+
 def _compute_expected_rr(pair: ScannerPair,
                          risk_score: float,
                          reward_score: float) -> float:
@@ -514,6 +575,16 @@ class DecisionEngine:
         rec = _classify(prob)
         rr = _compute_expected_rr(pair, rs, rws)
 
+        gates = _gate_reasons(pair)
+        if gates:
+            # A hard gate fires (pump already happened / volume dried up /
+            # overbought / overextended): the coin is NOT tradeable this
+            # cycle no matter how attractive its raw score looks. Keep the
+            # scores for diagnostics but force IGNORE so every downstream
+            # gate (Risk, TradePlanValidator) skips it.
+            prob = 0.0
+            rec = "IGNORE"
+
         return Decision(
             symbol=pair.symbol,
             probability=prob,
@@ -526,6 +597,7 @@ class DecisionEngine:
             volatility_score=round(vls, 1),
             expected_rr=rr,
             overall_score=round(prob, 1),
+            gate_reasons=gates,
         )
 
     def run(self) -> list[Decision]:

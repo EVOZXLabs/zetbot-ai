@@ -89,6 +89,7 @@ class DecisionScores:
     volatility_score: float
     expected_rr: float
     overall_score: float
+    gate_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -172,6 +173,7 @@ class DataLoader:
                 volatility_score=d.get("volatility_score", 0.0),
                 expected_rr=d.get("expected_rr", 0.0),
                 overall_score=d.get("overall_score", 0.0),
+                gate_reasons=list(d.get("gate_reasons") or []),
             )
         return result
 
@@ -274,6 +276,16 @@ class ExecutionValidator:
         # 2. Missing indicators (no decision data)
         if decision is None:
             reasons.append("Missing decision data")
+
+        # 2b. Hard anti-pump / chase gates (decision engine). A coin the
+        #     engine gated (volume dried up, just pumped, overbought,
+        #     overextended) must never reach a READY plan even if its
+        #     raw probability is high — this is what stopped the bot from
+        #     buying ALICE/BNB right after their pumps ended.
+        if decision is not None and decision.recommendation == "IGNORE":
+            why = "; ".join(decision.gate_reasons) if decision.gate_reasons \
+                else "gated by decision engine"
+            reasons.append(f"hard gate: {why}")
 
         # 3. R:R too low
         if risk.expected_rr < self.min_rr:
