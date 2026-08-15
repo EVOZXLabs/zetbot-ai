@@ -349,8 +349,7 @@ class MetricsManager:
             except Exception:
                 cash = 0.0
 
-        pb = self._read_balance_pb()
-        initial = resolve_initial_balance(pb, self._read_json("paper_state.json"))
+        initial = self._live_initial_balance()
         open_positions = self.open_positions()
 
         ledger_trades = self._live_trade_history()
@@ -387,6 +386,50 @@ class MetricsManager:
             gross_profit=gross_profit,
             gross_loss=gross_loss,
         )
+
+    def _live_initial_balance(self) -> float:
+        """LIVE-mode initial-equity baseline, snapshot once to disk.
+
+        ``net_pnl`` for real trading must equal (current equity) −
+        (equity when live trading first started). Resolving the initial
+        figure from ``paper_state.json`` here is wrong: that file is a
+        paper-trading artifact (it can even hold leftover test positions,
+        e.g. a ``BTC/USDT`` seed with initial_balance=10000), which made
+        LIVE HEALTH/``/status`` net_pnl flap between a stale paper figure
+        and ``0 − initial`` whenever the exchange balance fetch hiccupped.
+
+        The baseline is captured once (first LIVE-mode read) and persisted
+        to ``data/live_initial_balance.json`` so every consumer — HEALTH,
+        /status, /wallet, /portfolio — agrees forever.
+        """
+        path = os.path.join(self._data_dir, "live_initial_balance.json")
+        try:
+            with open(path) as f:
+                return float(json.load(f).get("initial_balance") or 0.0)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            pass
+
+        equity: Optional[float] = None
+        if self._wallet is not None:
+            try:
+                equity = float(self._wallet.equity or 0.0)
+            except Exception:
+                equity = None
+        if equity is None or equity <= 0.0:
+            equity = float(os.getenv("ACCOUNT_BALANCE", "0") or 0)
+        record = {
+            "initial_balance": round(equity, 2),
+            "snapshotted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(record, f, indent=2)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return equity
 
     # ------------------------------------------------------------------
     #  Positions

@@ -1345,6 +1345,26 @@ def main() -> None:
     container.bootstrap()
     logger.info("Service Container initialised")
 
+    # LIVE mode: print the REAL exchange balance, never the stale paper
+    # figure or the configured starting balance — the exact complaint the
+    # operator had (banner said 300,000 while the account holds 496,672).
+    # Reuses container.wallet (the SAME instance the bot trades with, with
+    # its TTL cache) instead of a second exchange connection. TEST_MODE
+    # skips the network call so subprocess tests stay deterministic.
+    if config.paper_mode:
+        _pb_bal = _read_json(os.path.join(config.data_dir, "paper_balance.json"))
+        _display_balance = _pb_bal.get("final_balance")
+        if _display_balance is None:
+            _display_balance = float(config.account_balance)
+    else:
+        _display_balance = float(config.account_balance)
+        if os.getenv("TEST_MODE") != "true":
+            try:
+                _display_balance = container.wallet.balance
+            except Exception:
+                pass
+    logger.info(f"Balance  : {_display_balance:>8,.2f} {config.quote_currency}")
+
     # ------------------------------------------------------------------
     #  Centralized Notifier — single instance for all Telegram messages
     # ------------------------------------------------------------------

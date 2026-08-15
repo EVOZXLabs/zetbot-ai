@@ -10,8 +10,11 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Optional
+
+logger = logging.getLogger("zetbot.service_container")
 
 from scripts.exchange_manager import ExchangeManager
 from scripts.exchange_providers import ExchangeAuthError
@@ -392,7 +395,23 @@ class _LiveWalletAdapter:
         provider = self._exchange.get_provider()
         # provider.fetch_balance() itself raises ExchangeAuthError when
         # credentials are set but the call fails — let that propagate.
-        raw = provider.fetch_balance()
+        try:
+            raw = provider.fetch_balance()
+        except Exception as exc:
+            # A transient failure must never reset the account to zero:
+            # HEALTH /status used to flap between the real balance and
+            # 0 − initial (cash=0 → net_pnl = -initial). Hold the last
+            # known good snapshot and surface the problem in the log.
+            # Only the very first fetch (no cache yet) may raise.
+            if self._cache:
+                logger.warning(
+                    "Live balance fetch failed (%s) — reusing last known "
+                    "balance; do not size new positions on stale data.",
+                    exc,
+                )
+                self._cache_ts = now
+                return self._cache
+            raise
         if not raw:
             raise ExchangeAuthError(
                 "Live balance fetch returned nothing — check API key, "

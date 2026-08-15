@@ -706,6 +706,15 @@ class Pipeline:
             # not keep producing BUY_OPENED notifications, inflating
             # equity/exposure, or blocking new buys (BUG-4).
             self._prune_ghost_positions(provider)
+        else:
+            # LIVE mode: the Position stage simulates every READY plan
+            # into positions.json as OPEN *before* the real BUY runs. A
+            # rejected BUY (invalid pair, maintenance, blacklist) would
+            # otherwise leave an OPEN ghost that inflates open-position
+            # counts and makes TP/SL reconciliation chase balances that
+            # do not exist. live_positions.json is exchange-confirmed
+            # truth, so prune OPEN entries with no counterpart there.
+            self._prune_live_ghost_positions()
 
     def _prune_ghost_positions(self, provider: Any) -> None:
         """Close positions.json OPEN entries not backed by paper_state.
@@ -744,6 +753,68 @@ class Pipeline:
                 f"Pruning ghost position {sym} from positions.json "
                 "(not present as OPEN in paper_state.json — simulated but "
                 "never executed)"
+            )
+            p["status"] = "CLOSED"
+            p["remaining_qty"] = 0.0
+            p["unrealized_pnl"] = 0.0
+            pruned = True
+
+        if pruned:
+            from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+            merge_positions(pos_data.get("positions", []))
+
+    def _prune_live_ghost_positions(self) -> None:
+        """Close positions.json OPEN entries not backed by the exchange.
+
+        The Position stage simulates every READY plan into positions.json
+        as OPEN before the real BUY is submitted. If that BUY is then
+        rejected (invalid pair, maintenance, blacklist) the simulated
+        entry would linger as a ghost: it inflates open-position counts,
+        makes TP/SL reconciliation chase balances that do not exist
+        (``SL sell skipped: NO_BALANCE``), and poisons HEALTH/equity.
+        ``live_positions.json`` is exchange-confirmed truth, so any OPEN
+        entry without an OPEN counterpart there is a ghost and must be
+        closed. EXCLUDE_SYMBOLS holdings (the operator's own coins) are
+        never touched.
+        """
+        import json, os  # noqa: PLC0415
+
+        pos_path = "data/positions.json"
+        if not os.path.exists(pos_path):
+            return
+        try:
+            with open(pos_path) as f:
+                pos_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        live = {}
+        try:
+            with open("data/live_positions.json") as f:
+                live = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            live = {}
+
+        try:
+            from scripts.live_position_sync import parse_exclude_symbols  # noqa: PLC0415
+            excluded = parse_exclude_symbols(os.getenv("EXCLUDE_SYMBOLS", ""))
+        except Exception:
+            excluded = set()
+
+        pruned = False
+        for p in pos_data.get("positions", []):
+            if not is_open(p.get("status")):
+                continue
+            sym = p.get("symbol", "")
+            base = sym.split("/")[0].upper()
+            if base in excluded:
+                continue
+            if sym in live or base in live:
+                continue
+            self.logger.warning(
+                f"Pruning live ghost position {sym} from positions.json "
+                "(no matching balance on the exchange — BUY was rejected "
+                "or the position was closed manually)"
             )
             p["status"] = "CLOSED"
             p["remaining_qty"] = 0.0
