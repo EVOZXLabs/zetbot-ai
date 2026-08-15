@@ -168,7 +168,10 @@ def _build_summary(
     # which made the pipeline report disagree with every other view.
     try:
         from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
-        snap = MetricsManager(config.data_dir).account()
+        snap = MetricsManager(
+            config.data_dir,
+            mode_provider=lambda: "PAPER" if config.paper_mode else "LIVE",
+        ).account()
         balance = snap.balance
         equity = snap.equity
         realized = snap.realized_pnl

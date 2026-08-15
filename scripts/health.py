@@ -128,7 +128,11 @@ class HealthMonitor:
         try:
             from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
             snap = MetricsManager(
-                self._config.data_dir, wallet=self._wallet,
+                self._config.data_dir,
+                wallet=self._wallet,
+                mode_provider=lambda: (
+                    "PAPER" if self._config.paper_mode else "LIVE"
+                ),
             ).account()
             net_pnl = round(snap.net_pnl, 2)
             balance = round(snap.balance, 2)
