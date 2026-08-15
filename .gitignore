@@ -30,3 +30,4 @@ backups/
 
 # macOS
 .DS_Store
+.kilo/
