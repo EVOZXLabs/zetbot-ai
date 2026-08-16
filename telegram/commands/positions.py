@@ -24,6 +24,24 @@ def _parse_timestamp(ts: str) -> datetime | None:
     return None
 
 
+def _format_tp_levels(position: dict[str, Any]) -> str:
+    """Render TP1/TP2/TP3 levels (+ hit state) for an open position.
+
+    Only levels actually present on the position are shown — the loop is
+    data-driven (no hardcoded TP set), so a 2-level or 5-level strategy
+    renders just as well.
+    """
+    parts = []
+    for level in ("tp1", "tp2", "tp3"):
+        price = position.get(level, 0) or 0
+        if price <= 0:
+            continue
+        hit = bool(position.get(f"{level}_hit", False))
+        mark = " ✅" if hit else ""
+        parts.append(f"{level.upper()}{mark} {fmt_price(price)}")
+    return "  ·  ".join(parts) if parts else ""
+
+
 class PositionsCommand(BaseCommand):
     meta = CommandMeta(
         name="positions",
@@ -117,10 +135,10 @@ class PositionsCommand(BaseCommand):
 
             holding = ""
             et = _parse_timestamp(p.get("entry_time") or "")
-            if et is None and symbol:
-                managed = load_position(symbol)
-                if managed:
-                    et = _parse_timestamp(managed.get("entry_time") or "")
+            managed_rec = load_position(symbol) if symbol else None
+            if managed_rec:
+                if et is None:
+                    et = _parse_timestamp(managed_rec.get("entry_time") or "")
             if et is not None:
                 secs = max(0, (datetime.now(timezone.utc) - et).total_seconds())
                 holding = f"  ·  ⏱ {fmt_holding(secs)}"
@@ -131,6 +149,10 @@ class PositionsCommand(BaseCommand):
                 f"📈 PnL {pnl_str}  ·  📦 {qty:.6f} {base}  ·  🏦 {p.get('exchange', '?')}"
                 f"{holding}"
             )
+            if managed_rec:
+                tp_line = _format_tp_levels(managed_rec)
+                if tp_line:
+                    card += f"\n🎯 {tp_line}"
             cards.append(card)
 
         from scripts.live_position_sync import parse_exclude_symbols  # noqa: PLC0415
@@ -227,11 +249,16 @@ class PositionsCommand(BaseCommand):
                 progress_line = f"Entry → TP1  {bar} {pct_to_tp:.0f}%\n"
 
             quote_upper = quote.upper()
-            card = (
-                f"{emoji} *{symbol}*  {fmt_pnl(pnl, quote_upper)} ({pnl_pct:+.2f}%)\n"
-                f"{progress_line}"
-                f"🕒 Held {holding_str}"
-            )
+            lines = [
+                f"{emoji} *{symbol}*  {fmt_pnl(pnl, quote_upper)} ({pnl_pct:+.2f}%)",
+            ]
+            if progress_line:
+                lines.append(progress_line.rstrip("\n"))
+            tp_line = _format_tp_levels(p)
+            if tp_line:
+                lines.append(f"🎯 {tp_line}")
+            lines.append(f"🕒 Held {holding_str}")
+            card = "\n".join(lines)
             cards.append(card)
 
         return build_message(*cards)

@@ -969,6 +969,7 @@ def _monitor_positions(
     pipeline = ExecutionPipeline(
         provider,
         quote_currency=(_monitor_quote or "USDT").upper(),
+        notifier=notifier,
     )
 
     if is_live:
