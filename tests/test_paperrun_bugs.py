@@ -559,9 +559,9 @@ class TestNetPnlAfterLossClose:
             "internet_ok": True,
             "exchange_ok": True,
             "telegram_status": "OK",
-            "net_pnl": -2066.46,
+            "unrealized_pnl": -2066.46,
             "quote_currency": "IDR",
         }
         line = _format_metrics(metrics)
         assert "IDR" in line, f"Currency missing from log line: {line}"
-        assert "net_pnl=-2066.46 IDR" in line, f"Log line: {line}"
+        assert "open_pnl=-2066.46 IDR" in line, f"Log line: {line}"

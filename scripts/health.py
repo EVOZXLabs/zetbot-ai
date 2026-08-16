@@ -135,10 +135,12 @@ class HealthMonitor:
                 ),
             ).account()
             net_pnl = round(snap.net_pnl, 2)
+            unrealized_pnl = round(snap.unrealized_pnl, 2)
             balance = round(snap.balance, 2)
             equity = round(snap.equity, 2)
         except Exception:
             net_pnl = paper_data.get("net_pnl", 0.0)
+            unrealized_pnl = paper_data.get("unrealized_pnl", 0.0)
             balance = paper_data.get("final_balance", 0.0)
             equity = paper_data.get("final_equity", 0.0)
 
@@ -178,6 +180,7 @@ class HealthMonitor:
             "balance": balance,
             "equity": equity,
             "net_pnl": net_pnl,
+            "unrealized_pnl": unrealized_pnl,
             "quote_currency": self._config.quote_currency,
             "open_positions": sum(
                 1 for p in _read_json(f"{d}/positions.json").get("positions", [])
@@ -352,6 +355,7 @@ def _format_metrics(m: dict[str, Any]) -> str:
     exchange = "OK" if m["exchange_ok"] else "FAIL"
     telegram = m.get("telegram_status", "UNKNOWN")
     net_pnl = m.get("net_pnl", 0.0)
+    unrealized_pnl = m.get("unrealized_pnl", 0.0)
     quote = m.get("quote_currency", "USDT")
     return (
         f"uptime={hours:02.0f}h{minutes:02.0f}m{seconds:02.0f}s"
@@ -361,5 +365,5 @@ def _format_metrics(m: dict[str, Any]) -> str:
         f"  internet={internet}"
         f"  exchange={exchange}"
         f"  telegram={telegram}"
-        f"  net_pnl={net_pnl:+.2f} {quote}"
+        f"  open_pnl={unrealized_pnl:+.2f} {quote}"
     )
