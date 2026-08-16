@@ -14,6 +14,7 @@ import csv
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
@@ -37,8 +38,24 @@ TP2_SELL_PCT = 30.0
 TP3_SELL_PCT = 40.0  # remaining
 
 # Maximum holding time
-MAX_HOLDING_CANDLES = 48    # 48 hours at 1h timeframe
-TIMEFRAME_HOURS = 1
+MAX_HOLDING_CANDLES = 48    # 48 candles (e.g. 48h at 1h, 12h at 15m timeframe)
+
+
+def _timeframe_hours() -> float:
+    """Map the configured candle timeframe (TIMEFRAME env, e.g. "15m",
+    "1h", "4h", "1d") to hours. Unknown/failed parses fall back to 1h."""
+    tf = (os.getenv("TIMEFRAME", "1h") or "1h").strip().lower()
+    m = re.match(r"(\d+)\s*([mhdw])", tf)
+    if not m:
+        return 1.0
+    amount = int(m.group(1))
+    unit = m.group(2)
+    return {
+        "m": amount / 60.0,
+        "h": float(amount),
+        "d": amount * 24.0,
+        "w": amount * 168.0,
+    }.get(unit, 1.0)
 
 # ---------------------------------------------------------------------------
 #  Data types
@@ -305,7 +322,7 @@ class PositionSimulator:
             signal_dt = datetime.fromisoformat(plan.signal_time)
             delta = now - signal_dt
             holding_hours = delta.total_seconds() / 3600.0
-            holding_candles = max(0, int(holding_hours / TIMEFRAME_HOURS))
+            holding_candles = max(0, int(holding_hours / _timeframe_hours()))
         except (ValueError, TypeError):
             pass
 

@@ -37,7 +37,7 @@ from bot.indicators import IndicatorEngine
 
 MIN_CANDLES = 250          # minimum candles required for analysis (must match fetch limit)
 OHLCV_LIMIT = MIN_CANDLES  # fetch this many candles (must match MIN_CANDLES)
-TIMEFRAME = "1h"
+TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 TOP_N = 50
 THREADS = 8
 MIN_VOLUME_24H = 50_000  # skip pairs below $50K daily volume
