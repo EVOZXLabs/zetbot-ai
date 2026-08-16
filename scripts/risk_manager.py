@@ -12,6 +12,7 @@ Usage::
 
 import csv
 import json
+import logging
 import math
 import os
 import time
@@ -479,14 +480,16 @@ def _existing_open_exposure() -> float:
     MAX_POSITION_SIZE_PCT = 60%).
     """
     total = 0.0
-    try:
-        with open(PAPER_STATE_PATH) as f:
-            paper_state = json.load(f)
-        for vp in paper_state.get("positions", {}).values():
-            if vp.get("status") == "OPEN":
-                total += _position_notional(vp)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    live = os.getenv("PAPER_MODE", "true").strip().lower() == "false"
+    if not live:
+        try:
+            with open(PAPER_STATE_PATH) as f:
+                paper_state = json.load(f)
+            for vp in paper_state.get("positions", {}).values():
+                if vp.get("status") == "OPEN":
+                    total += _position_notional(vp)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
 
     try:
         with open(LIVE_POSITIONS_PATH) as f:
@@ -948,6 +951,46 @@ class RiskReport:
 PAPER_BALANCE_PATH = "data/paper_balance.json"
 
 
+def _resolve_live_account_state() -> tuple[float | None, float | None]:
+    """LIVE-mode (balance, equity) resolved straight from the exchange wallet.
+
+    The paper ledger (``paper_balance.json``) is written only by the PAPER
+    engine and can be stale or foreign — sizing against it (or against the
+    hardcoded ``ACCOUNT_BALANCE`` once trading has begun) silently
+    miscalculates every position. Observed 2026-08-16: a deleted/missing
+    ``paper_balance.json`` dropped the resolved balance to the 10,000 IDR
+    fallback, so FARTCOIN plans were sized at 23-54 IDR — far below the
+    10,000 IDR exchange minimum — and no BUY ever filled. Reads real
+    quote-currency cash from the exchange and adds live open-position
+    notional to derive equity. Returns ``(None, None)`` on failure so the
+    caller can decide its fallback.
+    """
+    try:
+        from scripts.config_manager import read_env
+        from scripts.exchange_manager import ExchangeManager
+
+        env = read_env()
+        quote = env.get("QUOTE_CURRENCY", "IDR").upper()
+        manager = ExchangeManager(
+            active=env.get("EXCHANGE", "indodax"),
+            api_key=env.get("API_KEY", ""),
+            api_secret=env.get("API_SECRET", ""),
+            quote_currency=quote,
+        )
+        wallet = manager.get_provider().fetch_balance()
+        cash = 0.0
+        for balance in wallet.values():
+            if isinstance(balance, dict) and quote in balance:
+                cash += float(balance[quote] or 0.0)
+        exposure = _existing_open_exposure()
+        return cash, cash + exposure
+    except Exception as exc:  # pragma: no cover - defensive network/credential path
+        logging.getLogger("risk_manager").warning(
+            "LIVE account resolution failed (%s); using paper/fallback path", exc,
+        )
+        return None, None
+
+
 def _resolve_account_state() -> tuple[float, float]:
     """Return (balance, equity) for the risk-management run.
 
@@ -959,12 +1002,15 @@ def _resolve_account_state() -> tuple[float, float]:
     Falls back to ``ACCOUNT_BALANCE`` (cash == equity, no positions
     open yet) when the file doesn't exist yet, e.g. first-ever run.
     """
+    if os.getenv("PAPER_MODE", "true").strip().lower() == "false":
+        balance, equity = _resolve_live_account_state()
+        if balance is not None:
+            return balance, equity
     try:
         with open(PAPER_BALANCE_PATH) as f:
             pb = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return ACCOUNT_BALANCE, ACCOUNT_BALANCE
-
     balance = pb.get("final_balance", ACCOUNT_BALANCE)
     existing_exposure = _existing_open_exposure()
     equity = balance + existing_exposure
