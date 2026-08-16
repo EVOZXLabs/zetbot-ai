@@ -191,7 +191,6 @@ class HealthMonitor:
             "paused": os.path.exists(f"{d}/.paused"),
             "paper_mode": self._config.paper_mode,
             "realized_pnl": paper_data.get("realized_pnl", 0.0),
-            "unrealized_pnl": paper_data.get("unrealized_pnl", 0.0),
             "health_score": score,
         }
 
