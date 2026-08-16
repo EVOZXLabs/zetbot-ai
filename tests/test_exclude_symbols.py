@@ -57,6 +57,9 @@ class _FakeProvider:
     def fetch_balance(self):
         return {"free": dict(self._balances), "total": dict(self._balances)}
 
+    def fetch_my_trades(self, symbol, *, since=None, until=None):
+        return self._trades.get(symbol, [])
+
     def _get_exchange(self):
         trades = self._trades
 

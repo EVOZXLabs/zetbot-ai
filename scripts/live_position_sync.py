@@ -7,7 +7,10 @@ and trade history. This module:
 
     - treats ``fetch_balance()`` as truth for QUANTITY currently held
     - reconstructs an approximate ENTRY PRICE from the account's own
-      fills (``fetch_my_trades()``), not from any local cache
+      fills (``provider.fetch_my_trades()``), not from any local cache —
+      every provider exposes it generically; Indodax implements it via
+      the signed ``GET /api/v2/myTrades`` endpoint (the legacy /tapi
+      tradeHistory method was decommissioned 2026-04-07)
 
 Entry-price reconstruction is BEST-EFFORT, not accounting-grade: it
 walks fills newest-first, nets sells against the buys they closed out,
@@ -30,7 +33,6 @@ from scripts.exchange_providers import ExchangeAuthError
 
 LIVE_POSITIONS_PATH = "data/live_positions.json"
 DUST_THRESHOLD = 1e-8
-TRADE_HISTORY_LIMIT = 200
 
 
 def parse_exclude_symbols(raw: Optional[str]) -> set[str]:
@@ -122,8 +124,7 @@ class LivePositionSync:
         self, provider: Any, symbol: str, held_qty: float,
     ) -> Optional[float]:
         try:
-            ex = provider._get_exchange()
-            trades = ex.fetch_my_trades(symbol, limit=TRADE_HISTORY_LIMIT)
+            trades = provider.fetch_my_trades(symbol)
         except Exception:
             return None
         if not trades:
@@ -134,7 +135,7 @@ class LivePositionSync:
         qty_accum = 0.0
         for t in sorted(trades, key=lambda x: x.get("timestamp", 0) or 0, reverse=True):
             side = (t.get("side") or "").lower()
-            amt = float(t.get("amount", 0) or 0)
+            amt = float(t.get("qty", t.get("amount", 0)) or 0)
             price = float(t.get("price", 0) or 0)
             if amt <= 0 or price <= 0:
                 continue
@@ -148,7 +149,12 @@ class LivePositionSync:
                 take = min(amt, remaining)
                 if take <= 0:
                     continue
-                cost += take * price
+                fee = t.get("fee", 0)
+                if isinstance(fee, dict):
+                    fee = float(fee.get("cost", 0) or 0)
+                else:
+                    fee = float(fee or 0)
+                cost += take * price + fee * (take / amt if amt else 0.0)
                 qty_accum += take
                 remaining -= take
                 if remaining <= DUST_THRESHOLD:
@@ -189,9 +195,10 @@ class LivePositionSync:
 
             entry_price = self._reconstruct_entry_price(provider, symbol, qty)
             if entry_price is None:
-                # The exchange cannot reconstruct an entry (e.g. Indodax
-                # has no fetchMyTrades), but a previously-known entry must
-                # not be lost — PnL/management baseline stays stable.
+                # The exchange cannot reconstruct an entry for this
+                # holding (no trade history, or bought before the history
+                # window), but a previously-known entry must not be lost —
+                # PnL/management baseline stays stable.
                 cached = load_live_positions().get(symbol, {})
                 entry_price = cached.get("entry_price")
 

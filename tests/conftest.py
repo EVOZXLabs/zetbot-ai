@@ -121,6 +121,24 @@ def _isolate_environ():
 
 
 @pytest.fixture(autouse=True)
+def _clear_provider_caches():
+    """Clear the process-wide exchange-instance / markets caches.
+
+    ``scripts.exchange_providers`` shares one CCXT instance per
+    (exchange, credentials) and caches ``fetch_markets()`` output for the
+    process lifetime. Provider tests that stub ``ccxt`` (or build their
+    own providers) must not see instances or market lists cached by
+    earlier tests, or their mocked constructors are never called.
+    """
+    import scripts.exchange_providers as _ep  # noqa: PLC0415
+    _ep._EXCHANGE_INSTANCES.clear()
+    _ep._MARKETS_CACHE.clear()
+    yield
+    _ep._EXCHANGE_INSTANCES.clear()
+    _ep._MARKETS_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_cwd():
     """Safety net: no test may leak working-directory changes to others.
 

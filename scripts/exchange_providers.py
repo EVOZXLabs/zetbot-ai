@@ -12,12 +12,15 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import random
 import time
 from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
 
 import ccxt  # noqa: PLC0415
+import requests
 
 _log = logging.getLogger("ZetBot")
 
@@ -68,6 +71,8 @@ def exchange_call_with_retry(
         ccxt.NetworkError,
         ccxt.RequestTimeout,
         ccxt.ExchangeNotAvailable,
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
     )
     where = f"{exchange + ': ' if exchange else ''}{label or fn.__name__}"
     last_exc: Exception | None = None
@@ -84,17 +89,23 @@ def exchange_call_with_retry(
                     record_failure()
                 except Exception:
                     pass
-            _log.warning(
-                "Exchange call '%s' failed (attempt %d/%d): "
-                "%s — %s",
-                where, attempt, retries, type(exc).__name__, exc,
-            )
             if attempt < retries:
+                _log.info(
+                    "Exchange call '%s' failed (attempt %d/%d): "
+                    "%s — %s — retrying",
+                    where, attempt, retries, type(exc).__name__, exc,
+                )
                 delay = min(
                     _RETRY_MAX_DELAY,
                     _RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1),
                 )
                 time.sleep(delay)
+            else:
+                _log.warning(
+                    "Exchange call '%s' failed after %d attempts: "
+                    "%s — %s",
+                    where, retries, type(exc).__name__, exc,
+                )
         except Exception as exc:
             # Non-transient exchange error — log and re-raise immediately.
             _log.warning(
@@ -226,6 +237,21 @@ class ExchangeProvider(Protocol):
         """
         ...
 
+    def fetch_my_trades(
+        self, symbol: str, *, since: int | None = None, until: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the account's fills for ``symbol`` (newest first).
+
+        Used to RECOVER the average entry price of a position whose entry
+        the bot never recorded (e.g. a holding that existed on the exchange
+        before the bot was armed, or a manual buy). Returns a list of
+        unified trade dicts with at least ``price``, ``qty``, ``side`` and
+        ``timestamp``. Empty list when the exchange exposes no trade
+        history (or no credentials). May page backwards through multiple
+        windows to honour exchange range limits.
+        """
+        ...
+
     def get_markets(self) -> list[dict[str, Any]]:
         """Return all available markets."""
         ...
@@ -281,6 +307,23 @@ class ExchangeProvider(Protocol):
 #  BaseProvider — shared CCXT logic
 # ======================================================================
 
+# Process-wide CCXT instances, keyed by (CCXT_NAME, api_key, api_secret).
+# Every pipeline stage (scanner/decision/risk/…) constructs its own
+# provider, which used to build a FRESH CCXT instance each time — and
+# Indodax's ``_get_exchange`` forced ``load_markets()`` on every call,
+# re-hitting ``/api/pairs`` several times per pipeline and frequently
+# timing out (seen as ``Exchange call 'indodax: fetch_markets' failed
+# (attempt 1/3)`` warnings). Reusing one instance per credential set
+# means markets load once per process and the warning disappears.
+_EXCHANGE_INSTANCES: dict[tuple[str, str, str], Any] = {}
+
+# TTL cache of raw ``fetch_markets()`` output per provider name. The
+# scanner needs the raw market array every cycle; re-fetching it from
+# the wire each pipeline is wasteful and a frequent transient-timeout
+# source. Fall back to the last good list when a refresh fails.
+_MARKETS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_MARKETS_TTL_SECONDS = 1800.0
+
 
 class BaseProvider:
     """Base exchange provider with shared CCXT instance management.
@@ -301,20 +344,27 @@ class BaseProvider:
 
     def _get_exchange(self) -> Any:
         if self._instance is None:
-            cls = getattr(ccxt, self.CCXT_NAME, None)
-            if cls is None:
-                raise ValueError(
-                    f"CCXT has no exchange '{self.CCXT_NAME}'"
-                )
-            kwargs: dict[str, Any] = {
-                "enableRateLimit": True,
-                "timeout": 15000,
-            }
-            if self._api_key and self._api_secret:
-                kwargs["apiKey"] = self._api_key
-                kwargs["secret"] = self._api_secret
-            kwargs.update(self.CCXT_KWARGS)
-            self._instance = cls(kwargs)
+            # Share one CCXT instance per (exchange, credentials) across the
+            # whole process: every pipeline stage constructs its own provider
+            # object, and re-creating the instance re-fetches markets every
+            # time (the recurring Indodax /api/pairs timeout warning).
+            key = (self.__class__.__name__, self._api_key, self._api_secret)
+            if key not in _EXCHANGE_INSTANCES:
+                cls = getattr(ccxt, self.CCXT_NAME, None)
+                if cls is None:
+                    raise ValueError(
+                        f"CCXT has no exchange '{self.CCXT_NAME}'"
+                    )
+                kwargs: dict[str, Any] = {
+                    "enableRateLimit": True,
+                    "timeout": 15000,
+                }
+                if self._api_key and self._api_secret:
+                    kwargs["apiKey"] = self._api_key
+                    kwargs["secret"] = self._api_secret
+                kwargs.update(self.CCXT_KWARGS)
+                _EXCHANGE_INSTANCES[key] = cls(kwargs)
+            self._instance = _EXCHANGE_INSTANCES[key]
         return self._instance
 
     def has_credentials(self) -> bool:
@@ -481,13 +531,59 @@ class BaseProvider:
         succeed on the second run once the connection is warm. Works for
         every configured exchange (Binance, Tokocrypto, OKX, Indodax, …)
         because it delegates through ``self.CCXT_NAME``.
+
+        Refreshes from the wire at most every ``_MARKETS_TTL_SECONDS`` per
+        provider; a refresh failure falls back to the last good list (a
+        stale market list beats a failed scan), and the very first success
+        primes the cache so the recurring cold-start timeout warning stops
+        reappearing on every pipeline.
         """
+        now = time.monotonic()
+        cached = _MARKETS_CACHE.get(self.name)
+        if cached and now - cached[0] < _MARKETS_TTL_SECONDS:
+            return cached[1]
         try:
-            return list(exchange_call_with_retry(
+            markets = list(exchange_call_with_retry(
                 lambda: self._get_exchange().fetch_markets(),
                 label="fetch_markets",
                 exchange=self.name,
             ))
+            _MARKETS_CACHE[self.name] = (now, markets)
+            return markets
+        except Exception:
+            if cached:
+                return cached[1]
+            return []
+
+    def fetch_my_trades(
+        self, symbol: str, *, since: int | None = None, until: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Default: unified CCXT ``fetch_my_trades`` when the exchange
+        supports it; otherwise no trade history (empty list). Exchanges
+        without it (Indodax) override this method."""
+        if not self.has_credentials():
+            return []
+        ex = self._get_exchange()
+        if not ex.has.get("fetchMyTrades"):
+            return []
+        try:
+            params: dict[str, Any] = {}
+            result = exchange_call_with_retry(
+                lambda: ex.fetch_my_trades(symbol, since, limit=1000, params=params),
+                label=f"fetch_my_trades({symbol})",
+                exchange=self.name,
+            )
+            return [
+                {
+                    "price": float(t.get("price", 0.0)),
+                    "qty": float(t.get("amount", 0.0)),
+                    "cost": float(t.get("cost", 0.0)),
+                    "side": t.get("side", ""),
+                    "fee": t.get("fee", {}) or {},
+                    "timestamp": t.get("timestamp") or 0,
+                }
+                for t in result
+            ]
         except Exception:
             return []
 
@@ -611,10 +707,6 @@ class IndodaxProvider(BaseProvider):
 
     def _get_exchange(self) -> Any:
         ex = super()._get_exchange()
-        try:
-            ex.load_markets()
-        except Exception:
-            return ex
         # ccxt 4.5.x collapses Indodax pair ids to "{base}{quote}"
         # (``btcidr``), but the private /tapi endpoint only accepts the
         # underscore form (``btc_idr``) — every order, cancel and order
@@ -624,12 +716,25 @@ class IndodaxProvider(BaseProvider):
         # Rewrite the cached market ids once so every ccxt call (public
         # tickers accept both forms; private calls need the underscore)
         # uses the correct pair id.
+        if not ex.markets:
+            # Markets not loaded yet (cold start) — fetch them once; the
+            # shared process-wide instance keeps them cached afterwards.
+            try:
+                ex.load_markets()
+            except Exception:
+                return ex
+        self._rewrite_market_ids(ex)
+        return ex
+
+    @staticmethod
+    def _rewrite_market_ids(ex: Any) -> None:
+        if not ex.markets:
+            return
         for market in ex.markets.values():
             base = market.get("base")
             quote = market.get("quote")
             if base and quote:
                 market["id"] = f"{base}_{quote}".lower()
-        return ex
 
     def client_order_id_params(self, client_order_id: str) -> dict[str, Any]:
         # Indodax has no client-order-id concept. Its private trade
@@ -656,10 +761,107 @@ class IndodaxProvider(BaseProvider):
         # no price.
         return True
 
+    def fetch_my_trades(
+        self, symbol: str, *, since: int | None = None, until: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Recover the account's fills from ``GET /api/v2/myTrades``.
+
+        The legacy ``tradeHistory`` /tapi method was decommissioned on
+        2026-04-07; the v2 endpoint is HMAC-SHA512-signed over the query
+        string and caps each query to a 7-day window (default last 24h).
+        This implementation pages backwards in 7-day windows (up to
+        ``_MY_TRADES_MAX_WINDOWS``) so entry prices can be recovered even
+        for holdings bought before the bot's own ledger began. Returns
+        unified trade dicts (newest first, per API).
+        """
+        if not self.has_credentials():
+            return []
+        ex = self._get_exchange()
+        market = ex.markets.get(symbol)
+        if market is None:
+            return []
+        base_id = str(market.get("base", "")).lower()
+        quote_id = str(market.get("quote", "")).lower()
+        if not base_id or not quote_id:
+            return []
+        endpoint_symbol = f"{base_id}{quote_id}"
+
+        now_ms = int(time.time() * 1000)
+        window_ms = 7 * 24 * 3600 * 1000
+        start = since or (now_ms - window_ms)
+        end = until or now_ms
+        if end - start > window_ms:
+            start = end - window_ms
+
+        trades: list[dict[str, Any]] = []
+        for _ in range(_MY_TRADES_MAX_WINDOWS):
+            params: dict[str, Any] = {
+                "symbol": endpoint_symbol,
+                "limit": 1000,
+                "sort": "desc",
+                "timestamp": int(time.time() * 1000),
+                "recvWindow": 5000,
+                "startTime": start,
+                "endTime": end,
+            }
+            query = "&".join(f"{k}={v}" for k, v in params.items())
+            sign = hmac.new(
+                self._api_secret.encode("utf-8"),
+                query.encode("utf-8"),
+                hashlib.sha512,
+            ).hexdigest()
+            try:
+                resp = exchange_call_with_retry(
+                    lambda: requests.get(
+                        "https://tapi.indodax.com/api/v2/myTrades",
+                        params=params,
+                        headers={
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                            "X-APIKEY": self._api_key,
+                            "Sign": sign,
+                        },
+                        timeout=15,
+                    ),
+                    label=f"fetch_my_trades({symbol})",
+                    exchange=self.name,
+                )
+            except Exception:
+                break
+            try:
+                data = resp.json().get("data", []) or []
+            except Exception:
+                break
+            trades.extend(
+                {
+                    "price": float(t.get("price") or 0.0),
+                    "qty": float(t.get("qty") or 0.0),
+                    "cost": float(t.get("quoteQty") or 0.0),
+                    "side": "buy" if t.get("isBuyer") else "sell",
+                    "fee": float(t.get("commission") or 0.0),
+                    "fee_asset": t.get("commissionAsset", ""),
+                    "timestamp": int(t.get("time") or 0),
+                }
+                for t in data
+            )
+            if len(data) < 1000:
+                break
+            oldest = min((t["timestamp"] for t in data), default=0)
+            if not oldest:
+                break
+            end = oldest
+            start = end - window_ms
+        return trades
+
 
 # ======================================================================
 #  Provider registry (auto-discovered)
 # ======================================================================
+
+# Max 7-day windows to walk back when recovering trade history for an
+# unknown-entry position (28 days). Bounded so an ancient holding cannot
+# trigger unbounded API paging.
+_MY_TRADES_MAX_WINDOWS = 4
 
 _BUILTIN_PROVIDERS: list[type[BaseProvider]] = [
     BinanceProvider,

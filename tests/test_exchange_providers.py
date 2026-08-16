@@ -260,6 +260,10 @@ def test_protocol_structural_check() -> None:
             return {}
         def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
             return {}
+        def fetch_my_trades(
+            self, symbol: str, *, since: int | None = None, until: int | None = None,
+        ) -> list[dict[str, Any]]:
+            return []
         def has_credentials(self) -> bool:
             return False
         def fetch_api_key_permissions(self) -> dict[str, Any]:
