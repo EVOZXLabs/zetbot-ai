@@ -277,6 +277,81 @@ class TestLiveAdoption:
         assert len(entries) == 1
         assert entries[0]["stop_loss"] == 200.0
 
+    def test_adoption_restores_levels_from_entry_snapshot(self, tmp_path, monkeypatch) -> None:
+        # A live holding with NO levels in the live cache must still get
+        # stop/tp restored from the write-once entry snapshot store —
+        # otherwise every restart wipes TP/SL for non-plan holdings.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": [], "active_count": 0, "closed_count": 0},
+        ))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "WLFI/IDR": {
+                "symbol": "WLFI/IDR", "quantity": 221.43266367,
+                "entry_price": 1086.957976320495, "current_price": 1064.0,
+                "source": "live_exchange_sync",
+            },
+        }))
+        (tmp_path / "data" / "entry_snapshots.json").write_text(json.dumps({
+            "generated": "t",
+            "snapshots": {
+                "LIVE-1": {
+                    "order_id": "LIVE-1", "symbol": "WLFI/IDR",
+                    "stop_loss": 1055.02220148, "tp1": 1118.89375116,
+                    "tp2": 1150.82952601, "tp3": 1182.76530086,
+                },
+            },
+        }))
+
+        self._pipeline(tmp_path)._merge_live_positions_into_managed()
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        w = entries["WLFI/IDR"]
+        assert w["status"] == "OPEN"
+        assert w["stop_loss"] == 1055.02220148
+        assert w["tp1"] == 1118.89375116
+        assert w["tp2"] == 1150.82952601
+        assert w["tp3"] == 1182.76530086
+
+    def test_managed_entry_heals_levels_from_entry_snapshot(self, tmp_path, monkeypatch) -> None:
+        # Managed entry whose stop/TP were zeroed by an old buggy sync
+        # must self-heal from the write-once entry snapshot store.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": [{
+                "symbol": "WLFI/IDR", "status": "OPEN", "remaining_qty": 221.43,
+                "stop_loss": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0,
+                "entry_price": 1086.957976320495,
+            }]},
+        ))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "WLFI/IDR": {"symbol": "WLFI/IDR", "quantity": 221.43,
+                         "entry_price": 1086.957976320495, "current_price": 1064.0},
+        }))
+        (tmp_path / "data" / "entry_snapshots.json").write_text(json.dumps({
+            "generated": "t",
+            "snapshots": {
+                "LIVE-1": {
+                    "order_id": "LIVE-1", "symbol": "WLFI/IDR",
+                    "stop_loss": 1055.02220148, "tp1": 1118.89375116,
+                    "tp2": 1150.82952601, "tp3": 1182.76530086,
+                },
+            },
+        }))
+
+        self._pipeline(tmp_path)._merge_live_positions_into_managed()
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        w = entries["WLFI/IDR"]
+        assert w["stop_loss"] == 1055.02220148
+        assert w["tp1"] == 1118.89375116
+        assert w["tp2"] == 1150.82952601
+        assert w["tp3"] == 1182.76530086
+
 
 # ---------------------------------------------------------------------------
 #  Wallet holds last known balance on transient failure

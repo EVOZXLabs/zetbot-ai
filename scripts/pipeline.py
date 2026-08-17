@@ -900,7 +900,7 @@ class Pipeline:
                         val = float(p.get(key) or 0)
                         if val <= 0:
                             val = float(
-                                _snapshot_levels.get(key, 0) or 0
+                                _snapshot_levels.get(sym, {}).get(key, 0) or 0
                             )
                         if val > 0:
                             existing[key] = val
@@ -930,7 +930,9 @@ class Pipeline:
             def _level(key: str) -> float:
                 val = float(p.get(key) or 0)
                 if val <= 0:
-                    val = float(_snapshot_levels.get(key, 0) or 0)
+                    val = float(
+                        _snapshot_levels.get(sym, {}).get(key, 0) or 0
+                    )
                 return val
 
             adopted.append({
