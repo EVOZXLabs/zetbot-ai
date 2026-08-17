@@ -263,13 +263,31 @@ install_requirements() {
     fi
     info "Upgrading pip..."
     "$PY" -m pip install --upgrade pip -q 2>/dev/null || warn "pip upgrade skipped"
-    info "Installing requirements.txt (this can take a few minutes)..."
-    if "$PY" -m pip install -r requirements.txt; then
+
+    local req_file="requirements.txt"
+    local tmp_req=""
+
+    # On Termux with --system-site-packages, pandas/numpy are prebuilt
+    # via pkg.  pip still tries to build them from source when listed
+    # in requirements.txt (no aarch64 wheels on PyPI), causing wheel
+    # build failures.  Filter them out so pip uses the pkg versions.
+    if [[ "$PKG_MGR" == "pkg" ]]; then
+        tmp_req="$(mktemp)"
+        grep -viE '^(pandas|numpy)$' "$req_file" > "$tmp_req"
+        req_file="$tmp_req"
+        info "Termux detected — skipping pip install of pandas/numpy (using pkg prebuilts)"
+    fi
+
+    info "Installing $req_file (this can take a few minutes)..."
+    if "$PY" -m pip install -r "$req_file"; then
         pass "Python dependencies installed"
     else
         fail "pip install failed — re-run: bash install.sh"
+        rm -f "$tmp_req"
         return 1
     fi
+    rm -f "$tmp_req"
+
     # Optional: on-chain / Web3 deps (solders requires Rust toolchain;
     # fails on Termux — safe to skip for CEX-only trading).
     if [[ -f requirements-onchain.txt ]]; then
