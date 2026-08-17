@@ -309,6 +309,36 @@ def load_live_positions() -> dict[str, Any]:
         return {}
 
 
+def snapshot_levels_for_symbol(symbol: str) -> dict[str, float]:
+    """Best-effort SL/TP levels for ``symbol`` from the write-once entry
+    snapshot store (``data/entry_snapshots.json``), keyed by the symbol
+    alone so ANY symbol can be healed — never symbol-specific code.
+
+    Returns only keys whose value is a positive price
+    (``stop_loss``/``tp1``/``tp2``/``tp3``).  Empty dict when there is no
+    snapshot (e.g. a position that predates snapshotting).
+    """
+    try:
+        from scripts.paper_state_lock import load_entry_snapshots  # noqa: PLC0415
+        out: dict[str, float] = {}
+        for snap in load_entry_snapshots().values():
+            if not isinstance(snap, dict) or snap.get("symbol") != symbol:
+                continue
+            for key in ("stop_loss", "tp1", "tp2", "tp3"):
+                val = snap.get(key)
+                try:
+                    fval = float(val or 0)
+                except (TypeError, ValueError):
+                    continue
+                if fval > 0:
+                    out[key] = fval
+            if out:
+                break
+        return out
+    except Exception:
+        return {}
+
+
 def bot_managed_live_positions(path: Optional[str] = None) -> list[dict[str, Any]]:
     """Live position records whose entry price is known (bot-managed).
 
@@ -397,6 +427,14 @@ def merge_live_positions(
         for key, val in extras.get(pos["symbol"], {}).items():
             if val is not None and pos.get(key) is None:
                 pos[key] = val
+        # Generic fallback: when the previous cache has no SL/TP for this
+        # symbol (e.g. position stamped before snapshotting existed), the
+        # write-once entry snapshot store may still hold the plan levels.
+        # Never symbol-specific — heals any symbol uniformly.
+        if not extras.get(pos["symbol"]):
+            for key, val in snapshot_levels_for_symbol(pos["symbol"]).items():
+                if val > 0 and pos.get(key) is None:
+                    pos[key] = val
         current[pos["symbol"]] = pos
     save_live_positions(current)
     return current

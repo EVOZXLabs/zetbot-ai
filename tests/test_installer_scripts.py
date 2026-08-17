@@ -104,7 +104,7 @@ class TestInstallSh:
 
     def test_installs_required_system_packages(self) -> None:
         text = _read("install.sh")
-        assert "pkg install -y git python clang rust openssl libffi" in text
+        assert "pkg install -y git python python-pip clang rust openssl libffi" in text
         assert "pkg install -y tur-repo" in text
         assert "pkg install -y python-numpy python-pandas" in text
 
@@ -136,7 +136,12 @@ class TestInstallSh:
 
     def test_installs_requirements(self) -> None:
         text = _read("install.sh")
-        assert "pip install -r requirements.txt" in text
+        # The Termux path filters pandas/numpy out of the requirements
+        # file (prebuilt via pkg), so the pip install line is dynamic —
+        # assert the pip invocation + the filter behaviour instead of a
+        # fixed literal.
+        assert "pip install -r" in text
+        assert "grep -viE" in text
 
     def test_creates_env_from_example_never_overwrites(self) -> None:
         text = _read("install.sh")
@@ -318,7 +323,7 @@ class TestInstallBehavior:
         pkg_calls = [l for l in log.read_text().splitlines() if l.startswith("pkg ")]
         assert "pkg update -y" in pkg_calls
         assert "pkg upgrade -y" in pkg_calls
-        assert "pkg install -y git python clang rust openssl libffi" in pkg_calls
+        assert "pkg install -y git python python-pip clang rust openssl libffi" in pkg_calls
         assert "pkg install -y tur-repo" in pkg_calls
         assert "pkg install -y python-numpy python-pandas" in pkg_calls
         # tur-repo (which provides pandas) must be subscribed BEFORE
@@ -331,7 +336,10 @@ class TestInstallBehavior:
         assert any("--system-site-packages" in c for c in venv_calls), venv_calls
 
         py_calls = log.read_text()
-        assert "-m pip install -r requirements.txt" in py_calls
+        # On Termux, pandas/numpy are filtered into a temp requirements
+        # file (prebuilt via pkg), so assert the pip install ran rather
+        # than the literal "requirements.txt".
+        assert "-m pip install -r" in py_calls
 
     def test_apt_path_end_to_end(self, tmp_path: Path) -> None:
         bin_dir = _build_fake_tools(tmp_path)

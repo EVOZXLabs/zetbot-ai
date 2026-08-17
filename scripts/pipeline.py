@@ -860,6 +860,20 @@ class Pipeline:
         managed = pos_data.get("positions", [])
         managed_by_sym = {p.get("symbol"): p for p in managed}
 
+        # Generic SL/TP restore source for ANY adopted/healed symbol: the
+        # write-once entry snapshot store keeps the plan levels (stop_loss,
+        # tp1..3) as of each BUY fill — never symbol-specific.
+        try:
+            from scripts.live_position_sync import (  # noqa: PLC0415
+                snapshot_levels_for_symbol,
+            )
+            _snapshot_levels = {
+                sym: snapshot_levels_for_symbol(sym)
+                for sym in live.keys() if isinstance(sym, str)
+            }
+        except Exception:
+            _snapshot_levels = {}
+
         adopted = []
         for sym, p in live.items():
             if not isinstance(p, dict) or not sym:
@@ -877,14 +891,20 @@ class Pipeline:
                 # Already managed: never let a level-less exchange sync
                 # zero out the plan's stop/TP, and self-heal the case
                 # where an earlier buggy sync already did (managed record
-                # lost its stop but the live cache still knows it).
+                # lost its stop but the live cache still knows it, or the
+                # write-once entry snapshot still has the plan levels).
                 existing = managed_by_sym[sym]
                 healed = False
                 for key in ("stop_loss", "tp1", "tp2", "tp3"):
-                    if float(existing.get(key) or 0) <= 0 \
-                            and float(p.get(key) or 0) > 0:
-                        existing[key] = float(p[key])
-                        healed = True
+                    if float(existing.get(key) or 0) <= 0:
+                        val = float(p.get(key) or 0)
+                        if val <= 0:
+                            val = float(
+                                _snapshot_levels.get(key, 0) or 0
+                            )
+                        if val > 0:
+                            existing[key] = val
+                            healed = True
                 if float(existing.get("entry_price") or 0) <= 0 \
                         and float(p.get("entry_price") or 0) > 0:
                     existing["entry_price"] = float(p["entry_price"])
@@ -902,6 +922,17 @@ class Pipeline:
                 # buy. Leave it in live_positions.json only — /positions
                 # still shows it, but nothing auto-trades it.
                 continue
+
+            # Generic SL/TP restoration for ANY adopted symbol: prefer the
+            # live cache levels (stamped at buy time by
+            # ExecutionPipeline.execute_plan), fall back to the write-once
+            # entry snapshot. Never symbol-specific.
+            def _level(key: str) -> float:
+                val = float(p.get(key) or 0)
+                if val <= 0:
+                    val = float(_snapshot_levels.get(key, 0) or 0)
+                return val
+
             adopted.append({
                 "symbol": sym,
                 "entry_price": float(entry),
@@ -910,11 +941,11 @@ class Pipeline:
                 "remaining_qty": qty,
                 "remaining_pct": 100.0,
                 "cost_basis": float(entry) * qty,
-                "stop_loss": float(p.get("stop_loss") or 0),
-                "current_stop": float(p.get("stop_loss") or 0),
-                "tp1": float(p.get("tp1") or 0),
-                "tp2": float(p.get("tp2") or 0),
-                "tp3": float(p.get("tp3") or 0),
+                "stop_loss": _level("stop_loss"),
+                "current_stop": _level("stop_loss"),
+                "tp1": _level("tp1"),
+                "tp2": _level("tp2"),
+                "tp3": _level("tp3"),
                 "tp1_hit": False,
                 "tp2_hit": False,
                 "tp3_hit": False,

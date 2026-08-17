@@ -520,7 +520,7 @@ main() {
             warn "PREFIX is not set — global 'zetbot' shortcut was not created"
         fi
     else
-        fail "bin/zetbot not found"
+        warn "bin/zetbot not found — skipping 'zetbot' shortcut (optional)"
     fi
 
     step 9 11 "Creating optional Termux:Widget shortcut"

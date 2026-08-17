@@ -206,6 +206,29 @@ class ExecutionPipeline:
                     record_live_entry(result)
                 except Exception:
                     pass
+                # Stamp the plan's SL/TP levels into live_positions.json so
+                # a later exchange resync (which only knows price/qty, never
+                # stop/TP) cannot zero them out: merge_live_positions
+                # preserves extras from the old cache, and the adoption
+                # path in pipeline._merge_live_positions_into_managed reads
+                # them from the cache. Without this, a reconnect/restart
+                # adopted the position with tp1/tp2/tp3 = 0 (BUG: WLFI/IDR).
+                try:
+                    from scripts.live_position_sync import (  # noqa: PLC0415
+                        load_live_positions,
+                        save_live_positions,
+                    )
+                    cached = load_live_positions()
+                    rec = dict(cached.get(symbol) or {})
+                    rec.setdefault("symbol", symbol)
+                    for _k in ("stop_loss", "tp1", "tp2", "tp3"):
+                        _v = plan.get(_k, 0) or 0
+                        if float(_v) > 0:
+                            rec[_k] = float(_v)
+                    cached[symbol] = rec
+                    save_live_positions(cached)
+                except Exception:
+                    pass
 
             return result
         finally:

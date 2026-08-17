@@ -624,6 +624,45 @@ class PositionExport:
                     seen.add(sym)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
+        # LIVE mode: the authoritative ledger is live_positions.json
+        # (exchange truth), NOT paper_state.json.  A LIVE holding that has
+        # no active READY plan this cycle (opened in a previous cycle)
+        # must survive the rewrite too — otherwise it is dropped here and
+        # later re-adopted from the sync WITHOUT its SL/TP levels (the
+        # bug that wiped tp1/tp2/tp3 on every reconnect/restart).
+        try:
+            with open("data/live_positions.json") as _f:
+                live = json.load(_f)
+            for sym, vp in (live or {}).items():
+                if not isinstance(vp, dict) or not sym:
+                    continue
+                if sym in seen:
+                    continue
+                if vp.get("entry_price") is None \
+                        or float(vp.get("entry_price") or 0) <= 0:
+                    continue
+                rec = dict(vp)
+                rec.setdefault("symbol", sym)
+                rec.setdefault("quantity", 0.0)
+                rec.setdefault("remaining_qty", rec.get("quantity", 0.0))
+                rec.setdefault("remaining_pct", 100.0)
+                rec.setdefault("current_price", rec.get("entry_price"))
+                rec.setdefault("status", "OPEN")
+                # Generic SL/TP restore: prefer levels already carried in
+                # the live cache, else the write-once entry snapshot.
+                from scripts.live_position_sync import (  # noqa: PLC0415
+                    snapshot_levels_for_symbol,
+                )
+                snap = snapshot_levels_for_symbol(sym)
+                for key in ("stop_loss", "tp1", "tp2", "tp3"):
+                    val = float(rec.get(key) or 0)
+                    if val <= 0:
+                        val = float(snap.get(key, 0) or 0)
+                    rec[key] = val
+                positions_data.append(rec)
+                seen.add(sym)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
         data = {
             "generated": datetime.now(timezone.utc).isoformat(),
             "total_positions": len(positions_data),

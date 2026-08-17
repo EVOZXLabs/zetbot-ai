@@ -925,6 +925,30 @@ class LiveExecutionProvider(ExecutionProvider):
             )
             elapsed = (time.time() - t0) * 1000
             status = _map_live_status(ccxt_order, amount_p)
+            filled_price = float(ccxt_order.get("average") or ccxt_order.get("price") or price)
+            filled_amount = float(ccxt_order.get("filled") or 0)
+
+            # Persist a write-once ENTRY SNAPSHOT (SL/TP + plan + decision
+            # scores + indicator values as of this fill) — mirrors the
+            # paper provider so LIVE entries have the same durable record
+            # of the plan levels.  Without it, a restart/adoption could
+            # only ever recover price/qty, never the stop/TP levels
+            # (BUG: WLFI/IDR lost tp1/tp2/tp3 on reconnect).  Never
+            # fails trading — best-effort persist.
+            try:
+                from scripts.paper_state_lock import save_entry_snapshot  # noqa: PLC0415
+                _snap_plan = dict(request.metadata or {})
+                _snap_plan.setdefault("entry_price", filled_price or price or 0.0)
+                _snap_plan.setdefault("quantity", filled_amount or amount_p or 0.0)
+                save_entry_snapshot(
+                    symbol=symbol,
+                    order_id=str(ccxt_order.get("id", "")),
+                    opened_at=datetime.now(timezone.utc).isoformat(),
+                    plan=_snap_plan,
+                )
+            except Exception:
+                pass
+
             return OrderResult(
                 order_id=str(ccxt_order.get("id", "")),
                 trace_id=request.trace_id,
@@ -934,8 +958,8 @@ class LiveExecutionProvider(ExecutionProvider):
                 side="BUY",
                 type=request.type,
                 amount=amount_p,
-                filled_amount=float(ccxt_order.get("filled") or 0),
-                filled_price=float(ccxt_order.get("average") or ccxt_order.get("price") or price),
+                filled_amount=filled_amount,
+                filled_price=filled_price,
                 fee=float((ccxt_order.get("fee") or {}).get("cost") or 0),
                 cost=float(ccxt_order.get("cost") or 0),
                 latency_ms=round(elapsed, 2),
