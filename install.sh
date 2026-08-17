@@ -170,8 +170,8 @@ install_packages() {
     case "$PKG_MGR" in
         pkg)
             # Termux package names — matches INSTALL.md / spec exactly.
-            info "Installing: git python clang rust openssl libffi"
-            pkg install -y git python clang rust openssl libffi || return 1
+            info "Installing: git python python-pip clang rust openssl libffi"
+            pkg install -y git python python-pip clang rust openssl libffi || return 1
 
             # Termux does not use PyPI manylinux wheels.  cryptography is a
             # Rust-backed native package and its PyPI sdist currently asks
@@ -179,8 +179,8 @@ install_packages() {
             # Termux Python (e.g. cpython-314-aarch64-linux-android).
             # Use Termux-built packages instead and let the venv inherit them
             # via --system-site-packages below.
-            info "Installing: python-cryptography python-cffi (Termux native builds)"
-            pkg install -y python-cryptography python-cffi || return 1
+            info "Installing: python-cryptography (Termux native build)"
+            pkg install -y python-cryptography || return 1
 
             # numpy/pandas: PyPI has no manylinux/musllinux wheel that's
             # compatible with Termux's Python + Android's bionic libc, so
@@ -271,8 +271,15 @@ install_requirements() {
         fail "requirements.txt not found"
         return 1
     fi
-    info "Upgrading pip..."
-    "$PY" -m pip install --upgrade pip -q 2>/dev/null || warn "pip upgrade skipped"
+    # Termux owns pip through the python-pip package. Do not upgrade pip
+    # with PyPI here: Termux intentionally prevents this because replacing
+    # the packaged pip can break the Python installation.
+    if [[ "$PKG_MGR" == "pkg" ]]; then
+        info "Termux detected — keeping the system-managed pip"
+    else
+        info "Upgrading pip..."
+        "$PY" -m pip install --upgrade pip -q 2>/dev/null || warn "pip upgrade skipped"
+    fi
 
     local req_file="requirements.txt"
     local tmp_req=""
@@ -288,7 +295,7 @@ install_requirements() {
         tmp_req="$(mktemp)"
         grep -viE '^(pandas|numpy|cryptography|cffi)([[:space:]]*(==|>=|<=|~=|>|<).*)?$' "$req_file" > "$tmp_req"
         req_file="$tmp_req"
-        info "Termux detected — using pkg prebuilts for numpy, pandas, cryptography, and cffi"
+        info "Termux detected — using pkg prebuilts for numpy, pandas, and cryptography"
     fi
 
     info "Installing $req_file (this can take a few minutes)..."
