@@ -5,6 +5,7 @@ import os
 import time
 import unittest.mock
 from typing import Any
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -501,6 +502,110 @@ class TestOrderManager:
     def test_validate_live_ready_paper_returns_none(self) -> None:
         error = self.mgr.validate_live_ready()
         assert error is None  # PAPER mode -> no validation
+
+
+# ---------------------------------------------------------------------------
+#  Balance-based verification of lost-response orders
+# ---------------------------------------------------------------------------
+
+
+class TestBalanceVerification:
+    """Exchanges that cannot tag orders (indodax) must still be able to
+    confirm a lost-response order via the exchange balance — otherwise a
+    SELL that actually filled is reported as FAILED and the user is told
+    to "check manually" while the wallet already moved."""
+
+    def _mgr(self, mode: str = "LIVE"):
+        exchange = SimpleNamespace(
+            name="indodax",
+            get_provider=MagicMock(),
+        )
+        config = MagicMock()
+        wallet = MagicMock()
+        risk = MagicMock()
+        mgr = OrderManager(config, exchange, wallet, risk, mode=mode)
+        return mgr, exchange
+
+    def test_sell_verified_when_base_balance_gone(self) -> None:
+        mgr, exchange = self._mgr()
+        provider = MagicMock()
+        provider.fetch_balance.return_value = {
+            "free": {"WLFI": 0.0, "IDR": 500000.0},
+        }
+        provider.get_ticker.return_value = {"last": 1050.0}
+        exchange.get_provider.return_value = provider
+
+        req = OrderRequest(
+            symbol="WLFI/IDR", side="SELL", type="MARKET",
+            amount=221.4, price=1050.0,
+        )
+        result = mgr._verify_by_balance(req)
+
+        assert result is not None
+        assert result.status == "EXECUTED"
+        assert result.filled_amount == 221.4
+        assert result.executor == "order_manager_balance_verified"
+
+    def test_sell_not_verified_when_balance_unchanged(self) -> None:
+        mgr, exchange = self._mgr()
+        provider = MagicMock()
+        provider.fetch_balance.return_value = {
+            "free": {"WLFI": 221.4, "IDR": 500000.0},
+        }
+        exchange.get_provider.return_value = provider
+
+        req = OrderRequest(
+            symbol="WLFI/IDR", side="SELL", type="MARKET",
+            amount=221.4, price=1050.0,
+        )
+        assert mgr._verify_by_balance(req) is None
+
+    def test_buy_verified_when_base_balance_rose(self) -> None:
+        mgr, exchange = self._mgr()
+        provider = MagicMock()
+        provider.fetch_balance.return_value = {
+            "free": {"SOL": 12.5, "IDR": 100000.0},
+        }
+        provider.get_ticker.return_value = {"last": 2_000_000.0}
+        exchange.get_provider.return_value = provider
+
+        req = OrderRequest(
+            symbol="SOL/IDR", side="BUY", type="MARKET",
+            amount=12.5, price=2_000_000.0,
+        )
+        result = mgr._verify_by_balance(req)
+
+        assert result is not None
+        assert result.status == "EXECUTED"
+        assert result.filled_amount == 12.5
+
+    def test_returns_none_in_paper_mode(self) -> None:
+        mgr, exchange = self._mgr(mode="PAPER")
+        req = OrderRequest(
+            symbol="WLFI/IDR", side="SELL", type="MARKET",
+            amount=221.4, price=1050.0,
+        )
+        assert mgr._verify_by_balance(req) is None
+
+
+class TestOrderManagerRest:
+    """Remainder of the OrderManager suite (setup identical to
+    TestOrderManager)."""
+
+    def setup_method(self) -> None:
+        self.config = MagicMock()
+        self.config.paper_mode = True
+        self.exchange = MagicMock()
+        self.exchange.name = "binance"
+        self.exchange.get_ticker.return_value = {"last": 50000.0}
+        self.wallet = MagicMock()
+        self.wallet.free_balance = 10000.0
+        self.risk = MagicMock()
+        self.risk.get_approved.return_value = [
+            {"symbol": "BTC/USDT", "entry_price": 50000.0, "quantity": 0.1,
+             "position_size_usdt": 5000.0, "stop_loss": 49000.0, "tp1": 51000.0},
+        ]
+        self.mgr = OrderManager(self.config, self.exchange, self.wallet, self.risk, mode="PAPER")
 
     def test_validate_live_ready_live_returns_error(self) -> None:
         self.mgr.set_mode("LIVE")

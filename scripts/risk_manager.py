@@ -51,8 +51,8 @@ MAX_RISK_PER_TRADE_PCT = MM_RISK_PER_TRADE * 100.0   # % of account at risk per 
 MAX_DAILY_LOSS_PCT = MM_DAILY_LOSS_LIMIT * 100.0      # % max drawdown per day (3.0 = 3%)
 MAX_OPEN_POSITIONS = MM_MAX_OPEN_POSITIONS            # default mode: RISK_PERCENTAGE (see money_management.py)
 MONEY_MANAGEMENT_MODE = MM_DEFAULT_MODE.value
-MIN_RR = 1.5                        # minimum acceptable risk-reward
-MAX_RR = 5.0                        # cap to avoid unrealistic targets
+MIN_RR = float(os.getenv("MIN_RR", "2.0"))   # minimum acceptable risk-reward
+MAX_RR = float(os.getenv("MAX_RR", "5.0"))    # cap to avoid unrealistic targets
 MIN_POSITION_SIZE_USDT = 10.0       # smallest trade value — reflects real
                                      # exchange minimum notional, not an
                                      # arbitrary cutoff. Accounts too small
@@ -64,7 +64,7 @@ MIN_POSITION_SIZE_USDT = 10.0       # smallest trade value — reflects real
                                      # EXCHANGE_MIN_NOTIONAL so a trade
                                      # approved here is never rejected
                                      # downstream at execution.
-MIN_PROBABILITY = 50.0              # from decision engine
+MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "55.0"))  # from decision engine
 MAX_ATR_PCT = 8.0                   # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
 # max % of account EQUITY across ALL open positions combined
@@ -80,8 +80,8 @@ MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
 # every run — which is exactly how a stale 0.6 (60 %) cap survived a
 # ``MAX_POSITION_SIZE_PCT=0.05`` .env edit and over-exposed the account.
 MAX_POSITION_SIZE_PCT = 0.6
-STOP_ATR_MULTIPLIER = 1.5           # ATR stop distance multiplier
-STOP_FIXED_PCT = 5.0                # fallback fixed stop %
+STOP_ATR_MULTIPLIER = float(os.getenv("STOP_ATR_MULTIPLIER", "1.5"))   # ATR stop distance multiplier
+STOP_FIXED_PCT = float(os.getenv("STOP_FIXED_PCT", "3.0"))              # fallback fixed stop %
 
 # Optional equity-scaled concurrent-position tiers. NOT used by default
 # any more — SPECIFICATION.md §25/§47/§49 fixes "Maximum Open Position"
@@ -95,8 +95,13 @@ POSITION_COUNT_TIERS: list[tuple[float, int]] = [
     (float("inf"), 8),
 ]
 
-# Take-profit multipliers (relative to stop distance)
-TP_MULTIPLIERS = [1.0, 2.0, 3.0]
+# Take-profit multipliers (relative to stop distance), env-configurable
+# via TP_MULTIPLIERS (comma-separated). Default 1.5/3.0/5.0 gives TP1 a
+# real reward edge over the stop (RR ≥ 1.5 at the first exit) instead of
+# a razor-thin 1.0 that fees turn into a loss.
+TP_MULTIPLIERS = [float(x) for x in os.getenv(
+    "TP_MULTIPLIERS", "1.5,3.0,5.0",
+).split(",") if x.strip()] or [1.5, 3.0, 5.0]
 
 def dynamic_max_positions(
     equity: float,

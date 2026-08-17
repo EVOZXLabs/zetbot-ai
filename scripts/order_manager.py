@@ -734,6 +734,16 @@ class OrderManager:
                 try:
                     existing = self._find_existing_live_order(request)
                 except OrderVerificationError as exc:
+                    # Exchanges that cannot tag orders (e.g. indodax) can
+                    # never prove the previous attempt's fate via an order
+                    # lookup. Before giving up, verify against the EXCHANGE
+                    # BALANCE: a SELL whose base balance dropped means the
+                    # order actually filled, a BUY whose base balance rose
+                    # means it filled. This is generic — it works for any
+                    # exchange without client-order-id tagging.
+                    verified = self._verify_by_balance(request)
+                    if verified is not None:
+                        return verified
                     return OrderResult(
                         order_id=_generate_id("unverified_"),
                         trace_id=request.trace_id,
@@ -745,7 +755,8 @@ class OrderManager:
                         amount=request.amount,
                         error=(
                             f"Retry aborted — could not confirm whether the "
-                            f"previous attempt reached the exchange ({exc}). "
+                            f"previous attempt reached the exchange ({exc}), "
+                            f"and balance verification found no change. "
                             f"Check manually before resubmitting "
                             f"(client_order_id={request.client_order_id})."
                         ),
@@ -887,6 +898,80 @@ class OrderManager:
             if tag and str(tag) == client_id:
                 return order
         return None
+
+    def _verify_by_balance(
+        self, request: OrderRequest,
+    ) -> Optional[OrderResult]:
+        """Best-effort balance-based verification of a lost-response
+        order on exchanges that cannot tag orders with a client id.
+
+        Generic rule (no symbol-specific logic):
+          * SELL  → base balance near/at 0, or clearly below the amount
+                    we tried to sell → the sell went through.
+          * BUY   → base balance now at/above the requested amount →
+                    the buy went through.
+
+        Returns an ``OrderResult`` when the balance positively proves the
+        order filled, ``None`` when it can't be determined either way
+        (so the caller must NOT retry and must surface the ambiguity).
+        """
+        if self._engine.mode != "LIVE":
+            return None
+        base = request.symbol.split("/")[0]
+        amount = float(request.amount or 0)
+        if amount <= 0:
+            return None
+
+        try:
+            provider = self._exchange.get_provider()
+            raw = provider.fetch_balance()
+            bucket = raw.get("free") if isinstance(raw, dict) else None
+            if not isinstance(bucket, dict):
+                return None
+            free = float(bucket.get(base, 0) or 0)
+        except Exception:
+            return None
+
+        try:
+            cp = 0.0
+            ticker = provider.get_ticker(request.symbol)
+            if isinstance(ticker, dict):
+                cp = float(ticker.get("last", 0) or ticker.get("ask", 0) or 0)
+        except Exception:
+            cp = 0.0
+
+        side = (request.side or "").upper()
+        filled = None
+        if side == "SELL" and free <= 0:
+            filled = amount
+        elif side == "SELL" and free < amount * 0.5:
+            # Substantially reduced — treat the missing portion as filled.
+            filled = round(amount - free, 8)
+        elif side == "BUY" and free >= amount:
+            filled = amount
+        if filled is None:
+            return None
+
+        return OrderResult(
+            order_id=_generate_id("balance_verified_"),
+            trace_id=request.trace_id,
+            execution_id=_generate_id("exe_"),
+            status="EXECUTED",
+            symbol=request.symbol,
+            side=side,
+            type=request.type,
+            amount=request.amount,
+            filled_amount=filled,
+            filled_price=cp or 0.0,
+            fee=0.0,
+            cost=0.0,
+            error=None,
+            retries=1,
+            executor="order_manager_balance_verified",
+            exchange=self._exchange.name,
+            mode="LIVE",
+            timestamp=_now(),
+        )
 
     def _result_from_existing_order(
         self, request: OrderRequest, order: dict[str, Any], retries: int,

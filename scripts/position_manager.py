@@ -30,7 +30,11 @@ TRADE_PLAN_PATH = "data/trade_plan.json"
 SCANNER_PATH = "data/scanner_results.json"
 
 # Trailing stop
-TRAIL_ATR_MULTIPLIER = 2.0
+TRAIL_ATR_MULTIPLIER = float(os.getenv("TRAIL_ATR_MULTIPLIER", "2.0"))
+
+# Breakeven: how many ATRs of profit above entry before the stop moves
+# up to entry (generic — env-configurable via BREAKEVEN_ATR_MULTIPLIER).
+BREAKEVEN_ATR_MULTIPLIER = float(os.getenv("BREAKEVEN_ATR_MULTIPLIER", "1.0"))
 
 # Partial take-profit allocation (% of position sold at each level)
 TP1_SELL_PCT = 30.0
@@ -184,11 +188,27 @@ class DataLoader:
 
 
 class BreakevenManager:
-    """Move stop-loss to entry price once TP1 has been reached."""
+    """Move stop-loss to entry price once the trade is safely in profit.
+
+    Generic rule (env-configurable, never symbol-specific): once price
+    has risen ``BREAKEVEN_ATR_MULTIPLIER × ATR`` above entry (default:
+    1× ATR), the stop moves up to the entry price — locking in a no-loss
+    exit long before TP1.  Without this, a trade that rallies +2% and
+    then gives it all back hits the original stop for a full loss.
+    TP1-hitting still triggers breakeven as a backstop for very low-ATR
+    moves that never crossed the ATR threshold.
+    """
 
     @staticmethod
     def apply(entry_price: float, tp1_hit: bool,
-              current_stop: float) -> tuple[float, bool]:
+              current_stop: float,
+              current_price: float | None = None,
+              atr_pct: float = 0.0) -> tuple[float, bool]:
+        in_profit = current_price is not None and current_price > entry_price
+        if in_profit and atr_pct > 0:
+            atr_value = current_price * (atr_pct / 100.0)
+            if current_price >= entry_price + atr_value * BREAKEVEN_ATR_MULTIPLIER:
+                return entry_price, True
         if tp1_hit and current_stop < entry_price:
             return entry_price, True
         return current_stop, False
@@ -282,10 +302,13 @@ class PositionSimulator:
         be_active = False
         trailing_active = False
 
-        # Breakeven: once price reaches TP1, move stop to entry.
-        if tp1_hit and not stopped:
+        # Breakeven: once price is safely in profit (≥ BREAKEVEN_ATR_MULTIPLIER
+        # × ATR above entry — or TP1 reached), move stop to entry so a
+        # winning trade can never turn into a full stop-out loss.
+        if not stopped:
             current_stop, be_active = BreakevenManager.apply(
                 entry, tp1_hit, current_stop,
+                current_price=current_price, atr_pct=atr_pct,
             )
             if current_price <= current_stop and be_active:
                 stopped = True

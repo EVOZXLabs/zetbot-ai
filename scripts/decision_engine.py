@@ -52,11 +52,15 @@ PROB_WATCHLIST = 35.0
 #   * MAX_24H_PUMP_PCT        — already pumped this much in 24h = chase risk.
 #   * MAX_EMA200_EXTENSION_PCT— price stretched too far above the trend
 #                               mean-reversion level.
+#   * MIN_TREND_ALIGNMENT     — reject coins in a downtrend (BEARISH) and,
+#                               when price sits below EMA200, structural
+#                               downtrend = catching a falling knife.
 REL_VOLUME_MIN = float(os.getenv("REL_VOLUME_MIN", "0.8"))
-MAX_ATR_PCT = float(os.getenv("MAX_ATR_PCT", "6.0"))
-MAX_RSI_ENTRY = float(os.getenv("MAX_RSI_ENTRY", "78.0"))
-MAX_24H_PUMP_PCT = float(os.getenv("MAX_24H_PUMP_PCT", "12.0"))
-MAX_EMA200_EXTENSION_PCT = float(os.getenv("MAX_EMA200_EXTENSION_PCT", "25.0"))
+MAX_ATR_PCT = float(os.getenv("MAX_ATR_PCT", "4.0"))
+MAX_RSI_ENTRY = float(os.getenv("MAX_RSI_ENTRY", "65.0"))
+MAX_24H_PUMP_PCT = float(os.getenv("MAX_24H_PUMP_PCT", "6.0"))
+MAX_EMA200_EXTENSION_PCT = float(os.getenv("MAX_EMA200_EXTENSION_PCT", "20.0"))
+MIN_TREND_ALIGNMENT = os.getenv("MIN_TREND_ALIGNMENT", "BULLISH")
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +450,16 @@ def _gate_reasons(pair: ScannerPair) -> list[str]:
             f"overextended {d:.1f}% above EMA200 "
             f"(cap {MAX_EMA200_EXTENSION_PCT:.0f}%)"
         )
+
+    trend = (pair.trend_alignment or "").upper()
+    if MIN_TREND_ALIGNMENT.upper() == "BULLISH" and trend != "BULLISH":
+        reasons.append(f"trend {trend} (requires {MIN_TREND_ALIGNMENT.upper()})")
+
+    # Structural downtrend: price below the long-term mean-reversion level
+    # even if the short-term EMA stack looks fine — buying here is
+    # catching a falling knife (the #1 source of stop-out losses).
+    if pair.ema200 and pair.ema200 > 0 and pair.price < pair.ema200:
+        reasons.append("below EMA200 (structural downtrend)")
 
     return reasons
 
