@@ -5,9 +5,9 @@ colorama
 pandas
 pytest
 
-# On-chain / Web3 trading
-web3>=6
-solders
+# On-chain / Web3 trading — optional, see requirements-onchain.txt
+# (solders requires Rust toolchain which is unavailable on Termux;
+#  installed separately via: pip install -r requirements-onchain.txt)
 
 # WhatsApp channel (webhook server; outbound uses Twilio's REST API
 # directly via `requests`, no twilio SDK needed)

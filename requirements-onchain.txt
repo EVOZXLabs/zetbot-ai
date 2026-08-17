@@ -1,0 +1,8 @@
+# On-chain / Web3 trading (optional — NOT needed for CEX spot trading)
+#
+# Requires Rust toolchain for solders.  Install separately:
+#   pip install -r requirements-onchain.txt
+#
+# Skipped automatically on Termux if installation fails.
+web3>=6
+solders

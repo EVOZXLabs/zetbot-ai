@@ -270,6 +270,16 @@ install_requirements() {
         fail "pip install failed — re-run: bash install.sh"
         return 1
     fi
+    # Optional: on-chain / Web3 deps (solders requires Rust toolchain;
+    # fails on Termux — safe to skip for CEX-only trading).
+    if [[ -f requirements-onchain.txt ]]; then
+        info "Installing on-chain dependencies (optional — safe to skip)..."
+        if "$PY" -m pip install -r requirements-onchain.txt -q 2>/dev/null; then
+            pass "On-chain dependencies installed"
+        else
+            warn "On-chain deps (solders/web3) skipped — Rust toolchain missing. CEX trading unaffected."
+        fi
+    fi
     return 0
 }
 
