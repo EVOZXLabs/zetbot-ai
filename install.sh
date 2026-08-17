@@ -17,10 +17,11 @@
 #    5.  Installs requirements.txt into the virtualenv
 #    6.  Creates .env from .env.example (never overwrites an existing .env)
 #    7.  Creates the required data folders (data/ logs/ backups/)
-#    8.  Creates an optional Termux:Widget one-tap start shortcut
+#    8.  Installs the global `zetbot` CLI shortcut
+#    9.  Creates an optional Termux:Widget one-tap start shortcut
 #        (~/.shortcuts/zetbot-start.sh — only on Termux at ~/zetbot-ai)
-#    9.  Runs a self-check and shows clear PASS/FAIL status
-#    10. Shows what to do next
+#    10. Runs a self-check and shows clear PASS/FAIL status
+#    11. Shows what to do next
 #
 #  Safe to run multiple times (idempotent): nothing is overwritten, existing
 #  .env / .venv / data are reused. No manual input is required. This script
@@ -172,6 +173,15 @@ install_packages() {
             info "Installing: git python clang rust openssl libffi"
             pkg install -y git python clang rust openssl libffi || return 1
 
+            # Termux does not use PyPI manylinux wheels.  cryptography is a
+            # Rust-backed native package and its PyPI sdist currently asks
+            # maturin/rustup for the Android target, which fails on a normal
+            # Termux Python (e.g. cpython-314-aarch64-linux-android).
+            # Use Termux-built packages instead and let the venv inherit them
+            # via --system-site-packages below.
+            info "Installing: python-cryptography python-cffi (Termux native builds)"
+            pkg install -y python-cryptography python-cffi || return 1
+
             # numpy/pandas: PyPI has no manylinux/musllinux wheel that's
             # compatible with Termux's Python + Android's bionic libc, so
             # `pip install numpy/pandas` falls back to compiling from
@@ -263,12 +273,43 @@ install_requirements() {
     fi
     info "Upgrading pip..."
     "$PY" -m pip install --upgrade pip -q 2>/dev/null || warn "pip upgrade skipped"
-    info "Installing requirements.txt (this can take a few minutes)..."
-    if "$PY" -m pip install -r requirements.txt; then
+
+    local req_file="requirements.txt"
+    local tmp_req=""
+
+    # Termux does not consume the usual Linux wheels from PyPI.  Keep native
+    # packages supplied by Termux out of pip's build path.  In particular,
+    # cryptography currently falls back to an sdist whose maturin bootstrap
+    # tries to use rustup with the unsupported Android target
+    # aarch64-unknown-linux-android.  The Termux python-cryptography package
+    # is already built for Android and is exposed inside our venv through
+    # --system-site-packages.
+    if [[ "$PKG_MGR" == "pkg" ]]; then
+        tmp_req="$(mktemp)"
+        grep -viE '^(pandas|numpy|cryptography|cffi)([[:space:]]*(==|>=|<=|~=|>|<).*)?$' "$req_file" > "$tmp_req"
+        req_file="$tmp_req"
+        info "Termux detected — using pkg prebuilts for numpy, pandas, cryptography, and cffi"
+    fi
+
+    info "Installing $req_file (this can take a few minutes)..."
+    if "$PY" -m pip install -r "$req_file"; then
         pass "Python dependencies installed"
     else
         fail "pip install failed — re-run: bash install.sh"
+        rm -f "$tmp_req"
         return 1
+    fi
+    rm -f "$tmp_req"
+
+    # Optional: on-chain / Web3 deps (solders requires Rust toolchain;
+    # fails on Termux — safe to skip for CEX-only trading).
+    if [[ -f requirements-onchain.txt ]]; then
+        info "Installing on-chain dependencies (optional — safe to skip)..."
+        if "$PY" -m pip install -r requirements-onchain.txt -q 2>/dev/null; then
+            pass "On-chain dependencies installed"
+        else
+            warn "On-chain deps (solders/web3) skipped — Rust toolchain missing. CEX trading unaffected."
+        fi
     fi
     return 0
 }
@@ -344,8 +385,8 @@ setup_widget() {
 self_check() {
     local deps_ok=0
 
-    if "$PY" -c "import sys; import ccxt, requests, dotenv, colorama" >/dev/null 2>&1; then
-        pass "Dependencies importable (ccxt, requests, dotenv, colorama)"
+    if "$PY" -c "import sys; import ccxt, requests, dotenv, colorama; import cryptography, cffi" >/dev/null 2>&1; then
+        pass "Dependencies importable (ccxt, requests, dotenv, colorama, cryptography, cffi)"
     else
         fail "Core dependencies cannot be imported — re-run: bash install.sh"
         deps_ok=1
@@ -392,7 +433,10 @@ print_summary() {
         echo -e "  ${GREEN}${BOLD}  INSTALLATION: PASS${NC}"
         echo ""
         echo -e "  ${BOLD}Next steps:${NC}"
-        echo -e "    bash run.sh       → start the bot"
+        echo -e "    zetbot start      → start the bot"
+        echo -e "    zetbot status     → show bot status"
+        echo -e "    zetbot logs       → follow bot logs"
+        echo -e "    zetbot stop       → stop the bot"
         echo -e "    bash update.sh    → update the bot"
         echo -e "    bash uninstall.sh → remove the bot (config/data preserved)"
         echo -e "    nano .env         → edit exchange / Telegram credentials"
@@ -414,13 +458,13 @@ print_summary() {
 main() {
     print_banner
 
-    step 1 10 "Checking platform (Termux / Linux / macOS)"
+    step 1 11 "Checking platform (Termux / Linux / macOS)"
     if ! detect_platform; then
         print_summary
         exit 1
     fi
 
-    step 2 10 "Updating system packages"
+    step 2 11 "Updating system packages"
     if update_system; then
         pass "System packages updated"
     else
@@ -429,7 +473,7 @@ main() {
         exit 1
     fi
 
-    step 3 10 "Installing required system packages"
+    step 3 11 "Installing required system packages"
     if install_packages; then
         pass "Required system packages installed"
     else
@@ -438,40 +482,49 @@ main() {
         exit 1
     fi
 
-    step 4 10 "Creating virtual environment"
+    step 4 11 "Creating virtual environment"
     if ! setup_venv; then
         print_summary
         exit 1
     fi
 
-    step 5 10 "Installing Python dependencies"
+    step 5 11 "Installing Python dependencies"
     if ! install_requirements; then
         print_summary
         exit 1
     fi
 
-    step 6 10 "Creating .env (if needed)"
+    step 6 11 "Creating .env (if needed)"
     setup_env || true
 
-    step 7 10 "Creating data folders"
+    step 7 11 "Creating data folders"
     setup_folders
 
-    step 8 10 "Creating optional Termux:Widget shortcut"
+    step 8 11 "Installing ZetBot CLI shortcut"
+    if [[ -f "$SCRIPT_DIR/bin/zetbot" ]]; then
+        chmod +x "$SCRIPT_DIR/bin/zetbot"
+        if [[ -n "${PREFIX:-}" ]]; then
+            if ln -sf "$SCRIPT_DIR/bin/zetbot" "$PREFIX/bin/zetbot" 2>/dev/null; then
+                pass "ZetBot CLI installed: zetbot"
+            else
+                warn "Could not create $PREFIX/bin/zetbot"
+            fi
+        else
+            warn "PREFIX is not set — global 'zetbot' shortcut was not created"
+        fi
+    else
+        fail "bin/zetbot not found"
+    fi
+
+    step 9 11 "Creating optional Termux:Widget shortcut"
     setup_widget
 
-    step 9 10 "Running self-check"
+    step 10 11 "Running self-check"
     self_check || true
 
-    step 10 10 "Summary"
+    step 11 11 "Summary"
     print_summary
     exit $(( _FAIL > 0 ? 1 : 0 ))
 }
-
-# ZetBot CLI shortcut
-    if [ -d "$PWD/bin" ] && [ -f "$PWD/bin/zetbot" ]; then
-        chmod +x "$PWD/bin/zetbot"
-        ln -sf "$PWD/bin/zetbot" "$PREFIX/bin/zetbot"
-        echo "ZetBot command installed: zetbot"
-    fi
 
 main "$@"
