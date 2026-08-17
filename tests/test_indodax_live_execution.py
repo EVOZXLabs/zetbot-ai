@@ -379,7 +379,7 @@ class TestLiveExecutorIndodax:
         assert result.status == "PENDING", result.error
         order = recording.orders[-1]
         assert order["price"] == pytest.approx(245.0)
-        assert order["params"] == {}
+        assert order["params"] == {"order_type": "market"}
 
         # OrderManager-style settlement: fetch_order returns status="closed"
         # with filled=None — must now resolve to FILLED, not PENDING forever.

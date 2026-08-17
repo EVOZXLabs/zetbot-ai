@@ -724,6 +724,19 @@ class IndodaxProvider(BaseProvider):
             except Exception:
                 return ex
         self._rewrite_market_ids(ex)
+
+        # Patch load_markets so the rewrite survives ccxt internal
+        # re-fetches (e.g. create_order calls load_markets which would
+        # overwrite our underscore pair ids back to the bare form).
+        _orig_load = ex.load_markets
+        _provider = self
+
+        def _patched_load_markets(*args, **kwargs):
+            result = _orig_load(*args, **kwargs)
+            _provider._rewrite_market_ids(ex)
+            return result
+
+        ex.load_markets = _patched_load_markets
         return ex
 
     @staticmethod

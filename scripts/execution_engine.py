@@ -576,7 +576,8 @@ class LiveExecutor:
             # Tag the order with our client_order_id so a retry can check
             # "did this already land?" instead of blindly resubmitting —
             # see OrderManager._find_existing_live_order.
-            id_params = provider.client_order_id_params(request.client_order_id)
+            id_params = dict(provider.client_order_id_params(request.client_order_id))
+            id_params.update(getattr(provider, "market_order_params", lambda: {})())
 
             ccxt_order = ex.create_order(
                 symbol=symbol,

@@ -277,9 +277,12 @@ class PositionSimulator:
         # --- Stop check ---
         stopped = current_price <= initial_stop
 
-        # --- Breakeven ---
+        # --- Breakeven + Trailing stop (from entry) ---
         current_stop = initial_stop
         be_active = False
+        trailing_active = False
+
+        # Breakeven: once price reaches TP1, move stop to entry.
         if tp1_hit and not stopped:
             current_stop, be_active = BreakevenManager.apply(
                 entry, tp1_hit, current_stop,
@@ -287,17 +290,22 @@ class PositionSimulator:
             if current_price <= current_stop and be_active:
                 stopped = True
 
-        # --- Trailing ---
-        trailing_active = False
-        if tp2_hit and not stopped:
-            current_stop = TrailingStopManager.apply(
-                current_price=current_price,
-                current_stop=current_stop,
-                atr_pct=atr_pct,
-                tp2_hit=tp2_hit,
-            )
-            if current_stop > initial_stop:
-                trailing_active = True
+        # Trailing: always trail using ATR once price is in profit
+        # (not just after TP2).  This lets winners run instead of
+        # giving back gains.  After TP2 use tighter multiplier for
+        # profit protection; before TP2 use wider multiplier so normal
+        # volatility doesn't trigger the trail.
+        if not stopped and current_price > entry:
+            multiplier = TRAIL_ATR_MULTIPLIER * (0.75 if tp2_hit else 1.5)
+            atr_value = current_price * (atr_pct / 100.0) if atr_pct > 0 else 0
+            if atr_value > 0:
+                trail_stop = current_price - atr_value * multiplier
+                new_stop = max(current_stop, trail_stop)
+                if new_stop > current_stop:
+                    current_stop = new_stop
+                    trailing_active = True
+            if current_price <= current_stop and trailing_active:
+                stopped = True
 
         # --- Partial TP allocation ---
         remaining_pct = PartialTakeProfit.remaining(
@@ -310,9 +318,12 @@ class PositionSimulator:
         remaining_qty = qty * remaining_pct
 
         # --- Trend exit ---
+        # Only exit on strong bearish reversal, not every non-BULLISH
+        # dip.  Normal intraday noise flips between BULLISH/NEUTRAL
+        # constantly — exiting on NEUTRAL kills every trade.
         trend_exit = False
         if not stopped and not tp3_hit \
-                and trend_alignment not in ("BULLISH",):
+                and trend_alignment in ("BEARISH",):
             trend_exit = True
 
         # --- Holding time ---
