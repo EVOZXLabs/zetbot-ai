@@ -1,1 +1,103 @@
+#!/data/data/com.termux/files/usr/bin/bash
 
+BOT_DIR="$HOME/zetbot-ai"
+VENV="$BOT_DIR/.venv/bin/activate"
+PID_FILE="$BOT_DIR/data/zetbot.pid"
+LOG_FILE="$BOT_DIR/data/zetbot.log"
+
+start_bot() {
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "ZetBot already running PID=$PID"
+            exit 0
+        fi
+    fi
+
+    cd "$BOT_DIR" || exit 1
+
+    if [ ! -f "$VENV" ]; then
+        echo "Virtual environment not found: $VENV"
+        exit 1
+    fi
+
+    source "$VENV"
+
+    mkdir -p "$BOT_DIR/data"
+
+    echo "Starting ZetBot AI..."
+
+    nohup python main.py >> "$LOG_FILE" 2>&1 &
+
+    PID=$!
+    echo "$PID" > "$PID_FILE"
+
+    echo "ZetBot started PID=$PID"
+}
+
+stop_bot() {
+    if [ ! -f "$PID_FILE" ]; then
+        echo "ZetBot is not running"
+        exit 0
+    fi
+
+    PID=$(cat "$PID_FILE")
+
+    kill "$PID" 2>/dev/null || true
+
+    rm -f "$PID_FILE"
+
+    echo "ZetBot stopped"
+}
+
+status_bot() {
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "ZetBot RUNNING PID=$PID"
+            exit 0
+        fi
+    fi
+
+    echo "ZetBot STOPPED"
+}
+
+logs_bot() {
+    if [ ! -f "$LOG_FILE" ]; then
+        echo "No log file yet"
+        exit 0
+    fi
+
+    tail -f "$LOG_FILE"
+}
+
+case "$1" in
+    start)
+        start_bot
+        ;;
+    stop)
+        stop_bot
+        ;;
+    restart)
+        stop_bot
+        sleep 2
+        start_bot
+        ;;
+    status)
+        status_bot
+        ;;
+    logs)
+        logs_bot
+        ;;
+    *)
+        echo "ZetBot CLI"
+        echo ""
+        echo "Usage:"
+        echo "  zetbot start"
+        echo "  zetbot stop"
+        echo "  zetbot restart"
+        echo "  zetbot status"
+        echo "  zetbot logs"
+        ;;
+esac
