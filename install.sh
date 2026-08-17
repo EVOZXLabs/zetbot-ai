@@ -467,4 +467,11 @@ main() {
     exit $(( _FAIL > 0 ? 1 : 0 ))
 }
 
+# ZetBot CLI shortcut
+    if [ -d "$PWD/bin" ] && [ -f "$PWD/bin/zetbot" ]; then
+        chmod +x "$PWD/bin/zetbot"
+        ln -sf "$PWD/bin/zetbot" "$PREFIX/bin/zetbot"
+        echo "ZetBot command installed: zetbot"
+    fi
+
 main "$@"
