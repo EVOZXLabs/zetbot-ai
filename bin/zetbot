@@ -1,103 +1,106 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# ZetBot AI command-line shortcut.
+# Installed by install.sh into $PREFIX/bin/zetbot.
+
+set -u
 
 BOT_DIR="$HOME/zetbot-ai"
-VENV="$BOT_DIR/.venv/bin/activate"
-PID_FILE="$BOT_DIR/data/zetbot.pid"
-LOG_FILE="$BOT_DIR/data/zetbot.log"
 
-start_bot() {
-    if [ -f "$PID_FILE" ]; then
-        PID=$(cat "$PID_FILE")
-        if kill -0 "$PID" 2>/dev/null; then
-            echo "ZetBot already running PID=$PID"
-            exit 0
-        fi
-    fi
+if [ ! -d "$BOT_DIR" ]; then
+    echo "ZetBot directory not found: $BOT_DIR"
+    echo "Run the ZetBot installer first."
+    exit 1
+fi
 
-    cd "$BOT_DIR" || exit 1
+cd "$BOT_DIR" || exit 1
 
-    if [ ! -f "$VENV" ]; then
-        echo "Virtual environment not found: $VENV"
-        exit 1
-    fi
-
-    source "$VENV"
-
-    mkdir -p "$BOT_DIR/data"
-
-    echo "Starting ZetBot AI..."
-
-    nohup python main.py >> "$LOG_FILE" 2>&1 &
-
-    PID=$!
-    echo "$PID" > "$PID_FILE"
-
-    echo "ZetBot started PID=$PID"
+is_termux() {
+    [[ "${PREFIX:-}" == *"/com.termux"* ]] && return 0
+    [[ -d /data/data/com.termux ]] && return 0
+    return 1
 }
 
-stop_bot() {
-    if [ ! -f "$PID_FILE" ]; then
-        echo "ZetBot is not running"
-        exit 0
-    fi
+usage() {
+    cat <<'USAGE'
+ZetBot AI CLI
 
-    PID=$(cat "$PID_FILE")
-
-    kill "$PID" 2>/dev/null || true
-
-    rm -f "$PID_FILE"
-
-    echo "ZetBot stopped"
+Usage:
+  zetbot start      Start ZetBot AI
+  zetbot stop       Stop ZetBot AI
+  zetbot restart    Restart ZetBot AI
+  zetbot status     Show ZetBot status
+  zetbot logs       Show live bot logs
+  zetbot help       Show this help
+USAGE
 }
 
-status_bot() {
-    if [ -f "$PID_FILE" ]; then
-        PID=$(cat "$PID_FILE")
-
-        if kill -0 "$PID" 2>/dev/null; then
-            echo "ZetBot RUNNING PID=$PID"
-            exit 0
-        fi
-    fi
-
-    echo "ZetBot STOPPED"
-}
-
-logs_bot() {
-    if [ ! -f "$LOG_FILE" ]; then
-        echo "No log file yet"
-        exit 0
-    fi
-
-    tail -f "$LOG_FILE"
-}
-
-case "$1" in
+case "${1:-help}" in
     start)
-        start_bot
+        if is_termux && [ -x scripts/termux-start.sh ]; then
+            exec bash scripts/termux-start.sh
+        fi
+        exec bash run.sh
         ;;
     stop)
-        stop_bot
+        if is_termux && [ -x scripts/termux-start.sh ]; then
+            exec bash scripts/termux-start.sh --stop
+        fi
+        if [ -f data/zetbot.pid ]; then
+            PID="$(cat data/zetbot.pid 2>/dev/null || true)"
+            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" 2>/dev/null || true
+                echo "ZetBot stopped (PID $PID)"
+                exit 0
+            fi
+            rm -f data/zetbot.pid
+        fi
+        echo "ZetBot is not running"
         ;;
     restart)
-        stop_bot
-        sleep 2
-        start_bot
+        if is_termux && [ -x scripts/termux-start.sh ]; then
+            bash scripts/termux-start.sh --stop || true
+            sleep 2
+            exec bash scripts/termux-start.sh
+        fi
+        if [ -f data/zetbot.pid ]; then
+            PID="$(cat data/zetbot.pid 2>/dev/null || true)"
+            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" 2>/dev/null || true
+                sleep 2
+            fi
+            rm -f data/zetbot.pid
+        fi
+        exec bash run.sh
         ;;
     status)
-        status_bot
+        if is_termux && [ -x scripts/termux-start.sh ]; then
+            exec bash scripts/termux-start.sh --status
+        fi
+        if [ -f data/zetbot.pid ]; then
+            PID="$(cat data/zetbot.pid 2>/dev/null || true)"
+            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                echo "ZetBot RUNNING (PID $PID)"
+                exit 0
+            fi
+        fi
+        echo "ZetBot STOPPED"
         ;;
     logs)
-        logs_bot
+        LOG="data/bot-console.log"
+        [ -f "$LOG" ] || LOG="logs/bot-console.log"
+        [ -f "$LOG" ] || LOG="data/zetbot.log"
+        if [ -f "$LOG" ]; then
+            exec tail -f "$LOG"
+        fi
+        echo "No ZetBot log file found yet."
+        ;;
+    help|-h|--help)
+        usage
         ;;
     *)
-        echo "ZetBot CLI"
+        echo "Unknown command: $1"
         echo ""
-        echo "Usage:"
-        echo "  zetbot start"
-        echo "  zetbot stop"
-        echo "  zetbot restart"
-        echo "  zetbot status"
-        echo "  zetbot logs"
+        usage
+        exit 1
         ;;
 esac
