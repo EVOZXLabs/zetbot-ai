@@ -940,6 +940,22 @@ class LiveExecutionProvider(ExecutionProvider):
                 _snap_plan = dict(request.metadata or {})
                 _snap_plan.setdefault("entry_price", filled_price or price or 0.0)
                 _snap_plan.setdefault("quantity", filled_amount or amount_p or 0.0)
+                # Scale the plan's SL/TP levels to the ACTUAL fill price
+                # (a market BUY fills at a different price than the plan's
+                # scanner snapshot; observed SHOWTOKEN2/IDR: plan 140,949
+                # vs fill 141,802). The heal/adoption path restores
+                # stop/tp from this snapshot — unscaled levels would give
+                # the position a narrower/wider effective stop than the
+                # risk manager planned (in % terms). request.price is the
+                # PLAN entry the levels were computed against.
+                _plan_entry = float(request.price or price or 0)
+                _scale = 1.0
+                if _plan_entry > 0 and (filled_price or 0) > 0:
+                    _scale = float(filled_price) / _plan_entry
+                for _k in ("stop_loss", "tp1", "tp2", "tp3"):
+                    _lv = float(_snap_plan.get(_k) or 0)
+                    if _lv > 0:
+                        _snap_plan[_k] = round(_lv * _scale, 8)
                 save_entry_snapshot(
                     symbol=symbol,
                     order_id=str(ccxt_order.get("id", "")),

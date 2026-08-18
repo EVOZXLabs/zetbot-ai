@@ -1763,7 +1763,13 @@ def main() -> None:
             f"main_thread={threading.current_thread().name!r}"
         )
 
-    _monitor_interval = 0  # counter for periodic position monitoring (~60s)
+    # Position monitoring cadence. LIVE mode on exchanges without native
+    # stop orders (Indodax) executes the SL as a market sell at the FIRST
+    # poll that observes price <= SL — a 60s poll lets a fast 15m move
+    # run 4-6% past the stop level (observed: ACE/IDR SL 2939 exited at
+    # 2800). Poll every MONITOR_INTERVAL_SECONDS (default 10s) instead.
+    _monitor_every = max(1, int(os.getenv("MONITOR_INTERVAL_SECONDS", "10")))
+    _monitor_interval = 0  # counter for periodic position monitoring
     _debug_tick = 0
     try:
         while not shutdown.is_set():
@@ -1793,9 +1799,9 @@ def main() -> None:
             if shutdown.is_set():
                 break
 
-            # -- Position monitoring every ~60 seconds ------------------
+            # -- Position monitoring every ~10 seconds ------------------
             _monitor_interval += 1
-            if _monitor_interval >= 60:
+            if _monitor_interval >= _monitor_every:
                 _monitor_interval = 0
                 # Monitoring is best-effort: an exception here must never
                 # take down the keep-alive loop (a dead monitor used to

@@ -65,8 +65,19 @@ MIN_POSITION_SIZE_USDT = 10.0       # smallest trade value — reflects real
                                      # approved here is never rejected
                                      # downstream at execution.
 MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "55.0"))  # from decision engine
-MAX_ATR_PCT = 8.0                   # reject above this volatility
+MAX_ATR_PCT = float(os.getenv("MAX_ATR_PCT", "8.0"))          # reject above this volatility
 MIN_VOLUME_24H = 100_000.0          # minimum daily dollar volume
+# Minimum stop distance (% of entry). ATR stops on a 15m chart can be
+# razor-thin (observed ACE/IDR: stop -0.34 %) — those are hit by noise,
+# and the TP levels derived from such a stop sit below the round-trip
+# fee cost (Indodax taker 0.3 % each side → 0.6 % + slippage), so every
+# TP1 partial nets a LOSS after fees. Any stop closer than MIN_STOP_PCT
+# is widened to MIN_STOP_PCT.
+MIN_STOP_PCT = float(os.getenv("MIN_STOP_PCT", "1.0"))
+# Fee-aware TP1 floor (% above entry). Guarantees TP1 clears round-trip
+# fees + slippage + a real reward edge even when the underlying stop
+# distance is small.
+MIN_TP1_PCT = float(os.getenv("MIN_TP1_PCT", "1.5"))
 # max % of account EQUITY across ALL open positions combined
 # ($ VALUE, not risk). This is a PORTFOLIO-WIDE exposure cap, not a
 # per-position allowance.
@@ -206,7 +217,12 @@ class StopLossCalculator:
         return ema200
 
     @staticmethod
-    def fixed_stop(price: float, pct: float = STOP_FIXED_PCT) -> float:
+    def fixed_stop(price: float, pct: float | None = None) -> float:
+        # Resolved at call time (never a default argument bound at import)
+        # so Pipeline._apply_config()/env overrides actually take effect
+        # (same bug class as TradeValidator's old default-argument binds).
+        if pct is None:
+            pct = STOP_FIXED_PCT
         return price * (1.0 - pct / 100.0)
 
     @classmethod
@@ -234,6 +250,14 @@ class StopLossCalculator:
         min_stop = price * 0.5
         if best_stop < min_stop:
             return atr, "ATR"
+
+        # MIN_STOP_PCT floor: never stop closer than the configured
+        # minimum, no matter which method won. A razor-thin stop (e.g.
+        # 0.34 % ATR stop on a 15m chart) gets noise-stopped and drags
+        # the derived TP levels below the round-trip fee cost.
+        min_stop_distance = price * (MIN_STOP_PCT / 100.0)
+        if (price - best_stop) < min_stop_distance:
+            best_stop = price - min_stop_distance
 
         return best_stop, best_method
 
@@ -315,7 +339,18 @@ class TakeProfitCalculator:
         stop_distance = entry_price - stop_price
         if stop_distance <= 0:
             return [entry_price] * len(multipliers)
-        return [entry_price + stop_distance * m for m in multipliers]
+        levels = [entry_price + stop_distance * m for m in multipliers]
+
+        # Fee-aware TP1 floor: the first take-profit must clear the
+        # round-trip fee cost (e.g. Indodax taker 0.3 % × 2 + slippage)
+        # or the partial sell at TP1 books a net LOSS after fees.
+        min_tp1 = entry_price * (1.0 + MIN_TP1_PCT / 100.0)
+        if levels[0] < min_tp1:
+            # Raise TP1 to the floor and shift the remaining levels by
+            # the same distance so the multiplier spacing is preserved.
+            shift = min_tp1 - levels[0]
+            levels = [lvl + shift for lvl in levels]
+        return levels
 
 
 # -------------------------------------------------------------------
@@ -328,19 +363,24 @@ class TradeValidator:
 
     def __init__(
         self,
-        min_rr: float = MIN_RR,
-        max_rr: float = MAX_RR,
+        min_rr: float | None = None,
+        max_rr: float | None = None,
         min_pos_usd: float = MIN_POSITION_SIZE_USDT,
-        max_atr: float = MAX_ATR_PCT,
-        min_vol: float = MIN_VOLUME_24H,
-        min_prob: float = MIN_PROBABILITY,
+        max_atr: float | None = None,
+        min_vol: float | None = None,
+        min_prob: float | None = None,
     ) -> None:
-        self.min_rr = min_rr
-        self.max_rr = max_rr
+        # min_rr/max_rr/min_prob/min_vol are resolved at instantiation
+        # (never as default arguments bound at import time) so the .env
+        # values written into the module constants by
+        # Pipeline._apply_config() before every run actually take
+        # effect (same bug class as MAX_POSITION_SIZE_PCT / MAX_ATR_PCT).
+        self.min_rr = MIN_RR if min_rr is None else min_rr
+        self.max_rr = MAX_RR if max_rr is None else max_rr
         self.min_pos_usd = min_pos_usd
-        self.max_atr = max_atr
-        self.min_vol = min_vol
-        self.min_prob = min_prob
+        self.max_atr = MAX_ATR_PCT if max_atr is None else max_atr
+        self.min_vol = MIN_VOLUME_24H if min_vol is None else min_vol
+        self.min_prob = MIN_PROBABILITY if min_prob is None else min_prob
         self.daily_risk_used = 0.0
         self.open_positions = 0
 
@@ -1071,3 +1111,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# test-1787034515

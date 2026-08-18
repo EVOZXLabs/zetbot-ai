@@ -213,6 +213,14 @@ class ExecutionPipeline:
                 # path in pipeline._merge_live_positions_into_managed reads
                 # them from the cache. Without this, a reconnect/restart
                 # adopted the position with tp1/tp2/tp3 = 0 (BUG: WLFI/IDR).
+                #
+                # The plan levels are anchored to the PLAN entry price
+                # (scanner snapshot); a market BUY fills at a slightly
+                # different price (observed: SHOWTOKEN2/IDR plan 140,949
+                # vs fill 141,802). Scale the levels by fill/plan so the
+                # intended stop/TP DISTANCES (in %) hold around the real
+                # fill — otherwise the effective stop is silently
+                # narrower/wider than planned.
                 try:
                     from scripts.live_position_sync import (  # noqa: PLC0415
                         load_live_positions,
@@ -221,10 +229,15 @@ class ExecutionPipeline:
                     cached = load_live_positions()
                     rec = dict(cached.get(symbol) or {})
                     rec.setdefault("symbol", symbol)
+                    plan_entry = float(plan.get("entry_price", 0) or 0)
+                    fill_price = float(result.filled_price or 0)
+                    scale = 1.0
+                    if plan_entry > 0 and fill_price > 0:
+                        scale = fill_price / plan_entry
                     for _k in ("stop_loss", "tp1", "tp2", "tp3"):
-                        _v = plan.get(_k, 0) or 0
-                        if float(_v) > 0:
-                            rec[_k] = float(_v)
+                        _v = float(plan.get(_k, 0) or 0)
+                        if _v > 0:
+                            rec[_k] = round(float(_v) * scale, 8)
                     cached[symbol] = rec
                     save_live_positions(cached)
                 except Exception:

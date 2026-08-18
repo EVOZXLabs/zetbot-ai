@@ -7,6 +7,7 @@ ZetBot AI
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -70,7 +71,12 @@ _ticker_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _data_lock = threading.RLock()
 
 PUBLIC_CLIENT_TTL = 300.0
-TICKER_TTL = 45.0
+# Ticker cache TTL. The LIVE position monitor polls every
+# MONITOR_INTERVAL_SECONDS (10s default) and executes stop-losses as a
+# market sell at the first observed price <= SL — a 45s TTL here would
+# serve 45s-stale prices and defeat the fast polling (SL exit could
+# still land far below the level). TICKER_TTL_SECONDS overrides.
+TICKER_TTL = float(os.getenv("TICKER_TTL_SECONDS", "10.0"))
 
 
 def get_cached_public_exchange(

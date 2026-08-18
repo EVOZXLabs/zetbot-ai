@@ -81,6 +81,8 @@ _CONFIG_OVERRIDES: dict[str, dict[str, str]] = {
         "MIN_VOLUME_24H": "min_volume_24h",
         "STOP_ATR_MULTIPLIER": "stop_atr_multiplier",
         "STOP_FIXED_PCT": "stop_fixed_pct",
+        "MIN_STOP_PCT": "min_stop_pct",
+        "MIN_TP1_PCT": "min_tp1_pct",
         "MAX_POSITION_SIZE_PCT": "max_position_size_pct",
     },
     "scripts.trade_executor": {

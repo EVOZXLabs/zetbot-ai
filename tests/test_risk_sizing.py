@@ -793,6 +793,126 @@ class TestDivisionByZeroEdgeCases:
         assert pct == 0.0
 
 
+# ===================================================================
+#  Fee-aware floors — MIN_STOP_PCT / MIN_TP1_PCT
+#
+#  Reported losses came from two compounding problems on 15m charts:
+#   1. razor-thin ATR stops (ACE/IDR stop -0.34 %) get noise-stopped,
+#   2. TP levels derived from such a stop sit below the round-trip fee
+#      cost (Indodax taker 0.3 % × 2 + slippage), so the TP1 partial
+#      nets a LOSS after fees.
+# ===================================================================
+
+
+class TestStopAndTpFloors:
+    """Stops must never be closer than MIN_STOP_PCT; TP1 must clear
+    MIN_TP1_PCT above entry (fee-aware)."""
+
+    def test_razor_thin_atr_stop_is_widened_to_floor(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_STOP_PCT", 1.5)
+        price, atr_pct = 2927.0, 0.23  # the ACE/IDR 15m case (ATR stop 0.34%)
+        stop, method = rm.StopLossCalculator.safest(price, atr_pct, ema200=0.0)
+        dist_pct = (price - stop) / price * 100.0
+        assert dist_pct >= 1.5
+        assert stop == pytest.approx(price * (1 - 1.5 / 100.0))
+
+    def test_wide_stop_untouched_by_floor(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_STOP_PCT", 1.5)
+        price = 3000.0
+        stop, _ = rm.StopLossCalculator.safest(price, atr_pct=0.5, ema200=0.0)
+        # ATR stop = 3000 - 3000*0.005*1.5 = 2977.5 → distance 0.75% < 1.5 → floored
+        assert (price - stop) / price * 100.0 == pytest.approx(1.5)
+
+    def test_fixed_stop_wider_than_floor_preserved(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_STOP_PCT", 1.5)
+        monkeypatch.setattr(rm, "STOP_FIXED_PCT", 2.0)
+        price = 3000.0
+        # ATR stop at atr_pct=2.0 sits 3% below (multiplier 1.5) → fixed
+        # 2% stop wins as the safest candidate and stays untouched.
+        stop, method = rm.StopLossCalculator.safest(price, atr_pct=2.0, ema200=0.0)
+        dist_pct = (price - stop) / price * 100.0
+        assert dist_pct == pytest.approx(2.0)
+        assert method == "Fixed%"
+
+    def test_tp1_raised_to_fee_aware_floor(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_TP1_PCT", 1.5)
+        # ACE/IDR case: entry 2927, stop 2917.11 (0.34 %), TP1 was +0.51 %
+        # — below the 0.6 % round-trip fee. Must be raised to +1.5 %.
+        levels = rm.TakeProfitCalculator.calculate(
+            entry_price=2927.0, stop_price=2917.11,
+        )
+        assert levels[0] == pytest.approx(2927.0 * (1 + 1.5 / 100.0))
+        assert levels[0] > 2927.0 * 1.006  # clears round-trip fee cost
+
+    def test_tp_spacing_preserved_when_shifted(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_TP1_PCT", 1.5)
+        entry, stop = 2927.0, 2917.11
+        stop_distance = entry - stop  # 9.89
+        levels = rm.TakeProfitCalculator.calculate(entry_price=entry, stop_price=stop)
+        # Multiplier deltas (TP_MULTIPLIERS 1.5/3.0/5.0) hold after the shift:
+        spacing = [levels[i] - levels[i - 1] for i in range(1, len(levels))]
+        assert spacing[0] == pytest.approx((3.0 - 1.5) * stop_distance)
+        assert spacing[1] == pytest.approx((5.0 - 3.0) * stop_distance)
+
+    def test_normal_tp_untouched_when_above_floor(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_TP1_PCT", 1.5)
+        entry, stop = 3000.0, 2940.0  # 2 % stop → TP1 = 3 %
+        levels = rm.TakeProfitCalculator.calculate(entry_price=entry, stop_price=stop)
+        assert levels[0] == pytest.approx(3000.0 + 60.0 * 1.5)
+        assert levels[1] == pytest.approx(3000.0 + 60.0 * 3.0)
+        assert levels[2] == pytest.approx(3000.0 + 60.0 * 5.0)
+
+
+# ===================================================================
+#  TradeValidator resolves MAX_ATR_PCT / MIN_RR etc. at instantiation
+#  (the default-argument binding bug: .env wrote MAX_ATR_PCT=4.0 but the
+#  validator kept the import-time 8.0, so the risk gate was laxer than
+#  the decision gate's).
+# ===================================================================
+
+
+class TestValidatorResolvesConfigAtInstantiation:
+    def test_max_atr_resolved_at_instantiation(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MAX_ATR_PCT", 4.0)
+        v = rm.TradeValidator()
+        assert v.max_atr == pytest.approx(4.0)
+
+    def test_min_rr_resolved_at_instantiation(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_RR", 2.0)
+        v = rm.TradeValidator()
+        assert v.min_rr == pytest.approx(2.0)
+
+    def test_min_prob_resolved_at_instantiation(self, monkeypatch):
+        import scripts.risk_manager as rm
+
+        monkeypatch.setattr(rm, "MIN_PROBABILITY", 55.0)
+        v = rm.TradeValidator()
+        assert v.min_prob == pytest.approx(55.0)
+
+    def test_explicit_args_still_win(self):
+        from scripts.risk_manager import TradeValidator
+
+        v = TradeValidator(max_atr=6.0, min_rr=1.5)
+        assert v.max_atr == pytest.approx(6.0)
+        assert v.min_rr == pytest.approx(1.5)
+
+
 def _simulate_trade(manager: RiskManager,
                     entry: float = 50_000.0,
                     stop: float = 49_000.0) -> RiskResult:

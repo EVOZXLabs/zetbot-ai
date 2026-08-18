@@ -101,6 +101,8 @@ class AppConfig:
     min_volume_24h: float = 100_000.0
     stop_atr_multiplier: float = 1.5
     stop_fixed_pct: float = 5.0
+    min_stop_pct: float = 1.0
+    min_tp1_pct: float = 1.5
     max_position_size_pct: float = 0.6
 
     # Position manager
@@ -201,6 +203,8 @@ def load_config() -> AppConfig:
         min_volume_24h=float(os.getenv("MIN_VOLUME_24H", "100000")),
         stop_atr_multiplier=float(os.getenv("STOP_ATR_MULTIPLIER", "1.5")),
         stop_fixed_pct=float(os.getenv("STOP_FIXED_PCT", "5.0")),
+        min_stop_pct=float(os.getenv("MIN_STOP_PCT", "1.0")),
+        min_tp1_pct=float(os.getenv("MIN_TP1_PCT", "1.5")),
         max_position_size_pct=float(os.getenv("MAX_POSITION_SIZE_PCT", "0.6")),
         max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "3.0")),
         max_consecutive_losses=int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3")),
