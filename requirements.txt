@@ -1,4 +1,11 @@
-ccxt
+# ccxt pinned below 4.5.65: 4.5.65+ hard-requires zlib-ng==1.0.0 and
+# aiohttp-fast-zlib==0.3.0. zlib-ng ships NO Android (Termux) wheel, so pip
+# builds it from source, which needs cmake (not installed → quickstart FAIL);
+# aiohttp-fast-zlib has NO cp314 wheel for ANY platform, so it fails on
+# Python 3.14 everywhere. 4.5.64 is the last line without those deps and is
+# the version proven running in production. Bump only after ccxt publishes
+# wheels for Termux/Python 3.14 (then remove this pin).
+ccxt>=4.5.50,<4.5.65
 requests
 python-dotenv
 colorama
