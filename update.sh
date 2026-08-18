@@ -17,6 +17,13 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# --- Termux detection (mirrors install.sh) ------------------------------
+is_termux() {
+    [[ "${PREFIX:-}" == *"/com.termux"* ]] && return 0
+    [[ -d /data/data/com.termux ]] && return 0
+    return 1
+}
+
 echo -e "${CYAN}"
 echo "=================================================="
 echo "           ZetBot AI — Updater"
@@ -81,8 +88,32 @@ else
 fi
 
 if [ -f "requirements.txt" ] && [ -n "$PYTHON" ]; then
-    $PYTHON -m pip install --upgrade pip -q 2>/dev/null || true
-    $PYTHON -m pip install -r requirements.txt
+    if is_termux; then
+        # Termux has NO PyPI wheels for numpy/pandas/cryptography/cffi
+        # (Android + bionic libc), so pip falls back to building them
+        # FROM SOURCE — bootstrapping cmake → ninja → numpy → pandas,
+        # which takes 1-3 hours on a phone and usually fails anyway
+        # (e.g. "iconv is required, but was not found"). Use the pkg
+        # prebuilts instead, exactly like install.sh does.
+        pkg install -y tur-repo python-numpy python-pandas python-cryptography 2>/dev/null || true
+        # A venv created before the tur-repo fix lacks
+        # --system-site-packages, so the pkg prebuilts are invisible to
+        # it and pip would rebuild pandas from source. Recreate the venv
+        # in that case.
+        if ! $PYTHON -c "import pandas, numpy, cryptography, cffi" >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}Rebuilding virtualenv with --system-site-packages...${NC}"
+            rm -rf "$SCRIPT_DIR/.venv"
+            python3 -m venv --system-site-packages "$SCRIPT_DIR/.venv"
+            PYTHON="$SCRIPT_DIR/.venv/bin/python"
+        fi
+        tmp_req="$(mktemp)"
+        grep -viE '^(pandas|numpy|cryptography|cffi)([[:space:]]*(==|>=|<=|~=|>|<).*)?$' requirements.txt > "$tmp_req"
+        $PYTHON -m pip install -r "$tmp_req"
+        rm -f "$tmp_req"
+    else
+        $PYTHON -m pip install --upgrade pip -q 2>/dev/null || true
+        $PYTHON -m pip install -r requirements.txt
+    fi
     echo -e "  ${GREEN}Dependencies updated${NC}"
 fi
 

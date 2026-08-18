@@ -199,6 +199,26 @@ class TestUpdateSh:
         assert ".data-update-backup" in text
         assert "git pull" in text
 
+    def test_termux_filters_native_builds_like_install_sh(self) -> None:
+        # Regression: update.sh must NOT pip-build pandas/numpy on
+        # Termux (no Android wheels → cmake/ninja/numpy/pandas source
+        # build chain takes 1-3h on a phone and fails with e.g. "iconv
+        # is required, but was not found"). Same pkg-prebuilt strategy
+        # as install.sh.
+        text = _read("update.sh")
+        assert "is_termux" in text
+        assert "python-numpy python-pandas" in text
+        assert "grep -viE" in text
+
+    def test_termux_rebuilds_venv_if_system_packages_invisible(self) -> None:
+        # A venv created before the --system-site-packages fix can't see
+        # the pkg prebuilts; update.sh must recreate it, otherwise pip
+        # falls back to a source build of pandas.
+        text = _read("update.sh")
+        assert "import pandas, numpy, cryptography, cffi" in text
+        assert "--system-site-packages" in text
+        assert 'rm -rf "$SCRIPT_DIR/.venv"' in text
+
 
 class TestUninstallSh:
     def test_stops_bot_and_watchdog(self) -> None:
@@ -468,4 +488,10 @@ class TestUpdateBehavior:
         assert (project / ".data-update-backup/state.json").read_text() == "{}"
         calls = log.read_text()
         assert "git pull" in calls
-        assert "python invoked: -m pip install -r requirements.txt" in calls
+        # On Termux (which this sandbox is), update.sh uses pkg prebuilts
+        # and installs a filtered requirements file — never a source
+        # build of pandas/numpy. The import probe passes with the fake
+        # python, so the venv is reused as-is.
+        assert "pkg install -y tur-repo python-numpy python-pandas python-cryptography" in calls
+        assert "-m pip install -r " in calls
+        assert "import pandas, numpy, cryptography, cffi" in calls
