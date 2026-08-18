@@ -219,6 +219,45 @@ class TestIndodaxCapabilities:
 
 
 # ----------------------------------------------------------------------
+#  Whole-coin amount rule (bug: TP1 SELL rejected "amount can't be in
+#  decimal."): pairs with price_precision < 1 (e.g. GPS/IDR=0.001) only
+#  accept integer amounts; ccxt's hardcoded 1e-8 precision.amount lets
+#  the decimal through and the exit never executes.
+# ----------------------------------------------------------------------
+
+
+class TestIndodaxWholeCoinAmounts:
+    def test_sub_one_precision_pairs_floor_to_whole_coin(self, monkeypatch) -> None:
+        provider = IndodaxProvider()
+        recording = _RecordingIndodax()
+        recording.markets = {
+            "GPS/IDR": {"id": "gps_idr", "info": {"price_precision": 0.001}},
+            "BTC/IDR": {"id": "btc_idr", "info": {"price_precision": 1000}},
+            "DOGE/IDR": {"id": "doge_idr", "info": {"price_precision": 1}},
+        }
+        monkeypatch.setattr(provider, "_get_exchange", lambda: recording)
+        assert provider.amount_to_precision("GPS/IDR", 203.1) == 203.0
+        assert provider.amount_to_precision("GPS/IDR", 0.99) == 0.0
+
+    def test_whole_or_bigger_precision_pairs_keep_fractional_amount(self, monkeypatch) -> None:
+        provider = IndodaxProvider()
+        recording = _RecordingIndodax()
+        recording.markets = {
+            "BTC/IDR": {"id": "btc_idr", "info": {"price_precision": 1000}},
+            "DOGE/IDR": {"id": "doge_idr", "info": {"price_precision": 1}},
+        }
+        monkeypatch.setattr(provider, "_get_exchange", lambda: recording)
+        assert provider.amount_to_precision("BTC/IDR", 0.00001924) == pytest.approx(0.00001924)
+        assert provider.amount_to_precision("DOGE/IDR", 371480.74311977) == pytest.approx(371480.74311977)
+
+    def test_missing_market_falls_back_to_ccxt_precision(self, monkeypatch) -> None:
+        provider = IndodaxProvider()
+        recording = _RecordingIndodax()
+        monkeypatch.setattr(provider, "_get_exchange", lambda: recording)
+        assert provider.amount_to_precision("UNKNOWN/IDR", 123.456) == pytest.approx(123.456)
+
+
+# ----------------------------------------------------------------------
 #  Status mapping (bug 3): closed/filled ⇒ FILLED, never PENDING forever
 # ----------------------------------------------------------------------
 

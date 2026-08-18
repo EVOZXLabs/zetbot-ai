@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import random
 import time
 from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
@@ -725,6 +726,19 @@ class IndodaxProvider(BaseProvider):
                 return ex
         self._rewrite_market_ids(ex)
 
+        # Indodax signs every private request with a nonce derived from
+        # the LOCAL clock (``nonce = milliseconds() - timeDifference``).
+        # If the device clock drifts from Indodax server time, private
+        # calls fail with ``Invalid timestamp`` — sync the offset once
+        # per process so nonces are derived from server time instead.
+        if not getattr(ex, "_zetbot_time_synced", False):
+            try:
+                ex.load_time_difference()
+                ex._zetbot_time_synced = True
+            except Exception:
+                # Non-fatal: retried on the next _get_exchange() call.
+                pass
+
         # Patch load_markets so the rewrite survives ccxt internal
         # re-fetches (e.g. create_order calls load_markets which would
         # overwrite our underscore pair ids back to the bare form).
@@ -766,6 +780,39 @@ class IndodaxProvider(BaseProvider):
         # surfaced as an opaque FAILED on every live BUY. Declare the
         # market type explicitly on the wire.
         return {"order_type": "market"}
+
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        """Round *amount* to the lot step Indodax actually accepts.
+
+        Indodax reports ``volume_precision: 0`` for every pair (its
+        /trade endpoint always answers ``amount can't be in decimal.``
+        when a non-whole number is sent) but the true per-pair rule is
+        driven by ``price_precision``: pairs quoted with a sub-1 IDR
+        price step (e.g. GPS/IDR price_precision=0.001) accept ONLY
+        whole-coin amounts, while pairs with price_precision >= 1 IDR
+        (BTC/IDR=1000, DOGE/IDR=1) accept fractional amounts (verified
+        live: a GPS SELL of 203.1 → ``amount can't be in decimal.``,
+        while BTC sells with decimals fill fine). ccxt's own
+        ``precision.amount`` is a hardcoded 1e-8 for every pair and
+        would let the decimal slip through to the exchange, where it is
+        rejected and the TP/SL exit never executes.
+        """
+        try:
+            ex = self._get_exchange()
+            if not ex.markets:
+                ex.load_markets()
+            market = ex.markets.get(symbol)
+            if market is not None:
+                info = market.get("info") or {}
+                price_precision = float(info.get("price_precision") or 1.0)
+                if price_precision < 1.0:
+                    # Whole-coin pairs: never send a fractional amount.
+                    # Floor (not round) so a TP slice can never oversell
+                    # beyond the remaining position.
+                    return float(math.floor(amount))
+            return float(ex.amount_to_precision(symbol, amount))
+        except Exception:
+            return amount
 
     def market_buy_requires_price(self) -> bool:
         # Indodax's API sizes a market BUY by the quote (IDR) amount; ccxt
