@@ -661,9 +661,19 @@ class MarketScanner:
                 continue
             p.price = float(t.get("last", 0) or 0)
             p.volume_24h = float(t.get("quoteVolume", 0) or 0)
-            p.change_24h = float(t.get("percentage", 0) or 0)
             p.high_24h = float(t.get("high", 0) or 0)
             p.low_24h = float(t.get("low", 0) or 0)
+            pct = t.get("percentage")
+            if pct is None:
+                vwap = t.get("vwap")
+                if vwap and vwap > 0 and p.price > 0:
+                    p.change_24h = (p.price / vwap - 1.0) * 100.0
+                elif p.low_24h and p.low_24h > 0 and p.price > 0:
+                    p.change_24h = (p.price - p.low_24h) / p.low_24h * 100.0
+                else:
+                    p.change_24h = 0.0
+            else:
+                p.change_24h = float(pct or 0)
 
     def analyze_all(self, pairs: list[PairRaw]) -> list[PairAnalysis]:
         """Analyze all pairs in parallel with progress."""
