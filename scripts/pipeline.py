@@ -1028,9 +1028,8 @@ class Pipeline:
             from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
             merge_positions(managed)
             self.logger.info(
-                "Adopted %d exchange-held position(s) into managed set: %s",
-                len(adopted),
-                ", ".join(a["symbol"] for a in adopted),
+                f"Adopted {len(adopted)} exchange-held position(s) into managed set: "
+                f"{', '.join(a['symbol'] for a in adopted)}"
             )
 
     def _prune_live_ghost_positions(
@@ -1206,6 +1205,12 @@ class Pipeline:
                 updated_positions.append(pos)
                 continue
 
+            qty = float(pos.get("quantity", 0) or 0)
+            rem = float(pos.get("remaining_qty", qty) or qty)
+            if qty <= 0 or rem <= 0:
+                updated_positions.append(pos)
+                continue
+
             ticker = tickers.get(sym) if sym in tickers else None
             current_price = None
             if ticker is not None:
@@ -1324,6 +1329,11 @@ class Pipeline:
         for pos in positions:
             sym = pos.get("symbol", "")
             if pos.get("status") not in OPEN_STATUSES:
+                continue
+
+            qty = float(pos.get("quantity", 0) or 0)
+            rem = float(pos.get("remaining_qty", qty) or qty)
+            if qty <= 0 or rem <= 0:
                 continue
 
             ticker = tickers.get(sym) if sym in tickers else None
