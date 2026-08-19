@@ -479,6 +479,31 @@ class TestQuickstartBehavior:
 # ---------------------------------------------------------------------------
 
 
+    def test_piped_stdin_defaults_to_indodax_and_completes(self, tmp_path: Path) -> None:
+        # Reproduces `printf '' | bash quickstart.sh` (curl | bash): stdin is
+        # a pipe, not a TTY. The installer must not block, and the exchange
+        # prompt must fall back to the default (Indodax) without a hang.
+        log = tmp_path / "piped.log"
+        workdir, env = self._fresh_env(tmp_path, log)
+        proc = subprocess.run(
+            ["bash", "quickstart.sh"],
+            cwd=str(workdir),
+            env=env,
+            input="",                 # simulate `printf '' | bash quickstart.sh`
+            start_new_session=True,   # detach so /dev/tty is unavailable -> no block
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "INSTALLATION: PASS" in proc.stdout
+        assert "Memulai bot" in proc.stdout
+        env_text = self._read_env(tmp_path)
+        assert "EXCHANGE=indodax" in env_text
+        assert "PAPER_MODE=true" in env_text
+        assert "python invoked: main.py" in log.read_text()
+
+
 class TestWidgetShortcut:
     def _install_env(
         self, tmp_path: Path, repo: Path, log: Path, termux: bool = True,

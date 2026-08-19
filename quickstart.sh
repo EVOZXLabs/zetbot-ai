@@ -42,6 +42,11 @@
 
 set -uo pipefail
 
+# Non-interactive package operations: cloning/installing must never block on a
+# conffile prompt when run via `curl ... | bash` (piped stdin, no TTY).
+export DEBIAN_FRONTEND=noninteractive
+export UCF_FORCE_CONFFOLD=1
+
 # ── Colors / symbols (auto-disable when not a TTY or NO_COLOR=1) ──────────
 if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     RED='\033[0;31m'
@@ -96,9 +101,9 @@ ensure_git() {
     fi
     warn "git belum terpasang — memasang dulu..."
     if is_termux; then
-        pkg install -y git
+        pkg install -y git -o Dpkg::Options::=--force-confold
     elif has_cmd apt-get; then
-        apt-get install -y git
+        env DEBIAN_FRONTEND=noninteractive apt-get install -y git -o Dpkg::Options::=--force-confold
     elif has_cmd brew; then
         brew install git
     else

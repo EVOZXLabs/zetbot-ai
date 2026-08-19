@@ -35,7 +35,16 @@ Yang terjadi otomatis (tidak perlu ketik apa pun lagi kecuali **1 pilihan**):
 2. Karena `.env` baru, kamu ditanya **satu pertanyaan** dengan pilihan angka:
    - `1) Indodax (IDR)` atau `2) Binance (USDT)`
    - Ketik `1` atau `2` lalu Enter.
+   - Kalau perintah dijalankan tanpa terminal interaktif (mis. `curl … | bash`
+     di pipa), pertanyaan otomatis default ke **1) Indodax** tanpa menggantung.
 3. Bot langsung jalan — **PAPER MODE** (uang simulasi, aman).
+
+> **Installer sepenuhnya non-interaktif.** Pemasangan paket sistem
+> (`pkg update/upgrade/install`) dijalankan dengan opsi dpkg
+> `--force-confold` dan `DEBIAN_FRONTEND=noninteractive`, sehingga tidak akan
+> pernah meminta keputusan conffile (`Y/I/N/O/D/Z`) — ini penyebab umum
+> install gagal di Termux baru (error *"end of file on stdin at conffile
+> prompt"*). Konfigurasi yang sudah ada di perangkatmu **tidak akan ditimpa**.
 
 > **Kenapa aman?** Perintah itu hanya mengunduh file `quickstart.sh` dari
 > GitHub resmi repo ini dan menjalankannya dengan bash. Isi script-nya
@@ -299,6 +308,8 @@ cp .uninstall-backup-*/ .env   # ikuti petunjuk yang muncul di layar
 |---|---|
 | `pkg: command not found` | Termux harus dari **F-Droid**, bukan Play Store |
 | `git: command not found` | Jalankan `pkg install -y git` |
+| Install terhenti / error `end of file on stdin at conffile prompt` | Sudah diperbaiki: installer sekarang non-interaktif (`--force-confold`). Pastikan kamu menjalankan `quickstart.sh`/`install.sh` versi terbaru (pull ulang repo). Jika masih muncul, jalankan manual: `pkg update && DEBIAN_FRONTEND=noninteractive pkg upgrade -y -o Dpkg::Options::=--force-confold` |
+| Pesan `check your internet connection` muncul padahal bukan masalah jaringan | Installer sekarang membedakan jenis error (network, dpkg lock, conffile, broken package, missing repository, permission, unsupported platform). Baca pesan FAIL di atas — bukan lagi selalu "cek internet" |
 | Instalasi lama (10–25 menit) | Normal — jangan tutup Termux, pastikan internet stabil |
 | `INSTALLATION: FAIL` | Jalankan ulang `bash install.sh` (aman diulang) |
 | `Failed building wheel for zlib-ng` / `error: [Errno 2] No such file or directory: 'cmake'` | Versi `ccxt` paling baru (4.5.65+) butuh `zlib-ng` yang tidak punya versi siap pakai di Android, jadi pip mencoba meraciknya dari kode sumber dan butuh `cmake`. Ini sudah diperbaiki: `requirements.txt` sekarang mengunci `ccxt` ke versi yang terbukti jalan. Jalankan `bash update.sh` (menarik perbaikan + meng-update dependency), lalu `bash install.sh` lagi |

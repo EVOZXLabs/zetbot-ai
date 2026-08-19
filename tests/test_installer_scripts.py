@@ -104,9 +104,12 @@ class TestInstallSh:
 
     def test_installs_required_system_packages(self) -> None:
         text = _read("install.sh")
-        assert "pkg install -y git python python-pip clang rust openssl libffi" in text
+        assert "pkg install -y git python python-pip clang rust openssl" in text
+        assert "libffi" in text
         assert "pkg install -y tur-repo" in text
         assert "pkg install -y python-numpy python-pandas" in text
+        # conffile handling must be explicit (preserve existing user config)
+        assert "Dpkg::Options::=--force-confold" in text
 
     def test_installs_numpy_pandas_via_pkg_not_pip_build(self) -> None:
         # Regression: on Termux, pip building numpy/pandas from source
@@ -281,6 +284,54 @@ echo "$(basename "$0") $*" >> "$LOG"
 exit 0
 """
 
+# Fake `dpkg` — clean by default (--audit reports nothing), so the post-install
+# verification step is a no-op. Used by every behavioural test via
+# _build_fake_tools.
+FAKE_DPKG = r"""#!/usr/bin/env bash
+LOG="${SANDBOX_LOG:?SANDBOX_LOG not set}"
+mkdir -p "$(dirname "$LOG")"
+echo "dpkg $*" >> "$LOG"
+case "$1" in
+  --audit) exit 0 ;;        # nothing unconfigured
+  --configure) exit 0 ;;    # recovery succeeds
+esac
+exit 0
+"""
+
+# Stateful fake `dpkg` for the audit-recovery test: --audit reports an
+# unconfigured package until --configure -a has run once.
+FAKE_DPKG_STATEFUL = r"""#!/usr/bin/env bash
+LOG="${SANDBOX_LOG:?SANDBOX_LOG not set}"
+STATE="${DPKG_STATE:?DPKG_STATE not set}"
+mkdir -p "$(dirname "$LOG")"
+echo "dpkg $*" >> "$LOG"
+case "$1" in
+  --audit) if [ "$(cat "$STATE")" = "1" ]; then echo "openssl half-configured"; exit 1; else exit 0; fi ;;
+  --configure) echo 0 > "$STATE"; exit 0 ;;
+esac
+exit 0
+"""
+
+# Fake `pkg` that simulates the exact fresh-Termux failure: it dies on a
+# conffile prompt because stdin is a pipe (EOF), not a TTY.
+FAKE_PKG_CONFFILE = r"""#!/usr/bin/env bash
+LOG="${SANDBOX_LOG:?SANDBOX_LOG not set}"
+mkdir -p "$(dirname "$LOG")"
+echo "pkg $*" >> "$LOG"
+echo "dpkg: error: end of file on stdin at conffile prompt" >&2
+exit 1
+"""
+
+# Fake `pkg` that simulates a network failure (so we can assert the installer
+# reports a NETWORK error, not a generic message).
+FAKE_PKG_NETWORK = r"""#!/usr/bin/env bash
+LOG="${SANDBOX_LOG:?SANDBOX_LOG not set}"
+mkdir -p "$(dirname "$LOG")"
+echo "pkg $*" >> "$LOG"
+echo "Err: Failed to fetch http://mirror.termux.net/.../openssl.deb: Connection timed out" >&2
+exit 1
+"""
+
 FAKE_SETUP = """#!/usr/bin/env bash
 echo "FAKE setup.sh --auto"
 echo "  PASS  fake health check"
@@ -315,6 +366,7 @@ def _build_fake_tools(tmp_path: Path, include_python: bool = True) -> Path:
     _write_fake(bin_dir, "pkg", FAKE_LOGGER)
     _write_fake(bin_dir, "apt-get", FAKE_LOGGER)
     _write_fake(bin_dir, "git", FAKE_LOGGER)
+    _write_fake(bin_dir, "dpkg", FAKE_DPKG)
     if include_python:
         _write_fake(bin_dir, "python", FAKE_PYTHON)
         _write_fake(bin_dir, "python3", "#!/usr/bin/env bash\nexec \"$(dirname \"$0\")/python\" \"$@\"\n")
@@ -349,16 +401,21 @@ class TestInstallBehavior:
         assert (project / "setup-ran").exists()  # self-check ran
 
         pkg_calls = [l for l in log.read_text().splitlines() if l.startswith("pkg ")]
-        assert "pkg update -y" in pkg_calls
-        assert "pkg upgrade -y" in pkg_calls
-        assert "pkg install -y git python python-pip clang rust openssl libffi" in pkg_calls
-        assert "pkg install -y tur-repo" in pkg_calls
-        assert "pkg install -y python-numpy python-pandas" in pkg_calls
+        pkg_blob = "\n".join(pkg_calls)
+        assert "pkg update -y" in pkg_blob
+        assert "pkg upgrade -y" in pkg_blob
+        assert "pkg install -y git python python-pip clang rust openssl" in pkg_blob
+        assert "libffi" in pkg_blob
+        assert "pkg install -y tur-repo" in pkg_blob
+        assert "pkg install -y python-numpy python-pandas" in pkg_blob
+        # The non-interactive conffile flag must be present so a real Termux
+        # `pkg upgrade` never blocks on a Y/I/N/O/D/Z prompt.
+        assert any("-o Dpkg::Options::=--force-confold" in c for c in pkg_calls), pkg_calls
         # tur-repo (which provides pandas) must be subscribed BEFORE
         # trying to install python-pandas from it.
-        assert pkg_calls.index("pkg install -y tur-repo") < pkg_calls.index(
-            "pkg install -y python-numpy python-pandas"
-        )
+        def _idx(sub: str) -> int:
+            return next((i for i, c in enumerate(pkg_calls) if sub in c), -1)
+        assert _idx("pkg install -y tur-repo") < _idx("pkg install -y python-numpy python-pandas")
 
         venv_calls = [l for l in log.read_text().splitlines() if "-m venv" in l]
         assert any("--system-site-packages" in c for c in venv_calls), venv_calls
@@ -385,9 +442,10 @@ class TestInstallBehavior:
         assert (project / ".env").exists()
 
         apt_calls = log.read_text().splitlines()
-        assert "apt-get update -y" in apt_calls
+        apt_blob = "\n".join(apt_calls)
+        assert "apt-get update -y" in apt_blob
         expected = "apt-get install -y git python3 python3-venv clang rustc cargo openssl libffi-dev"
-        assert expected in apt_calls
+        assert expected in apt_blob
 
     def test_idempotent_rerun_preserves_env_and_data(self, tmp_path: Path) -> None:
         bin_dir = _build_fake_tools(tmp_path)
@@ -418,8 +476,126 @@ class TestInstallBehavior:
         assert (project / "data/keepme.txt").read_text() == "sentinel\n"
 
         pkg2 = [l for l in log2.read_text().splitlines() if l.startswith("pkg ")]
-        assert "pkg update -y" not in pkg2
-        assert "pkg upgrade -y" not in pkg2
+        pkg2_blob = "\n".join(pkg2)
+        assert "pkg update -y" not in pkg2_blob
+        assert "pkg upgrade -y" not in pkg2_blob
+
+
+class TestInstallNonInteractive:
+    """Reproduce the fresh-Termux bug: package operations must be fully
+    non-interactive when stdin is a pipe (curl ... | bash)."""
+
+    def _run_piped(self, name: str, workdir: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+        # input="" simulates `printf '' | bash <script>` (empty piped stdin).
+        return subprocess.run(
+            ["bash", str(workdir / name)],
+            cwd=str(workdir),
+            env=env,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_static_exports_noninteractive_frontend(self, tmp_path: Path) -> None:
+        text = _read("install.sh")
+        assert "DEBIAN_FRONTEND=noninteractive" in text
+        assert "UCF_FORCE_CONFFOLD=1" in text
+
+    def test_static_forces_dpkg_confold_on_pkg_and_apt(self, tmp_path: Path) -> None:
+        text = _read("install.sh")
+        # conffile handling must be explicit for both managers
+        assert "Dpkg::Options::=--force-confold" in text
+        # and it must appear on BOTH the upgrade and install paths
+        assert text.count("Dpkg::Options::=--force-confold") >= 2
+
+    def test_static_runs_dpkg_audit_verification(self, tmp_path: Path) -> None:
+        text = _read("install.sh")
+        assert "dpkg --audit" in text
+        assert "_verify_dpkg" in text
+
+    def test_static_no_misleading_internet_message(self, tmp_path: Path) -> None:
+        text = _read("install.sh")
+        assert "System update failed — check your internet connection" not in text
+
+    def test_static_classifies_pkg_errors(self, tmp_path: Path) -> None:
+        text = _read("install.sh")
+        assert "_classify_pkg_error" in text
+        for kw in ("conffile", "NETWORK", "LOCK", "BROKEN PACKAGE", "MISSING REPOSITORY", "PERMISSION", "UNSUPPORTED PLATFORM"):
+            assert kw in text, kw
+
+    def test_piped_stdin_completes_and_passes(self, tmp_path: Path) -> None:
+        bin_dir = _build_fake_tools(tmp_path)
+        project = _build_project(tmp_path, "install.sh")
+        log = tmp_path / "piped.log"
+        env = _base_env(bin_dir, log)
+        env["PREFIX"] = "/data/data/com.termux/files/usr"
+        result = self._run_piped("install.sh", project, env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "INSTALLATION: PASS" in result.stdout
+        # dpkg --audit must have been invoked (post-install verification)
+        assert "dpkg --audit" in log.read_text()
+
+    def test_conffile_failure_is_classified_not_as_network(self, tmp_path: Path) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_fake(bin_dir, "pkg", FAKE_PKG_CONFFILE)
+        _write_fake(bin_dir, "apt-get", FAKE_LOGGER)
+        _write_fake(bin_dir, "git", FAKE_LOGGER)
+        _write_fake(bin_dir, "dpkg", FAKE_DPKG)
+        _write_fake(bin_dir, "python", FAKE_PYTHON)
+        _write_fake(bin_dir, "python3", "#!/usr/bin/env bash\nexec \"$(dirname \"$0\")/python\" \"$@\"\n")
+        project = _build_project(tmp_path, "install.sh")
+        log = tmp_path / "conffile.log"
+        env = _base_env(bin_dir, log)
+        env["PREFIX"] = "/data/data/com.termux/files/usr"
+        result = self._run_piped("install.sh", project, env)
+        # The install must NOT hang and must report the conffile cause.
+        assert result.returncode != 0
+        assert "conffile" in result.stdout + result.stderr
+        assert "check your internet connection" not in result.stdout + result.stderr
+
+    def test_network_failure_is_classified(self, tmp_path: Path) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_fake(bin_dir, "pkg", FAKE_PKG_NETWORK)
+        _write_fake(bin_dir, "apt-get", FAKE_LOGGER)
+        _write_fake(bin_dir, "git", FAKE_LOGGER)
+        _write_fake(bin_dir, "dpkg", FAKE_DPKG)
+        _write_fake(bin_dir, "python", FAKE_PYTHON)
+        _write_fake(bin_dir, "python3", "#!/usr/bin/env bash\nexec \"$(dirname \"$0\")/python\" \"$@\"\n")
+        project = _build_project(tmp_path, "install.sh")
+        log = tmp_path / "network.log"
+        env = _base_env(bin_dir, log)
+        env["PREFIX"] = "/data/data/com.termux/files/usr"
+        result = self._run_piped("install.sh", project, env)
+        assert result.returncode != 0
+        assert "NETWORK" in result.stdout + result.stderr
+
+    def test_dpkg_audit_recovery_runs_when_packages_unconfigured(self, tmp_path: Path) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_fake(bin_dir, "pkg", FAKE_LOGGER)
+        _write_fake(bin_dir, "apt-get", FAKE_LOGGER)
+        _write_fake(bin_dir, "git", FAKE_LOGGER)
+        _write_fake(bin_dir, "python", FAKE_PYTHON)
+        _write_fake(bin_dir, "python3", "#!/usr/bin/env bash\nexec \"$(dirname \"$0\")/python\" \"$@\"\n")
+        # stateful dpkg: starts unconfigured, recovered by --configure -a
+        state = tmp_path / "dpkg_state"
+        state.write_text("1\n")
+        _write_fake(bin_dir, "dpkg", FAKE_DPKG_STATEFUL)
+        project = _build_project(tmp_path, "install.sh")
+        log = tmp_path / "audit.log"
+        env = _base_env(bin_dir, log)
+        env["PREFIX"] = "/data/data/com.termux/files/usr"
+        env["DPKG_STATE"] = str(state)
+        result = self._run_piped("install.sh", project, env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "INSTALLATION: PASS" in result.stdout
+        dpkg_calls = [l for l in log.read_text().splitlines() if l.startswith("dpkg ")]
+        dpkg_blob = "\n".join(dpkg_calls)
+        assert "dpkg --audit" in dpkg_blob
+        assert "dpkg --configure -a" in dpkg_blob
 
 
 class TestUninstallBehavior:

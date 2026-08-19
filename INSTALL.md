@@ -13,6 +13,12 @@ bash install.sh
 Works on **Termux (Android)**, Debian/Ubuntu, and macOS. No manual input is
 required during installation, and it is **safe to run again** (idempotent).
 
+System-package operations are fully non-interactive: the installer exports
+`DEBIAN_FRONTEND=noninteractive` and passes `Dpkg::Options::=--force-confold`
+to every `pkg`/`apt-get` call, so it never blocks on a conffile prompt
+(`Y/I/N/O/D/Z`) when run via `curl … | bash` or `bash install.sh`. Existing
+configuration files on the device are preserved (never overwritten).
+
 The installer will:
 
 1. Detect the platform (Termux is checked first)

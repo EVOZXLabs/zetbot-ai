@@ -37,6 +37,17 @@
 
 set -uo pipefail
 
+# Force every package-manager / dpkg operation to be NON-INTERACTIVE. This is
+# what makes `curl ... | bash` safe on Termux: with a piped stdin (not a TTY),
+# dpkg must never prompt for a conffile decision (Y/I/N/O/D/Z). On a fresh
+# Termux install `pkg upgrade -y` reconfigures packages (e.g. openssl) whose
+# conffile changed upstream; dpkg then reads stdin and dies with
+# "end of file on stdin at conffile prompt". UCF_FORCE_CONFFOLD keeps
+# ucf-managed configs; --force-confold (passed per-command below) keeps the
+# rest. EXISTING USER CONFIGURATION IS ALWAYS PRESERVED, never overwritten.
+export DEBIAN_FRONTEND=noninteractive
+export UCF_FORCE_CONFFOLD=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -75,6 +86,82 @@ is_termux() {
     [[ "${PREFIX:-}" == *"/com.termux"* ]] && return 0
     [[ -d /data/data/com.termux ]] && return 0
     return 1
+}
+
+# ── Non-interactive package-manager helpers ─────────────────────────────────
+# A fresh Termux `pkg upgrade -y` reconfigures packages whose conffile changed
+# upstream (e.g. openssl.cnf). dpkg would then ask Y/I/N/O/D/Z — but under
+# `curl ... | bash` stdin is a pipe (EOF), so dpkg aborts with
+# "end of file on stdin at conffile prompt". These helpers (a) always pass the
+# non-interactive conffile options, (b) classify failures so the user gets an
+# actionable message instead of a misleading "check your internet connection",
+# and (c) verify the dpkg database afterwards and auto-recover when safe.
+
+# Classify a package-manager failure from its captured output.
+_classify_pkg_error() {
+    local output="$1" cmd="$2"
+    if echo "$output" | grep -qiE "end of file on stdin|conffile prompt|unable to configure|conf file"; then
+        fail "${cmd} failed: dpkg asked for a CONFFILE decision but stdin is not a TTY"
+        fail "  (this should be fixed now — re-run; the installer forces --force-confold)"
+    elif echo "$output" | grep -qiE "Could not connect|Connection timed out|Temporary failure resolving|Name or service not known|Network is unreachable|Failed to fetch|E: Unable to fetch|404"; then
+        fail "${cmd} failed: NETWORK / DNS error — check your internet connection"
+    elif echo "$output" | grep -qiE "dpkg status database is locked|Could not get lock|Waiting for cache lock|Unable to acquire the dpkg lock|another process is using"; then
+        fail "${cmd} failed: dpkg/apt LOCK held by another process — wait a moment and retry"
+    elif echo "$output" | grep -qiE "broken packages|unmet dependencies|dependency problems|but it is not going to be installed|held broken packages"; then
+        fail "${cmd} failed: BROKEN PACKAGE / dependency error"
+    elif echo "$output" | grep -qiE "Unable to locate package|has no installation candidate|repository .* does not have a Release file|E: Package .* has no candidate"; then
+        fail "${cmd} failed: MISSING REPOSITORY / unavailable package — try 'pkg update' first"
+    elif echo "$output" | grep -qiE "Permission denied|Operation not permitted|EACCES|Read-only file system"; then
+        fail "${cmd} failed: PERMISSION error — check storage permission (termux-setup-storage)"
+    elif echo "$output" | grep -qiE "not supported|unsupported platform|unrecognized platform"; then
+        fail "${cmd} failed: UNSUPPORTED PLATFORM"
+    else
+        fail "${cmd} failed — see the output above for details"
+    fi
+}
+
+# Run a package-manager command, streaming its output to the terminal (so a
+# long `curl | bash` run stays alive) while capturing it for error
+# classification. Always passes the non-interactive conffile options.
+_run_pkg_capture() {
+    local label="$1"; shift
+    local log
+    log="$(mktemp)" || { fail "$label: could not create temp log"; return 1; }
+    # shellcheck disable=SC2086
+    if ! "$@" 2>&1 | tee "$log"; then
+        _classify_pkg_error "$(cat "$log")" "$label"
+        rm -f "$log"
+        return 1
+    fi
+    rm -f "$log"
+    return 0
+}
+
+# Verify the dpkg/package database is consistent after installing packages.
+# A non-interactive conffile prompt can leave packages half-configured;
+# recover automatically (keeping existing configs) when safe, else FAIL loudly.
+_verify_dpkg() {
+    has_cmd dpkg || return 0
+    local audit
+    audit="$(dpkg --audit 2>&1)" || true
+    if [[ -n "$audit" ]]; then
+        warn "dpkg --audit reported unconfigured packages:"
+        echo "$audit" | sed 's/^/    /' >&2 || true
+        info "Attempting automatic recovery (keeps existing configs): dpkg --configure -a"
+        # shellcheck disable=SC2086
+        if DEBIAN_FRONTEND=noninteractive dpkg --configure -a -o Dpkg::Options::=--force-confold 2>&1; then
+            pass "dpkg recovery completed"
+        else
+            fail "dpkg --configure -a failed — packages are still broken; manual fix required"
+            return 1
+        fi
+        audit="$(dpkg --audit 2>&1)" || true
+        if [[ -n "$audit" ]]; then
+            fail "dpkg --audit still reports problems after recovery"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 # ── Banner ─────────────────────────────────────────────────────────────────
@@ -147,17 +234,21 @@ update_system() {
     case "$PKG_MGR" in
         pkg)
             info "Running: pkg update -y"
-            pkg update -y || return 1
-            info "Running: pkg upgrade -y"
-            pkg upgrade -y || return 1
+            _run_pkg_capture "pkg update" pkg update -y || return 1
+            info "Running: pkg upgrade -y (non-interactive, keeps existing configs)"
+            _run_pkg_capture "pkg upgrade" \
+                pkg upgrade -y -o Dpkg::Options::=--force-confold || return 1
             ;;
         apt)
             info "Running: apt-get update -y"
-            apt-get update -y || return 1
+            _run_pkg_capture "apt-get update" apt-get update -y || return 1
+            info "Running: apt-get upgrade -y (non-interactive, keeps existing configs)"
+            _run_pkg_capture "apt-get upgrade" \
+                apt-get upgrade -y -o Dpkg::Options::=--force-confold || return 1
             ;;
         brew)
             info "Running: brew update"
-            brew update || return 1
+            _run_pkg_capture "brew update" brew update || return 1
             ;;
     esac
     return 0
@@ -171,7 +262,9 @@ install_packages() {
         pkg)
             # Termux package names — matches INSTALL.md / spec exactly.
             info "Installing: git python python-pip clang rust openssl libffi"
-            pkg install -y git python python-pip clang rust openssl libffi || return 1
+            _run_pkg_capture "pkg install (base)" \
+                pkg install -y git python python-pip clang rust openssl libffi \
+                -o Dpkg::Options::=--force-confold || return 1
 
             # Termux does not use PyPI manylinux wheels.  cryptography is a
             # Rust-backed native package and its PyPI sdist currently asks
@@ -180,7 +273,9 @@ install_packages() {
             # Use Termux-built packages instead and let the venv inherit them
             # via --system-site-packages below.
             info "Installing: python-cryptography (Termux native build)"
-            pkg install -y python-cryptography || return 1
+            _run_pkg_capture "pkg install (cryptography)" \
+                pkg install -y python-cryptography \
+                -o Dpkg::Options::=--force-confold || return 1
 
             # numpy/pandas: PyPI has no manylinux/musllinux wheel that's
             # compatible with Termux's Python + Android's bionic libc, so
@@ -194,19 +289,29 @@ install_packages() {
             # setup_venv() below makes sure the venv can see them
             # (--system-site-packages).
             info "Installing: tur-repo (provides a prebuilt python-pandas)"
-            pkg install -y tur-repo || return 1
+            _run_pkg_capture "pkg install (tur-repo)" \
+                pkg install -y tur-repo \
+                -o Dpkg::Options::=--force-confold || return 1
             info "Installing: python-numpy python-pandas (prebuilt — no source compile)"
-            pkg install -y python-numpy python-pandas || return 1
+            _run_pkg_capture "pkg install (numpy/pandas)" \
+                pkg install -y python-numpy python-pandas \
+                -o Dpkg::Options::=--force-confold || return 1
             ;;
         apt)
-            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            info "Installing Debian/Ubuntu packages (non-interactive, keeps existing configs)"
+            _run_pkg_capture "apt-get install" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
                 git python3 python3-venv clang rustc cargo openssl libffi-dev \
-                || return 1
+                -o Dpkg::Options::=--force-confold || return 1
             ;;
         brew)
-            brew install git python@3.11 clang rust openssl libffi || return 1
+            _run_pkg_capture "brew install" \
+                brew install git python@3.11 clang rust openssl libffi || return 1
             ;;
     esac
+
+    # Verify the package database is consistent after installing — a
+    # non-interactive conffile prompt can leave packages half-configured.
+    _verify_dpkg || return 1
     return 0
 }
 
@@ -475,7 +580,7 @@ main() {
     if update_system; then
         pass "System packages updated"
     else
-        fail "System update failed — check your internet connection"
+        fail "System update failed — see the error above for the exact cause (NOT necessarily a network problem)"
         print_summary
         exit 1
     fi
@@ -484,7 +589,7 @@ main() {
     if install_packages; then
         pass "Required system packages installed"
     else
-        fail "Package installation failed"
+        fail "Package installation failed — see the error above for the exact cause"
         print_summary
         exit 1
     fi

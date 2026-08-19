@@ -11,6 +11,10 @@
 
 set -e
 
+# Non-interactive package operations: never block on a conffile prompt.
+export DEBIAN_FRONTEND=noninteractive
+export UCF_FORCE_CONFFOLD=1
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -19,8 +23,14 @@ NC='\033[0m'
 
 # --- Termux detection (mirrors install.sh) ------------------------------
 is_termux() {
-    [[ "${PREFIX:-}" == *"/com.termux"* ]] && return 0
-    [[ -d /data/data/com.termux ]] && return 0
+    # Primary check: Termux has a distinct filesystem layout
+    if [[ -d /data/data/com.termux ]]; then
+        return 0
+    fi
+    # Secondary check: PREFIX environment variable (set by ZetBot AI app)
+    if [[ "${PREFIX:-}" == *"/com.termux"* ]]; then
+        return 0
+    fi
     return 1
 }
 
@@ -95,7 +105,8 @@ if [ -f "requirements.txt" ] && [ -n "$PYTHON" ]; then
         # which takes 1-3 hours on a phone and usually fails anyway
         # (e.g. "iconv is required, but was not found"). Use the pkg
         # prebuilts instead, exactly like install.sh does.
-        pkg install -y tur-repo python-numpy python-pandas python-cryptography 2>/dev/null || true
+        pkg install -y tur-repo python-numpy python-pandas python-cryptography -o Dpkg::Options::=--force-confold 2>/dev/null \
+            || echo -e "  ${YELLOW}Warning: pkg prebuilt install failed — pip will try the requirements instead${NC}"
         # A venv created before the tur-repo fix lacks
         # --system-site-packages, so the pkg prebuilts are invisible to
         # it and pip would rebuild pandas from source. Recreate the venv
