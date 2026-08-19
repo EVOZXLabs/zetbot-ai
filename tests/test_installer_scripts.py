@@ -335,7 +335,15 @@ class TestInstallBehavior:
         assert "INSTALLATION: PASS" in result.stdout
         assert (project / ".venv/bin/python").exists()
         assert (project / ".env").exists()
-        assert "EXCHANGE=binance" in (project / ".env").read_text()
+        # install.sh copies .env.example verbatim; the .env must carry the
+        # same exchange as the template (e.g. indodax in the live repo).
+        env_text = (project / ".env").read_text()
+        example_text = (project / ".env.example").read_text()
+        assert "EXCHANGE=" in env_text
+        for line in example_text.splitlines():
+            if line.startswith("EXCHANGE="):
+                assert line in env_text
+                break
         for d in ("data", "logs", "backups"):
             assert (project / d).is_dir()
         assert (project / "setup-ran").exists()  # self-check ran

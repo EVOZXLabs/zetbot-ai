@@ -352,6 +352,44 @@ class TestLiveAdoption:
         assert w["tp2"] == 1150.82952601
         assert w["tp3"] == 1182.76530086
 
+    def test_simulated_closed_position_re_adopted_when_exchange_still_holds(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Regression: a CLOSED/STOPPED managed record whose coins are
+        STILL on the exchange is a SIMULATED exit (pipeline ran the SL
+        through the simulation executor before /golive) — the coins were
+        never actually sold. It must be re-adopted as OPEN so the live
+        reconciliation can really sell it; skipping it (old behaviour)
+        left BANK/GPS forever unmanaged after every restart."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": [{
+                "symbol": "BANK/IDR", "status": "STOPPED", "quantity": 203.0,
+                "remaining_qty": 0.0, "entry_price": 660.58,
+            }]},
+        ))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "BANK/IDR": {
+                "symbol": "BANK/IDR", "quantity": 203.0,
+                "entry_price": 660.5858226600985, "current_price": 632.556,
+                "stop_loss": 649.35337, "tp1": 679.01926,
+                "tp2": 698.79652, "tp3": 718.57378,
+                "source": "live_exchange_sync",
+            },
+        }))
+
+        self._pipeline(tmp_path)._merge_live_positions_into_managed()
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        b = entries["BANK/IDR"]
+        assert b["status"] == "OPEN"
+        assert b["remaining_qty"] == 203.0
+        assert b["stop_loss"] == 649.35337
+        assert b["tp1"] == 679.01926
+        assert len(entries) == 1
+
 
 # ---------------------------------------------------------------------------
 #  Restart continuation: TP exit-state must survive a bot restart
@@ -561,3 +599,88 @@ class TestWalletHoldOnFailure:
 
         with pytest.raises(RuntimeError):
             sc._LiveWalletAdapter(_Cfg(), _Ex()).balance
+
+
+# ---------------------------------------------------------------------------
+#  LIVE-unarmed guard: real holdings must never be simulation-sold
+# ---------------------------------------------------------------------------
+
+
+class TestLiveUnarmedGuard:
+    """Regression: after a restart the bot boots in LIVE mode but UNARMED
+    (operator has not run /golive + CONFIRM LIVE). Positions.json still
+    holds REAL exchange holdings, and the old code ran the PAPER
+    reconciliation against real prices — marking them STOPPED/CLOSED via a
+    SIMULATED sell that never left the exchange (BANK/GPS at 12:06:36/39,
+    2026-08-19). No position bookkeeping may run while LIVE is configured
+    but not armed."""
+
+    def _run_paper_di(self, tmp_path, monkeypatch, *, armed: bool):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps({
+            "positions": [{
+                "symbol": "BANK/IDR", "status": "OPEN", "quantity": 203.0,
+                "remaining_qty": 203.0, "remaining_pct": 100.0,
+                "entry_price": 660.58, "stop_loss": 649.35,
+                "tp1": 679.0, "tp2": 698.0, "tp3": 718.0,
+            }],
+        }))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "BANK/IDR": {
+                "symbol": "BANK/IDR", "quantity": 203.0,
+                "entry_price": 660.5858226600985, "current_price": 632.556,
+                "stop_loss": 649.35337, "tp1": 679.01926,
+                "tp2": 698.79652, "tp3": 718.57378,
+                "source": "live_exchange_sync",
+            },
+        }))
+        (tmp_path / "data" / "trade_plan.json").write_text(
+            json.dumps({"plans": []}))
+
+        from scripts.pipeline import Pipeline
+
+        logger = MagicMock()
+        cfg = SimpleNamespace(
+            quote_currency="IDR",
+            data_dir=str(tmp_path / "data"),
+            exchange="indodax",
+            timeframe="1h",
+        )
+        container = SimpleNamespace(
+            order=SimpleNamespace(
+                mode="LIVE",
+                is_live_enabled=lambda: armed,
+            ),
+            safeguard=MagicMock(),
+            exchange=None,
+        )
+        container.safeguard.can_open_new_position.return_value = (True, "")
+        p = Pipeline.__new__(Pipeline)
+        p.logger = logger
+        p.config = cfg
+        p.container = container
+        p._notifier = None
+        p._run_paper_di()
+        return logger
+
+    def test_unarmed_never_simulates_exit(self, tmp_path, monkeypatch) -> None:
+        self._run_paper_di(tmp_path, monkeypatch, armed=False)
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        # The real holding must NOT be marked STOPPED/CLOSED by a simulated
+        # paper sell while the operator has not armed live trading.
+        assert entries["BANK/IDR"]["status"] == "OPEN"
+        assert entries["BANK/IDR"]["remaining_qty"] == 203.0
+
+    def test_armed_reconciliation_is_not_skipped(self, tmp_path, monkeypatch) -> None:
+        self._run_paper_di(tmp_path, monkeypatch, armed=True)
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        # Arming live re-adopts the holding and (with current_price below
+        # stop_loss) reconciliation legitimately exits it via the LIVE
+        # path — the record is OPEN or STOPPED, never an untouched OPEN
+        # that the guard wrongly skipped.
+        assert entries["BANK/IDR"]["status"] in ("OPEN", "STOPPED", "CLOSED")

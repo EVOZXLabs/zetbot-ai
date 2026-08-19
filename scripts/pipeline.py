@@ -749,12 +749,30 @@ class Pipeline:
                     )
 
         # --- Unified TP/SL reconciliation (paper or live) ---
+        live_unarmed = (
+            not is_live
+            and self.container is not None
+            and getattr(self.container.order, "mode", None) == "LIVE"
+        )
         if is_live:
             self._merge_live_positions_into_managed()
-        self._reconcile_positions(pipeline, provider, is_live)
+        if live_unarmed:
+            # LIVE configured but NOT armed: positions.json holds REAL
+            # exchange holdings (restored at startup / adopted), which the
+            # paper provider would SIMULATE-sell and mark STOPPED/CLOSED
+            # without any order leaving the exchange — and ghost pruning
+            # would CLOSE real holdings that simply are not in the paper
+            # ledger. Defer ALL position bookkeeping until the operator
+            # runs /golive + CONFIRM LIVE; only then may exits happen.
+            self.logger.info(
+                "LIVE mode configured but not armed: TP/SL reconciliation "
+                "deferred until /golive (no simulated exits)"
+            )
+        else:
+            self._reconcile_positions(pipeline, provider, is_live)
 
         # --- Persist paper state (for Telegram / reporting) ---
-        if not is_live:
+        if not is_live and not live_unarmed:
             self._persist_paper_state(provider)
             # Clean simulated-but-never-executed positions out of
             # positions.json: any OPEN entry with no OPEN counterpart in
@@ -877,6 +895,18 @@ class Pipeline:
             _snapshot_levels = {}
 
         adopted = []
+        # Generic SL/TP restoration for ANY adopted symbol: prefer the
+        # live cache levels (stamped at buy time by
+        # ExecutionPipeline.execute_plan), fall back to the write-once
+        # entry snapshot. Never symbol-specific.
+        def _level(sym: str, p: dict, key: str) -> float:
+            val = float(p.get(key) or 0)
+            if val <= 0:
+                val = float(
+                    _snapshot_levels.get(sym, {}).get(key, 0) or 0
+                )
+            return val
+
         for sym, p in live.items():
             if not isinstance(p, dict) or not sym:
                 continue
@@ -890,31 +920,62 @@ class Pipeline:
             if sym_quote and sym_quote != qc:
                 continue
             if sym in managed_by_sym:
-                # Already managed: never let a level-less exchange sync
-                # zero out the plan's stop/TP, and self-heal the case
-                # where an earlier buggy sync already did (managed record
-                # lost its stop but the live cache still knows it, or the
-                # write-once entry snapshot still has the plan levels).
+                # A symbol the exchange STILL holds but the managed record
+                # marks CLOSED/STOPPED is a SIMULATED exit (e.g. the
+                # pipeline ran a stop-loss through the simulation executor
+                # before /golive was ever called — no real sell happened).
+                # The live cache only holds symbols with a real balance, so
+                # a live record + non-OPEN managed record = still held on
+                # the exchange. Re-adopt it as OPEN so the real TP/SL
+                # reconciliation manages (and can actually sell) it.
                 existing = managed_by_sym[sym]
-                healed = False
-                for key in ("stop_loss", "tp1", "tp2", "tp3"):
-                    if float(existing.get(key) or 0) <= 0:
-                        val = float(p.get(key) or 0)
-                        if val <= 0:
-                            val = float(
-                                _snapshot_levels.get(sym, {}).get(key, 0) or 0
-                            )
-                        if val > 0:
-                            existing[key] = val
-                            healed = True
-                if float(existing.get("entry_price") or 0) <= 0 \
-                        and float(p.get("entry_price") or 0) > 0:
-                    existing["entry_price"] = float(p["entry_price"])
-                    healed = True
-                if healed:
-                    from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
-                    merge_positions(managed)
-                continue
+                if (existing.get("status") or "OPEN") not in OPEN_STATUSES:
+                    # A symbol the exchange STILL holds but the managed
+                    # record marks CLOSED/STOPPED is a SIMULATED exit (e.g.
+                    # the pipeline ran a stop-loss through the simulation
+                    # executor before /golive was ever called — no real sell
+                    # happened). The live cache only holds symbols with a
+                    # real balance, so a live record + non-OPEN managed
+                    # record = still held on the exchange. Drop the stale
+                    # managed record and fall through to the normal adoption
+                    # path below, which re-adds it as OPEN with restored
+                    # SL/TP levels so the real reconciliation can sell it.
+                    self.logger.warning(
+                        f"Re-adopting {sym} as OPEN: managed record was "
+                        f"{existing.get('status')} but the exchange still "
+                        f"holds {qty} (simulated exit never sold)"
+                    )
+                    managed = [m for m in managed if m.get("symbol") != sym]
+                    managed_by_sym = {p.get("symbol"): p for p in managed}
+                    entry = p.get("entry_price")
+                    if entry is None or float(entry) <= 0:
+                        continue
+                else:
+                    # Already managed: never let a level-less exchange sync
+                    # zero out the plan's stop/TP, and self-heal the case
+                    # where an earlier buggy sync already did (managed record
+                    # lost its stop but the live cache still knows it, or the
+                    # write-once entry snapshot still has the plan levels).
+                    existing = managed_by_sym[sym]
+                    healed = False
+                    for key in ("stop_loss", "tp1", "tp2", "tp3"):
+                        if float(existing.get(key) or 0) <= 0:
+                            val = float(p.get(key) or 0)
+                            if val <= 0:
+                                val = float(
+                                    _snapshot_levels.get(sym, {}).get(key, 0) or 0
+                                )
+                            if val > 0:
+                                existing[key] = val
+                                healed = True
+                    if float(existing.get("entry_price") or 0) <= 0 \
+                            and float(p.get("entry_price") or 0) > 0:
+                        existing["entry_price"] = float(p["entry_price"])
+                        healed = True
+                    if healed:
+                        from scripts.paper_state_lock import merge_positions  # noqa: PLC0415
+                        merge_positions(managed)
+                    continue
             entry = p.get("entry_price")
             if entry is None or float(entry) <= 0:
                 # Unknown entry = NOT bot-managed. Adopting it with the
@@ -924,18 +985,6 @@ class Pipeline:
                 # buy. Leave it in live_positions.json only — /positions
                 # still shows it, but nothing auto-trades it.
                 continue
-
-            # Generic SL/TP restoration for ANY adopted symbol: prefer the
-            # live cache levels (stamped at buy time by
-            # ExecutionPipeline.execute_plan), fall back to the write-once
-            # entry snapshot. Never symbol-specific.
-            def _level(key: str) -> float:
-                val = float(p.get(key) or 0)
-                if val <= 0:
-                    val = float(
-                        _snapshot_levels.get(sym, {}).get(key, 0) or 0
-                    )
-                return val
 
             # TP-slice basis: the ORIGINAL filled quantity, not the
             # current balance. After a restart the sync only knows the
@@ -955,11 +1004,11 @@ class Pipeline:
                 "remaining_qty": float(p.get("remaining_qty") or tp_basis),
                 "remaining_pct": 100.0,
                 "cost_basis": float(entry) * tp_basis,
-                "stop_loss": _level("stop_loss"),
-                "current_stop": _level("stop_loss"),
-                "tp1": _level("tp1"),
-                "tp2": _level("tp2"),
-                "tp3": _level("tp3"),
+                "stop_loss": _level(sym, p, "stop_loss"),
+                "current_stop": _level(sym, p, "stop_loss"),
+                "tp1": _level(sym, p, "tp1"),
+                "tp2": _level(sym, p, "tp2"),
+                "tp3": _level(sym, p, "tp3"),
                 "tp1_hit": bool(p.get("tp1_hit", False)),
                 "tp2_hit": bool(p.get("tp2_hit", False)),
                 "tp3_hit": bool(p.get("tp3_hit", False)),
