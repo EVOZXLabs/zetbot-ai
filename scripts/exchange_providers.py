@@ -742,6 +742,14 @@ class IndodaxProvider(BaseProvider):
         # Patch load_markets so the rewrite survives ccxt internal
         # re-fetches (e.g. create_order calls load_markets which would
         # overwrite our underscore pair ids back to the bare form).
+        # ONLY ONCE per exchange instance — _get_exchange() is called on
+        # every order/ticker/balance path, and each re-wrap stacks another
+        # closure over the previous one, growing the call depth until
+        # Python hits RecursionError ("maximum recursion depth exceeded"
+        # in load_markets — observed live after ~months of uptime, which
+        # then failed EVERY sell).
+        if getattr(ex, "_zetbot_markets_patched", False):
+            return ex
         _orig_load = ex.load_markets
         _provider = self
 
@@ -751,6 +759,7 @@ class IndodaxProvider(BaseProvider):
             return result
 
         ex.load_markets = _patched_load_markets
+        ex._zetbot_markets_patched = True
         return ex
 
     @staticmethod

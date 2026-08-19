@@ -29,6 +29,22 @@ _ORIGINAL_POST = _requests.post
 # snapshot taken after collection, or the pollution survives every test.
 _ENV_BASELINE = os.environ.copy()
 
+# Import bot.config NOW (at conftest load, before collection) so its
+# load_dotenv() runs ONCE, then strip the injected .env values back out.
+# This is what makes module-level constants (e.g. scripts.risk_manager
+# MIN_RR / MAX_ATR_PCT / MIN_STOP_PCT read from os.getenv at import time)
+# resolve to their DEFAULT values for every test. If the .env injection
+# is allowed to happen during collection instead, modules imported
+# afterwards freeze the REAL values (e.g. MIN_RR=3.0 from the bot's .env)
+# and risk/validator tests that assume MIN_RR=2.0 fail non-deterministically
+# depending on collection order (8 flaky failures in test_risk_sizing.py).
+try:
+    import bot.config as _bot_config  # noqa: PLC0415
+    os.environ.clear()
+    os.environ.update(_ENV_BASELINE)
+except Exception:
+    pass
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _restore_data_dir_after_session():

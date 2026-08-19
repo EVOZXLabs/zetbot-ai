@@ -354,6 +354,163 @@ class TestLiveAdoption:
 
 
 # ---------------------------------------------------------------------------
+#  Restart continuation: TP exit-state must survive a bot restart
+# ---------------------------------------------------------------------------
+
+
+class TestRestartContinuation:
+    """A restart must NEVER re-sell an already-executed TP level nor
+    shrink the TP-slice basis to the remaining balance (GPS/IDR bug:
+    TP1 kept re-executing from 677 -> 474 -> 332 -> 232 -> ... because
+    quantity/tp*_hit were lost on every restart)."""
+
+    def test_merge_live_positions_preserves_exit_state(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "GPS/IDR": {
+                "symbol": "GPS/IDR", "quantity": 677.0,
+                "original_quantity": 677.0, "remaining_qty": 474.0,
+                "tp1_hit": True, "tp2_hit": False, "tp3_hit": False,
+                "entry_price": 442.0, "stop_loss": 415.0,
+                "tp1": 399.0, "tp2": 332.0, "tp3": 287.0,
+                "cost_basis": 299234.0, "status": "OPEN",
+            },
+        }))
+
+        from scripts.live_position_sync import merge_live_positions
+        fresh = [{
+            "symbol": "GPS/IDR", "quantity": 474.0,
+            "entry_price": 442.0, "current_price": 337.0,
+            "source": "live_exchange_sync",
+        }]
+        result = merge_live_positions(fresh, ["GPS/IDR"])
+        g = result["GPS/IDR"]
+        # Balance (fresh sync) wins for quantity; exit-state survives.
+        assert g["quantity"] == 474.0
+        assert g["original_quantity"] == 677.0
+        assert g["remaining_qty"] == 474.0
+        assert g["tp1_hit"] is True
+        assert g["cost_basis"] == 299234.0
+        assert g["stop_loss"] == 415.0
+        assert g["tp1"] == 399.0
+
+    def test_to_json_carries_exit_state_from_previous_record(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps({
+            "positions": [{
+                "symbol": "GPS/IDR", "status": "OPEN", "quantity": 677.0,
+                "remaining_qty": 474.0, "remaining_pct": 70.0,
+                "tp1_hit": True, "tp2_hit": False, "tp3_hit": False,
+                "entry_price": 442.0, "cost_basis": 299234.0,
+                "stop_loss": 415.0, "tp1": 399.0, "tp2": 332.0, "tp3": 287.0,
+            }],
+        }))
+        # Fresh sync only knows the (already reduced) balance — no TP state.
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "GPS/IDR": {
+                "symbol": "GPS/IDR", "quantity": 474.0,
+                "entry_price": 442.0, "current_price": 337.0,
+                "source": "live_exchange_sync",
+            },
+        }))
+        (tmp_path / "data" / "paper_state.json").write_text(json.dumps(
+            {"positions": {}},
+        ))
+        (tmp_path / "data" / "entry_snapshots.json").write_text(json.dumps(
+            {"generated": "t", "snapshots": {}},
+        ))
+
+        from scripts.position_manager import PositionExport
+        PositionExport.to_json([], str(tmp_path / "data" / "positions.json"))
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        g = entries["GPS/IDR"]
+        assert g["status"] == "OPEN"
+        assert g["quantity"] == 677.0          # TP basis = original size
+        assert g["remaining_qty"] == 474.0     # TP1 already sold
+        assert g["tp1_hit"] is True
+        assert g["tp2_hit"] is False
+        assert g["cost_basis"] == 299234.0
+        assert g["stop_loss"] == 415.0
+        assert g["tp1"] == 399.0
+
+    def test_to_json_uses_stamped_original_quantity_as_basis(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": []},
+        ))
+        # Buy-time stamp (original_quantity) present in live cache, no
+        # previous managed record: basis must come from the stamp.
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "GPS/IDR": {
+                "symbol": "GPS/IDR", "quantity": 474.0,
+                "original_quantity": 677.0, "remaining_qty": 474.0,
+                "tp1_hit": True, "entry_price": 442.0,
+                "current_price": 337.0, "stop_loss": 415.0,
+                "tp1": 399.0, "tp2": 332.0, "tp3": 287.0,
+                "source": "live_exchange_sync",
+            },
+        }))
+        (tmp_path / "data" / "paper_state.json").write_text(json.dumps(
+            {"positions": {}},
+        ))
+
+        from scripts.position_manager import PositionExport
+        PositionExport.to_json([], str(tmp_path / "data" / "positions.json"))
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        g = entries["GPS/IDR"]
+        assert g["quantity"] == 677.0
+        assert g["remaining_qty"] == 474.0
+        assert g["tp1_hit"] is True
+
+    def test_adoption_uses_original_quantity_and_preserved_flags(self, tmp_path, monkeypatch) -> None:
+        # positions.json empty (record lost), live cache carries the
+        # buy-time stamp + preserved exit-state: adoption must not reset
+        # the TP basis to the remaining balance.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir(exist_ok=True)
+        (tmp_path / "data" / "positions.json").write_text(json.dumps(
+            {"positions": [], "active_count": 0, "closed_count": 0},
+        ))
+        (tmp_path / "data" / "live_positions.json").write_text(json.dumps({
+            "GPS/IDR": {
+                "symbol": "GPS/IDR", "quantity": 474.0,
+                "original_quantity": 677.0, "remaining_qty": 474.0,
+                "tp1_hit": True, "tp2_hit": False, "tp3_hit": False,
+                "entry_price": 442.0, "current_price": 337.0,
+                "stop_loss": 415.0, "tp1": 399.0, "tp2": 332.0, "tp3": 287.0,
+                "source": "live_exchange_sync",
+            },
+        }))
+
+        from scripts.pipeline import Pipeline
+        logger = MagicMock()
+        cfg = SimpleNamespace(
+            quote_currency="IDR", data_dir=str(tmp_path / "data"),
+            exchange="indodax", timeframe="1h",
+        )
+        p = Pipeline.__new__(Pipeline)
+        p.logger = logger
+        p.config = cfg
+        p._merge_live_positions_into_managed()
+
+        with open(tmp_path / "data" / "positions.json") as f:
+            entries = {p["symbol"]: p for p in json.load(f)["positions"]}
+        g = entries["GPS/IDR"]
+        assert g["quantity"] == 677.0
+        assert g["remaining_qty"] == 474.0
+        assert g["tp1_hit"] is True
+        assert g["tp2_hit"] is False
+        assert g["cost_basis"] == pytest.approx(442.0 * 677.0)
+
+
+# ---------------------------------------------------------------------------
 #  Wallet holds last known balance on transient failure
 # ---------------------------------------------------------------------------
 

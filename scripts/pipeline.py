@@ -937,22 +937,32 @@ class Pipeline:
                     )
                 return val
 
+            # TP-slice basis: the ORIGINAL filled quantity, not the
+            # current balance. After a restart the sync only knows the
+            # balance (already reduced by TP1), so adopting
+            # quantity=balance would make every TP sell 30% of the
+            # shrunken remainder — tiny fills, and TP2/TP3 never reached
+            # (GPS/IDR bug). The buy-time stamp survives restarts via
+            # merge_live_positions; fall back to the synced qty only when
+            # there is genuinely no known original size.
+            tp_basis = float(p.get("original_quantity") or 0) or qty
+
             adopted.append({
                 "symbol": sym,
                 "entry_price": float(entry),
                 "current_price": float(p.get("current_price") or entry),
-                "quantity": qty,
-                "remaining_qty": qty,
+                "quantity": tp_basis,
+                "remaining_qty": float(p.get("remaining_qty") or tp_basis),
                 "remaining_pct": 100.0,
-                "cost_basis": float(entry) * qty,
+                "cost_basis": float(entry) * tp_basis,
                 "stop_loss": _level("stop_loss"),
                 "current_stop": _level("stop_loss"),
                 "tp1": _level("tp1"),
                 "tp2": _level("tp2"),
                 "tp3": _level("tp3"),
-                "tp1_hit": False,
-                "tp2_hit": False,
-                "tp3_hit": False,
+                "tp1_hit": bool(p.get("tp1_hit", False)),
+                "tp2_hit": bool(p.get("tp2_hit", False)),
+                "tp3_hit": bool(p.get("tp3_hit", False)),
                 "floating_pnl": 0.0,
                 "floating_pnl_pct": 0.0,
                 "realized_pnl": 0.0,

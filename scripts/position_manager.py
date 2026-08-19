@@ -656,6 +656,38 @@ class PositionExport:
         try:
             with open("data/live_positions.json") as _f:
                 live = json.load(_f)
+            # Exit-state from the PREVIOUS positions.json record (already
+            # loaded above as ``prev_positions``) must survive the
+            # rewrite.  The exchange sync only knows price/qty, never
+            # which TP levels already sold or the ORIGINAL quantity a
+            # position was sized with.  Without this carry-over, every
+            # restart re-sells TP1 from the (already reduced) remaining
+            # balance: quantities shrink cycle after cycle and TP2/TP3
+            # are never reached (bug: GPS/IDR kept executing TP1 from
+            # 677 → 474 → 332 → 232 → ... in ever-smaller amounts).
+            _exit_state_keys = (
+                "quantity", "remaining_qty", "remaining_pct",
+                "stop_loss", "current_stop", "tp1", "tp2", "tp3",
+                "tp1_hit", "tp2_hit", "tp3_hit",
+                "cost_basis", "realized_pnl", "total_pnl",
+                "status", "entry_time", "opened_at", "highest_price",
+                "lowest_price", "breakeven_active", "trailing_active",
+            )
+            _prev_exit_state = {}
+            try:
+                with open(path) as _f:
+                    _prev_data = json.load(_f)
+                # _prev_data["positions"] is a LIST; key by symbol below.
+                _prev_exit_state = {
+                    (p.get("symbol") or ""): {
+                        k: p.get(k) for k in _exit_state_keys
+                        if p.get(k) is not None
+                    }
+                    for p in (_prev_data.get("positions") or [])
+                    if isinstance(p, dict) and p.get("symbol")
+                }
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                pass
             for sym, vp in (live or {}).items():
                 if not isinstance(vp, dict) or not sym:
                     continue
@@ -671,14 +703,47 @@ class PositionExport:
                 rec.setdefault("remaining_pct", 100.0)
                 rec.setdefault("current_price", rec.get("entry_price"))
                 rec.setdefault("status", "OPEN")
+                # Carry over exit-state from the previous positions.json
+                # record so a restart can never re-sell an already-sold TP
+                # level nor shrink the TP slice basis to the remaining
+                # balance.  The live cache (extras preserved by
+                # ``merge_live_positions``) is the fallback.
+                _prev = _prev_exit_state.get(sym, {})
+                for key, val in _prev.items():
+                    if val is not None and rec.get(key) is None:
+                        rec[key] = val
+                # positions.json ``quantity`` is the TP-slice BASIS (the
+                # ORIGINAL filled size), NOT the current balance.  The
+                # exchange sync only knows the balance, which shrinks as
+                # TPs sell — using it as the basis makes every TP re-sell
+                # 30% of an ever-smaller remainder (GPS/IDR: 677 → 474 →
+                # 332 → 232 → ...).  Priority: buy-time stamp
+                # (original_quantity) → previous managed record →
+                # fallback to balance.
+                _orig = float(rec.get("original_quantity") or 0)
+                if _orig <= 0:
+                    _orig = float(_prev.get("quantity", 0) or 0)
+                if _orig <= 0:
+                    _orig = float(rec.get("quantity", 0) or 0)
+                rec["quantity"] = round(_orig, 8)
+                # remaining_qty: previous managed record wins (it tracks
+                # TPs already sold); the fresh sync balance is last resort.
+                _rem = _prev.get("remaining_qty")
+                if _rem is not None and float(_rem) >= 0:
+                    rec["remaining_qty"] = float(_rem)
+                elif rec.get("remaining_qty") is None:
+                    rec["remaining_qty"] = rec["quantity"]
                 # Generic SL/TP restore: prefer levels already carried in
-                # the live cache, else the write-once entry snapshot.
+                # the live cache, else the previous managed record, else
+                # the write-once entry snapshot.
                 from scripts.live_position_sync import (  # noqa: PLC0415
                     snapshot_levels_for_symbol,
                 )
                 snap = snapshot_levels_for_symbol(sym)
                 for key in ("stop_loss", "tp1", "tp2", "tp3"):
                     val = float(rec.get(key) or 0)
+                    if val <= 0:
+                        val = float(_prev.get(key, 0) or 0)
                     if val <= 0:
                         val = float(snap.get(key, 0) or 0)
                     rec[key] = val

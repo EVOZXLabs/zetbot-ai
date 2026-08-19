@@ -416,7 +416,23 @@ def merge_live_positions(
     # exchanges, or PnL and stop/target sizing lose their baseline.
     extras = {
         sym: {
-            k: rec.get(k) for k in ("entry_price", "stop_loss", "tp1", "tp2", "tp3")
+            k: rec.get(k) for k in (
+                # price levels
+                "entry_price", "stop_loss", "tp1", "tp2", "tp3",
+                # exit-state: a sync knows only price/qty, never which TP
+                # levels already sold. Without this, a restart resets the
+                # position to its FULL current balance with every level
+                # "unhit" — TP1 sells 30% of the (already reduced)
+                # remaining balance again, amounts shrink every cycle,
+                # and TP2/TP3 are never reached (bug: GPS/IDR kept
+                # re-executing TP1 from 677 → 474 → 332 → 232 → ... and
+                # never sold TP2/TP3).
+                "quantity", "original_quantity", "remaining_qty",
+                "remaining_pct",
+                "tp1_hit", "tp2_hit", "tp3_hit",
+                "cost_basis", "realized_pnl", "total_pnl",
+                "status", "entry_time", "opened_at",
+            )
             if rec.get(k) is not None
         }
         for sym, rec in current.items() if isinstance(rec, dict)

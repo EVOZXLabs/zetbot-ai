@@ -238,6 +238,15 @@ class ExecutionPipeline:
                         _v = float(plan.get(_k, 0) or 0)
                         if _v > 0:
                             rec[_k] = round(float(_v) * scale, 8)
+                    # The ORIGINAL filled quantity is the TP-slice basis:
+                    # TP levels sell 30%/30%/40% of THIS number, not of the
+                    # (ever-shrinking) current balance.  A resync only knows
+                    # the balance, so it must be stamped here at buy time
+                    # and carried across restarts (merge_live_positions /
+                    # position_manager export preserve it).
+                    _filled_qty = float(result.quantity or 0)
+                    if _filled_qty > 0:
+                        rec["original_quantity"] = round(_filled_qty, 8)
                     cached[symbol] = rec
                     save_live_positions(cached)
                 except Exception:

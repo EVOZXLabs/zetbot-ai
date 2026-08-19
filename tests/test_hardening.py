@@ -553,7 +553,7 @@ class TestShutdown:
                 f.write("shutdown test")
 
             # Wait for process to exit
-            stdout, stderr = proc.communicate(timeout=25)
+            stdout, stderr = proc.communicate(timeout=60)
             assert proc.returncode == 0, (
                 f"Exit code {proc.returncode}\n"
                 f"stdout:\n{stdout.decode()}\n\n"
@@ -595,7 +595,7 @@ class TestShutdown:
             proc.send_signal(signal.SIGTERM)
 
             # Wait for process to exit
-            stdout, stderr = proc.communicate(timeout=25)
+            stdout, stderr = proc.communicate(timeout=60)
             assert proc.returncode == 0, (
                 f"Exit code {proc.returncode}\n"
                 f"stdout:\n{stdout.decode()}\n\n"

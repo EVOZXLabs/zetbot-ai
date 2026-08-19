@@ -417,14 +417,16 @@ class TestNoPlaceholdersRemain:
     def test_restart_is_real_exec_path(self) -> None:
         import telegram.commands.restart as mod
 
-        src = open(mod.__file__).read()
+        with open(mod.__file__) as f:
+            src = f.read()
         assert "os.execv" in src
         assert "not implemented" not in src.lower()
 
     def test_reload_validates_not_stubbed(self) -> None:
         import telegram.commands.reload as mod
 
-        src = open(mod.__file__).read()
+        with open(mod.__file__) as f:
+            src = f.read()
         assert "load_config" in src
         assert "not implemented" not in src.lower()
 
@@ -433,7 +435,8 @@ class TestNoPlaceholdersRemain:
         import telegram.commands.takeprofit as tp
 
         for mod in (sl, tp):
-            src = open(mod.__file__).read()
+            with open(mod.__file__) as f:
+                src = f.read()
             assert "not implemented" not in src.lower()
         # percent and absolute-price parsing
         assert abs(sl._parse_value("5", 100.0, "sl") - 95.0) < 1e-9

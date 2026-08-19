@@ -257,6 +257,46 @@ class TestIndodaxWholeCoinAmounts:
         assert provider.amount_to_precision("UNKNOWN/IDR", 123.456) == pytest.approx(123.456)
 
 
+class TestLoadMarketsPatchedOnce:
+    """Regression: _get_exchange() re-wrapped load_markets on EVERY call,
+    stacking closures until Python raised RecursionError ("maximum
+    recursion depth exceeded") — observed live after months of uptime,
+    which then failed EVERY sell (TP1 kept re-executing because the sell
+    never landed)."""
+
+    def test_load_markets_patched_exactly_once(self, monkeypatch) -> None:
+        import scripts.exchange_providers as ep
+
+        provider = IndodaxProvider()
+        recording = _RecordingIndodax()
+        calls = []
+
+        def fake_load_markets():
+            calls.append("load")
+            return {"GPS/IDR": {"id": "gps_idr"}}
+
+        recording.load_markets = fake_load_markets
+        recording.load_time_difference = lambda: None
+        # Non-empty markets: _get_exchange() only cold-loads when empty.
+        recording.markets = {"GPS/IDR": {"id": "gps_idr"}}
+        # Pre-seed the shared-instance registry so the real
+        # IndodaxProvider._get_exchange() path (which contains the guard)
+        # runs without touching the network / ccxt.
+        key = ("IndodaxProvider", "", "")
+        monkeypatch.setattr(ep, "_EXCHANGE_INSTANCES", {key: recording})
+
+        ex1 = provider._get_exchange()
+        ex2 = provider._get_exchange()
+        ex3 = provider._get_exchange()
+        assert ex1 is ex2 is ex3 is recording
+        # Three _get_exchange() calls must NOT stack three closures:
+        # each load_markets() invocation must run the underlying fake
+        # exactly once (a stacked closure would add an extra call each).
+        recording.load_markets()
+        recording.load_markets()
+        assert calls == ["load", "load"]
+
+
 # ----------------------------------------------------------------------
 #  Status mapping (bug 3): closed/filled ⇒ FILLED, never PENDING forever
 # ----------------------------------------------------------------------

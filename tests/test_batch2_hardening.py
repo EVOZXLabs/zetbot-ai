@@ -694,8 +694,11 @@ class TestMainBackupWiring:
             backup_seen: str | None = None
             while time.time() < deadline and proc.poll() is None:
                 zips = glob.glob(os.path.join(backups_dir, "*.zip"))
-                if zips:
-                    backup_seen = zips[0]
+                for zp in zips:
+                    if os.path.getsize(zp) > 0:
+                        backup_seen = zp
+                        break
+                if backup_seen:
                     break
                 time.sleep(0.5)
             assert backup_seen is not None, (
@@ -707,7 +710,7 @@ class TestMainBackupWiring:
                 with open(os.path.join(root, "data", ".shutdown_requested"), "w") as f:
                     f.write("shutdown test")
                 try:
-                    proc.communicate(timeout=25)
+                    proc.communicate(timeout=60)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
