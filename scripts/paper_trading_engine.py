@@ -864,9 +864,9 @@ class PaperTradingEngine:
 
         # --- Process each TP hit by fraction of our own tracked qty ---
         tp_config = [
-            (tp1_hit, pos_state.get("tp1", 0.0), 0.30, "tp1_sold"),
-            (tp2_hit, pos_state.get("tp2", 0.0), 0.30, "tp2_sold"),
-            (tp3_hit, pos_state.get("tp3", 0.0), 0.40, "tp3_sold"),
+            (tp1_hit, pos_state.get("tp1", 0.0), float(os.getenv("TP1_SELL_PCT", "30.0")) / 100.0, "tp1_sold"),
+            (tp2_hit, pos_state.get("tp2", 0.0), float(os.getenv("TP2_SELL_PCT", "30.0")) / 100.0, "tp2_sold"),
+            (tp3_hit, pos_state.get("tp3", 0.0), float(os.getenv("TP3_SELL_PCT", "40.0")) / 100.0, "tp3_sold"),
         ]
         for hit, price, fraction, sold_attr in tp_config:
             if not hit:

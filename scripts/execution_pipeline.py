@@ -32,9 +32,9 @@ from scripts.position_status import OPEN_STATUSES, CLOSED_STATUSES
 
 _log = logging.getLogger("ZetBot")
 
-TP1_SELL_PCT = 0.30
-TP2_SELL_PCT = 0.30
-TP3_SELL_PCT = 0.40
+TP1_SELL_PCT = float(os.getenv("TP1_SELL_PCT", "30.0")) / 100.0
+TP2_SELL_PCT = float(os.getenv("TP2_SELL_PCT", "30.0")) / 100.0
+TP3_SELL_PCT = float(os.getenv("TP3_SELL_PCT", "40.0")) / 100.0
 
 _POSITIONS_PATH = "data/positions.json"
 

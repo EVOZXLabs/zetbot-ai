@@ -37,9 +37,9 @@ TRAIL_ATR_MULTIPLIER = float(os.getenv("TRAIL_ATR_MULTIPLIER", "2.0"))
 BREAKEVEN_ATR_MULTIPLIER = float(os.getenv("BREAKEVEN_ATR_MULTIPLIER", "1.0"))
 
 # Partial take-profit allocation (% of position sold at each level)
-TP1_SELL_PCT = 30.0
-TP2_SELL_PCT = 30.0
-TP3_SELL_PCT = 40.0  # remaining
+TP1_SELL_PCT = float(os.getenv("TP1_SELL_PCT", "30.0"))
+TP2_SELL_PCT = float(os.getenv("TP2_SELL_PCT", "30.0"))
+TP3_SELL_PCT = float(os.getenv("TP3_SELL_PCT", "40.0"))  # remaining
 
 # Maximum holding time
 MAX_HOLDING_CANDLES = 48    # 48 candles (e.g. 48h at 1h, 12h at 15m timeframe)
