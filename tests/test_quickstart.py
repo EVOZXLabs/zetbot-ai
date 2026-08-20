@@ -280,9 +280,10 @@ class TestQuickstartStatic:
 
     def test_asks_simple_numbered_exchange_choice(self) -> None:
         text = _read("quickstart.sh")
-        assert "Pilih exchange" in text
-        assert "1) Indodax" in text or "Indodax" in text
-        assert "2) Binance" in text or "Binance" in text
+        assert "Indodax" in text
+        assert "Binance" in text
+        # Non-interactive: no prompt, defaults to Indodax
+        assert "Pilih exchange" not in text or "QUICKSTART_EXCHANGE" in text
 
     def test_never_sets_paper_mode_false(self) -> None:
         text = _read("quickstart.sh")
@@ -355,8 +356,9 @@ class TestQuickstartBehavior:
     def test_interactive_choice_binance_via_terminal(self, tmp_path: Path) -> None:
         log = tmp_path / "binance.log"
         workdir, env = self._fresh_env(tmp_path, log)
+        env["QUICKSTART_EXCHANGE"] = "2"
 
-        rc, out = _run_quickstart(workdir, env, pty_answer="2")
+        rc, out = _run_quickstart(workdir, env)
 
         assert rc == 0, out
         env_text = self._read_env(tmp_path)

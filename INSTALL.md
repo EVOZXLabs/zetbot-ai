@@ -24,7 +24,8 @@ The installer will:
 1. Detect the platform (Termux is checked first)
 2. Update system packages (`pkg update && pkg upgrade` on Termux)
 3. Install required system packages:
-   `git`, `python`, `clang`, `rust`, `openssl`, `libffi` (Termux names)
+   `git`, `python`, `clang`, `rust`, `openssl`, `libffi`, `tmux`,
+   `termux-api`, `cmake` (Termux names)
 4. Create a virtual environment (`.venv/`)
 5. Install `requirements.txt` into the virtual environment
 6. Create `.env` from `.env.example` (an existing `.env` is never overwritten)
@@ -96,23 +97,21 @@ python3 main.py
 ```bash
 # Install Termux from F-Droid (not Google Play)
 pkg update && pkg upgrade
-pkg install -y python git clang rust openssl libffi
+pkg install -y python git clang rust openssl libffi tmux termux-api cmake
 
 # Clone the repository
 git clone https://github.com/EVOZXLabs/zetbot-ai.git
 cd zetbot-ai
 
-# Install dependencies
-pip install -r requirements.txt
+# Install (builds venv, installs deps, creates .env, self-checks)
+bash install.sh
 
-# Create required folders
-mkdir -p data logs backups
-
-# Run Setup Wizard
-python3 main.py --setup
-
-# Start the bot (recommended: tmux so it survives when Termux is minimized)
+# Start the bot (runs in tmux background session)
 bash run.sh
+
+# View logs
+tmux attach -t zetbot-bot
+# Detach: Ctrl+B, D
 ```
 
 ### VPS (Any Linux)
@@ -156,20 +155,14 @@ python3 main.py
 After installation, verify everything works:
 
 ```bash
-# Run diagnostics
-python3 main.py --diagnostics
+# Check bot status
+bash run.sh --status
 
-# Test exchange connection
-python3 main.py --test-exchange
+# View live logs
+tmux attach -t zetbot-bot
 
-# Test Telegram (if configured)
-python3 main.py --test-telegram
-
-# View system information
-python3 main.py --system
-
-# Open the operations menu
-python3 main.py --wizard
+# View watchdog logs
+tmux attach -t zetbot-watchdog
 ```
 
 ---
@@ -193,8 +186,8 @@ pkg install -y python
 ### "pip install fails"
 
 ```bash
-# On Termux
-pkg install -y python clang rust openssl libffi
+# On Termux — cmake is needed for native extensions (pycares, etc.)
+pkg install -y python clang rust openssl libffi cmake
 
 # On Ubuntu
 pip install --upgrade pip setuptools wheel

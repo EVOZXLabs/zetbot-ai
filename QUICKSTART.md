@@ -28,34 +28,40 @@ Salin **satu baris** ini ke Termux dan Enter:
 curl -fsSL https://raw.githubusercontent.com/EVOZXLabs/zetbot-ai/main/quickstart.sh | bash
 ```
 
-Yang terjadi otomatis (tidak perlu ketik apa pun lagi kecuali **1 pilihan**):
+Yang terjadi otomatis (**tanpa perlu ketik apa pun lagi**):
 
 1. Unduh `quickstart.sh` dari repo resmi → clone repo → jalankan `install.sh`
    (paket sistem, Python, dependency, virtualenv, `.env` — semua sendiri).
-2. Karena `.env` baru, kamu ditanya **satu pertanyaan** dengan pilihan angka:
-   - `1) Indodax (IDR)` atau `2) Binance (USDT)`
-   - Ketik `1` atau `2` lalu Enter.
-   - Kalau perintah dijalankan tanpa terminal interaktif (mis. `curl … | bash`
-     di pipa), pertanyaan otomatis default ke **1) Indodax** tanpa menggantung.
-3. Bot langsung jalan — **PAPER MODE** (uang simulasi, aman).
+2. `.env` dikonfigurasi otomatis ke **Indodax/IDR** (PAPER_MODE=true).
+   Tidak ada pertanyaan interaktif — sepenuhnya non-interactive.
+3. Bot langsung jalan di tmux (latar belakang) — **PAPER MODE** (uang simulasi, aman).
+4. Untuk melihat log bot: `tmux attach -t zetbot-bot`
+5. Untuk keluar dari tmux tanpa mematikan bot: **Ctrl+B** lalu **D**
 
 > **Installer sepenuhnya non-interaktif.** Pemasangan paket sistem
 > (`pkg update/upgrade/install`) dijalankan dengan opsi dpkg
 > `--force-confold` dan `DEBIAN_FRONTEND=noninteractive`, sehingga tidak akan
-> pernah meminta keputusan conffile (`Y/I/N/O/D/Z`) — ini penyebab umum
-> install gagal di Termux baru (error *"end of file on stdin at conffile
-> prompt"*). Konfigurasi yang sudah ada di perangkatmu **tidak akan ditimpa**.
+> pernah meminta keputusan conffile (`Y/I/N/O/D/Z`). Konfigurasi yang sudah
+> ada di perangkatmu **tidak akan ditimpa**.
+
+> **Paket yang diinstall otomatis:** git, python, clang, rust, openssl,
+> libffi, python-cryptography, tur-repo, python-numpy, python-pandas,
+> **tmux, termux-api, cmake** — semua dari satu command.
 
 > **Kenapa aman?** Perintah itu hanya mengunduh file `quickstart.sh` dari
 > GitHub resmi repo ini dan menjalankannya dengan bash. Isi script-nya
 > transparan dan bisa kamu baca sendiri di
 > `https://github.com/EVOZXLabs/zetbot-ai/blob/main/quickstart.sh` — script
 > itu hanya melakukan `git clone` + `bash install.sh` (persis jalur manual di
-> bawah ini), lalu memilih exchange. **Script ini tidak pernah meminta API
-> key dan tidak pernah mengaktifkan live trading.**
+> bawah ini). **Script ini tidak pernah meminta API key dan tidak pernah
+> mengaktifkan live trading.**
 
 > **Mau kontrol penuh / tidak suka cara curl|bash?** Ikuti langkah manual
 > mulai dari bagian 2 di bawah — hasil akhirnya sama saja.
+
+> **Mau pakai Binance (USDT) alih-alih Indodax (IDR)?** Tambahkan env var:
+> `QUICKSTART_EXCHANGE=2` sebelum pipe:
+> `QUICKSTART_EXCHANGE=2 curl -fsSL ... | bash`
 
 ---
 
@@ -104,29 +110,33 @@ Installer melakukan semuanya sendiri — **tanpa perlu input manual**:
 2. `pkg update` + `pkg upgrade` otomatis
 3. Install `git`, `python`, `clang`, `rust`, `openssl`, `libffi` + `tur-repo`
    (termasuk `python-numpy` dan `python-pandas` sebagai paket siap pakai)
-4. Buat virtualenv (`.venv/`)
-5. Install semua dependency dari `requirements.txt`
-6. Buat file `.env` dari `.env.example`
-7. Buat folder `data/`, `logs/`, `backups/`
-8. Buat pintasan optional Termux:Widget (satu tap di home screen)
-9. Self-check dengan status PASS/FAIL
+4. Install `tmux`, `termux-api`, `cmake` (tmux untuk supervisor bot, cmake
+   untuk build native extensions)
+5. Buat virtualenv (`.venv/`)
+6. Install semua dependency dari `requirements.txt`
+7. Buat file `.env` dari `.env.example`
+8. Buat folder `data/`, `logs/`, `backups/`
+9. Buat pintasan optional Termux:Widget (satu tap di home screen)
+10. Self-check dengan status PASS/FAIL
 
 **Contoh akhir output:**
 
 ```
-[9/10] Running self-check
-  PASS  Dependencies importable (ccxt, requests, dotenv, colorama)
+[10/11] Running self-check
+  PASS  Dependencies importable (ccxt, requests, dotenv, colorama, cryptography, cffi)
   PASS  .env present
   PASS  Runtime folders present
-  PASS  Health check passed
 
-[10/10] Summary
-  Installer summary: 13 passed  0 failed  0 warnings  (14 checks)
+[11/11] Summary
+  Installer summary: 14 passed  0 failed  0 warnings  (15 checks)
 
   INSTALLATION: PASS
 
   Next steps:
-    bash run.sh       → start the bot
+    zetbot start      → start the bot
+    zetbot status     → show bot status
+    zetbot logs       → follow bot logs
+    zetbot stop       → stop the bot
     bash update.sh    → update the bot
     bash uninstall.sh → remove the bot (config/data preserved)
     nano .env         → edit exchange / Telegram credentials
@@ -141,12 +151,10 @@ Yang penting: di bagian paling akhir tertulis **`INSTALLATION: PASS`**.
 
 ## 4. Edit .env (atur exchange)
 
-> **Kalau kamu pakai cara tercepat (bagian 0), langkah ini otomatis** — kamu
-> hanya memilih `1) Indodax (IDR)` atau `2) Binance (USDT)` dan `EXCHANGE`,
-> `QUOTE_CURRENCY`, serta `ACCOUNT_BALANCE` diatur sendiri dengan benar dan
-> konsisten (misalnya Indodax → `IDR`, Binance → `USDT`). Langkah manual di
-> bawah tetap berlaku kalau mau mengubah dengan tangan atau memakai exchange
-> lain yang sudah didukung.
+> **Kalau kamu pakai cara tercepat (bagian 0), langkah ini otomatis** —
+> `EXCHANGE`, `QUOTE_CURRENCY`, serta `ACCOUNT_BALANCE` sudah diatur ke
+> Indodax/IDR. Langkah manual di bawah tetap berlaku kalau mau mengubah
+> dengan tangan atau memakai exchange lain yang sudah didukung.
 
 `install.sh` sudah membuat file `.env` (format aman, tidak akan di-commit).
 Sekarang kita ubah sedikit pengaturannya:
@@ -177,44 +185,28 @@ Cara menyimpan di `nano`: tekan **Ctrl+X** → ketik **Y** → tekan **Enter**.
 
 ---
 
-## 5. Jalankan run.sh (mulai bot)
+## 5. Jalankan bot
+
+**Kalau pakai quickstart (bagian 0):** bot sudah jalan otomatis di tmux.
+
+```bash
+tmux attach -t zetbot-bot     # lihat log bot
+# keluar dari tmux: Ctrl+B lalu D (bot tetap jalan)
+```
+
+**Kalau install manual (bagian 2-3):**
 
 ```bash
 bash run.sh
 ```
 
-Bot langsung jalan dan log-nya tampil di layar:
-
-**Contoh output:**
-
-```
-...
-[2026-08-10 14:02:01] INFO  Pipeline scheduler started (interval=300s)
-[2026-08-10 14:02:02] INFO  Scanner: 50 pairs analyzed, 5 signals
-[2026-08-10 14:02:03] INFO  Decision: 2 candidates (paper mode)
-```
-
-> Selama masih di layar ini, bot sedang berjalan. **Jangan tutup Termux**
-> kalau masih mau bot jalan (mode sederhana). Untuk menjalankan bot tetap
-> hidup di latar belakang, lihat catatan di bawah.
-
-**Mode sederhana (bawaan):** bot jalan di layar. Cocok untuk mulai belajar.
-
-**Mode latar belakang (opsional, agar bot tetap jalan walau Termux
-diminimalkan):**
+Di Termux, `run.sh` otomatis menjalankan bot + watchdog di tmux (latar
+belakang). Untuk melihat log:
 
 ```bash
-pkg install -y tmux termux-api
+tmux attach -t zetbot-bot     # lihat log bot
+tmux attach -t zetbot-watchdog # lihat log watchdog
 ```
-
-1. Install aplikasi **Termux:API** dari F-Droid (`https://f-droid.org/packages/com.termux.api/`)
-   dan buka sekali.
-2. Buka **Pengaturan Android → Aplikasi → Termux → Baterai → Tanpa
-   batasan** (agar Android tidak mematikan bot diam-diam — lihat
-   `OPERATIONS.md` bagian "Menjalankan di Termux").
-3. Jalankan lagi `bash run.sh` → sekarang bot + watchdog berjalan di tmux
-   (latar belakang), dan bisa dilihat dengan `tmux attach -t zetbot-bot`
-   (keluar dari tmux: tekan **Ctrl+B** lalu **D**).
 
 **Mode satu tap (opsional, Termux:Widget):** kalau sudah terpasang,
 `install.sh` membuat pintasan `~/.shortcuts/zetbot-start.sh`. Install aplikasi
@@ -225,11 +217,6 @@ memulai bot tanpa membuka Termux dulu.
 ---
 
 ## 6. Cara stop bot
-
-**Mode sederhana (di layar):** tekan **Ctrl+C** (tombol `CTRL` di baris
-bantuan keyboard, lalu huruf `C`).
-
-**Mode latar belakang (tmux):**
 
 ```bash
 bash run.sh --stop
@@ -308,13 +295,11 @@ cp .uninstall-backup-*/ .env   # ikuti petunjuk yang muncul di layar
 |---|---|
 | `pkg: command not found` | Termux harus dari **F-Droid**, bukan Play Store |
 | `git: command not found` | Jalankan `pkg install -y git` |
-| Install terhenti / error `end of file on stdin at conffile prompt` | Sudah diperbaiki: installer sekarang non-interaktif (`--force-confold`). Pastikan kamu menjalankan `quickstart.sh`/`install.sh` versi terbaru (pull ulang repo). Jika masih muncul, jalankan manual: `pkg update && DEBIAN_FRONTEND=noninteractive pkg upgrade -y -o Dpkg::Options::=--force-confold` |
-| Pesan `check your internet connection` muncul padahal bukan masalah jaringan | Installer sekarang membedakan jenis error (network, dpkg lock, conffile, broken package, missing repository, permission, unsupported platform). Baca pesan FAIL di atas — bukan lagi selalu "cek internet" |
-| Instalasi lama (10–25 menit) | Normal — jangan tutup Termux, pastikan internet stabil |
-| `INSTALLATION: FAIL` | Jalankan ulang `bash install.sh` (aman diulang) |
-| `Failed building wheel for zlib-ng` / `error: [Errno 2] No such file or directory: 'cmake'` | Versi `ccxt` paling baru (4.5.65+) butuh `zlib-ng` yang tidak punya versi siap pakai di Android, jadi pip mencoba meraciknya dari kode sumber dan butuh `cmake`. Ini sudah diperbaiki: `requirements.txt` sekarang mengunci `ccxt` ke versi yang terbukti jalan. Jalankan `bash update.sh` (menarik perbaikan + meng-update dependency), lalu `bash install.sh` lagi |
-| `Failed building wheel for cmake` / gagal install numpy atau pandas | Jalankan `pkg install -y tur-repo && pkg install -y python-numpy python-pandas` lalu ulangi `bash install.sh`. Jika masih gagal, hapus dulu `.venv` (`rm -rf .venv`) baru jalankan `bash install.sh` lagi supaya venv baru dibuat setelah numpy/pandas terpasang |
-| `Unable to locate package python-pandas` | Jalankan `pkg install -y tur-repo` dulu (pandas cuma tersedia lewat repo komunitas TUR, bukan repo utama Termux), baru ulangi `pkg install -y python-numpy python-pandas` |
+| Install terhenti / error `end of file on stdin at conffile prompt` | Sudah diperbaiki: installer sekarang non-interaktif (`--force-confold`). Jalankan ulang `bash install.sh` |
+| `Failed building wheel for pycares` | Sudah diperbaiki: `cmake` sekarang diinstall otomatis oleh `install.sh`. Jalankan ulang `bash install.sh` |
+| `Failed building wheel for zlib-ng` | Versi `ccxt` paling baru butuh `zlib-ng` yang tidak punya versi siap pakai di Android. `requirements.txt` sudah mengunci ccxt ke versi yang terbukti jalan. Jalankan `bash update.sh` lalu `bash install.sh` lagi |
+| `Failed building wheel for cmake` / gagal install numpy atau pandas | Jalankan `pkg install -y tur-repo && pkg install -y python-numpy python-pandas` lalu ulangi `bash install.sh` |
+| `Unable to locate package python-pandas` | Jalankan `pkg install -y tur-repo` dulu (pandas cuma tersedia lewat repo komunitas TUR), baru ulangi `bash install.sh` |
 | Bot berhenti tiba-tiba tanpa error | Android mematikan Termux — whitelist baterai Termux (lihat `OPERATIONS.md`) |
 | Exchange menolak koneksi (rate limit) | Tunggu beberapa menit lalu `bash run.sh` lagi |
 
