@@ -296,6 +296,15 @@ install_packages() {
             _run_pkg_capture "pkg install (numpy/pandas)" \
                 pkg install -y python-numpy python-pandas \
                 -o Dpkg::Options::=--force-confold || return 1
+
+            # tmux: required by scripts/termux-start.sh (the supervised
+            # bot launcher that keeps the bot alive when Termux is
+            # minimized). termux-api: required for termux-wake-lock so
+            # the bot survives Android Doze mode.
+            info "Installing: tmux termux-api (session supervisor + wake-lock)"
+            _run_pkg_capture "pkg install (tmux/termux-api)" \
+                pkg install -y tmux termux-api \
+                -o Dpkg::Options::=--force-confold || return 1
             ;;
         apt)
             info "Installing Debian/Ubuntu packages (non-interactive, keeps existing configs)"
@@ -519,7 +528,9 @@ self_check() {
     fi
 
     # Full health report (reuses setup.sh --auto with the venv active).
-    if [[ -f setup.sh ]]; then
+    # Skipped during quickstart (ZETBOT_SKIP_HEALTHCHECK=1) to avoid
+    # confusing output on a fresh install — the user can run it manually.
+    if [[ -f setup.sh ]] && [[ "${ZETBOT_SKIP_HEALTHCHECK:-0}" != "1" ]]; then
         info "Running full health check (setup.sh --auto)..."
         if VIRTUAL_ENV="$SCRIPT_DIR/.venv" \
                 PATH="$SCRIPT_DIR/.venv/bin:$PATH" \

@@ -17,26 +17,24 @@
 #        virtualenv, Python dependencies, .env from .env.example, folders,
 #        self-check). No duplicated logic — this script reuses install.sh.
 #    3.  If .env was freshly created by install.sh (never configured by the
-#        user before), asks ONE interactive question with simple numbered
-#        choices: 1) Indodax (IDR) or 2) Binance (USDT). Then sets
-#        EXCHANGE + QUOTE_CURRENCY (+ ACCOUNT_BALANCE) consistently in .env
-#        — never EXCHANGE=indodax with QUOTE_CURRENCY=USDT (that old bug
-#        made the scanner find zero markets).
+#        user before), sets EXCHANGE + QUOTE_CURRENCY (+ ACCOUNT_BALANCE)
+#        to Indodax/IDR defaults in .env. Override via QUICKSTART_EXCHANGE=2
+#        for Binance. No interactive prompts — fully non-interactive.
 #        If .env already existed and was filled by the user, NOTHING is
-#        asked and NOTHING is touched — it is used as-is.
+#        touched — it is used as-is.
 #    4.  PAPER_MODE is ALWAYS true on this path. quickstart.sh can never
 #        enable live trading and never asks for exchange API credentials.
 #        If a pre-existing .env is configured for live trading (PAPER_MODE
 #        not "true"), quickstart refuses to start the bot and points to the
 #        manual path instead.
-#    5.  Starts the bot: bash run.sh
+#  5.  Starts the bot: bash run.sh
 #
 #  Safe to re-run (idempotent): existing repos, .env, .venv and data/ are
 #  reused; nothing user-owned is overwritten.
 #
 #  Options / env (advanced / automation):
 #      QUICKSTART_REPO_URL=...       repo to clone (default: official GitHub)
-#      QUICKSTART_EXCHANGE=1|2|indodax|binance   skip the interactive prompt
+#      QUICKSTART_EXCHANGE=1|2|indodax|binance   override exchange (default: indodax)
 #      NO_COLOR=1                     plain output (no ANSI colors)
 # =============================================================================
 
@@ -158,24 +156,8 @@ choose_exchange() {
                 ;;
         esac
     else
-        echo ""
-        echo -e "${CYAN}${BOLD}Pilih exchange untuk PAPER TRADING (uang simulasi — aman):${NC}"
-        echo -e "  ${BOLD}1)${NC} Indodax  — pasangan Rupiah (IDR)"
-        echo -e "  ${BOLD}2)${NC} Binance  — pasangan USDT"
-        printf "  Pilihan [1]: "
-
-        if [[ -t 0 ]]; then
-            read -r choice || true
-        elif exec < /dev/tty 2>/dev/null; then
-            read -r choice || true
-        else
-            read -r choice || true
-        fi
-        choice="${choice:-1}"
-        if [[ "$choice" != "1" && "$choice" != "2" ]]; then
-            warn "Pilihan '$choice' tidak valid — memakai bawaan (1) Indodax"
-            choice="1"
-        fi
+        # Default to Indodax (1) — fully non-interactive.
+        choice="1"
     fi
 
     case "$choice" in
@@ -239,7 +221,7 @@ main() {
     # --- Step 3: run the existing installer (reused, never duplicated) ---
     echo ""
     echo -e "${BOLD}Menjalankan installer (install.sh)...${NC}"
-    if ! bash install.sh; then
+    if ! ZETBOT_SKIP_HEALTHCHECK=1 bash install.sh; then
         fail "Installer gagal — perbaiki pesan FAIL di atas lalu jalankan ulang."
         exit 1
     fi
@@ -251,7 +233,7 @@ main() {
             exit 1
         fi
         echo ""
-        echo -e "${BOLD}.env baru — pilih exchange:${NC}"
+        echo -e "${BOLD}.env baru — konfigurasi exchange default:${NC}"
         choose_exchange
     else
         echo ""
