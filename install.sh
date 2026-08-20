@@ -300,10 +300,11 @@ install_packages() {
             # tmux: required by scripts/termux-start.sh (the supervised
             # bot launcher that keeps the bot alive when Termux is
             # minimized). termux-api: required for termux-wake-lock so
-            # the bot survives Android Doze mode.
-            info "Installing: tmux termux-api (session supervisor + wake-lock)"
-            _run_pkg_capture "pkg install (tmux/termux-api)" \
-                pkg install -y tmux termux-api \
+            # the bot survives Android Doze mode. cmake: needed by
+            # native pip builds (pycares, etc.) that compile C extensions.
+            info "Installing: tmux termux-api cmake (session supervisor + wake-lock + native builds)"
+            _run_pkg_capture "pkg install (tmux/termux-api/cmake)" \
+                pkg install -y tmux termux-api cmake \
                 -o Dpkg::Options::=--force-confold || return 1
             ;;
         apt)
