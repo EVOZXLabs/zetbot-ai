@@ -288,6 +288,28 @@ def _fills_cover(rec: dict[str, Any]) -> bool:
     return filled >= entry_qty * _CLOSE_COVERAGE
 
 
+def _best_exit_reason(fills: list[dict[str, Any]], net_pnl: float) -> str:
+    """Determine the most representative exit reason from a set of fills.
+
+    ``_finalize`` previously used the *last* fill's reason, which is
+    misleading when partial TPs are followed by a SL (or vice versa):
+    GPS/IDR had 3 TP fills but lost money → reason showed "Take Profit";
+    PIPPIN/IDR's last fill was SL but was overall profitable.
+    """
+    if not fills:
+        return "Exit"
+    reasons = {}
+    for f in fills:
+        reason = str(f.get("reason") or "Exit")
+        qty = float(f.get("qty", 0) or 0)
+        reasons[reason] = reasons.get(reason, 0.0) + qty
+    dominant = max(reasons, key=reasons.get)
+    other_reasons = [r for r in reasons if r != dominant]
+    if other_reasons:
+        return "TP/SL"
+    return dominant
+
+
 def _finalize(symbol: str, rec: dict[str, Any]) -> None:
     """Append the closed-trade record once (deduped by buy/sell order ids)."""
     fills = [f for f in (rec.get("sell_fills") or []) if float(f.get("qty", 0) or 0) > 0]
@@ -356,7 +378,7 @@ def _finalize(symbol: str, rec: dict[str, Any]) -> None:
         "opened_at": opened_at,
         "closed_at": closed_at,
         "holding_duration": _iso_gap_seconds(opened_at, closed_at),
-        "exit_reason": str(kept[-1].get("reason") or "Exit"),
+        "exit_reason": _best_exit_reason(kept, net_pnl),
         "buy_order_id": buy_order_id,
         "sell_order_id": sell_order_id,
     }

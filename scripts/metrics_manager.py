@@ -448,7 +448,7 @@ class MetricsManager:
                 continue
             sym = p.get("symbol", "")
             if not self._passes_quote_filter(sym):
-                logger.warning(
+                logger.debug(
                     "[LEGACY-DATA] ignored mismatched quote position: "
                     "%s (account quote=%s)",
                     sym, self._account_quote,
@@ -510,7 +510,7 @@ class MetricsManager:
                     if not sym:
                         continue
                     if not self._passes_quote_filter(sym):
-                        logger.warning(
+                        logger.debug(
                             "[LEGACY-DATA] ignored mismatched quote trade: "
                             "%s (account quote=%s)",
                             sym, self._account_quote,
@@ -581,7 +581,7 @@ class MetricsManager:
                 if not sym:
                     continue
                 if not self._passes_quote_filter(sym):
-                    logger.warning(
+                    logger.debug(
                         "[LEGACY-DATA] ignored mismatched quote trade: "
                         "%s (account quote=%s)",
                         sym, self._account_quote,
@@ -600,7 +600,9 @@ class MetricsManager:
                     "holding_hours": round(holding / 3600.0, 2) if holding > 0 else 0.0,
                     "net_pnl": net_pnl,
                     "net_pnl_pct": float(rec.get("net_pnl_pct", 0) or 0),
-                    "reason": rec.get("exit_reason") or "TP/SL",
+                    "reason": self._correct_exit_reason(
+                        rec.get("exit_reason") or "TP/SL", net_pnl,
+                    ),
                     "result": "WIN" if net_pnl >= 0 else "LOSS",
                     "trade_id": rec.get("trade_id", ""),
                 })
@@ -608,6 +610,20 @@ class MetricsManager:
             return []
         trades.sort(key=lambda t: t.get("exit_time", ""), reverse=True)
         return trades
+
+    @staticmethod
+    def _correct_exit_reason(reason: str, net_pnl: float) -> str:
+        """Correct exit_reason stored by last-fill logic for display.
+
+        GPS/IDR had 3 TP fills but lost money → stored "Take Profit";
+        PIPPIN/IDR's last fill was SL but was profitable → stored "Stop
+        Loss".  If the reason contradicts the actual PnL, show "TP/SL".
+        """
+        if reason in ("Take Profit", "STOPPED") and net_pnl < 0:
+            return "TP/SL"
+        if reason == "Stop Loss" and net_pnl > 0:
+            return "TP/SL"
+        return reason
 
     # ------------------------------------------------------------------
     #  Computed metrics

@@ -508,8 +508,12 @@ class Pipeline:
         equity = balance + existing_exposure
         mm_config = risk_manager.MoneyManagementConfig(
             mode=risk_manager.MoneyManagementMode(
-                risk_manager.MONEY_MANAGEMENT_MODE
+                self.config.money_management_mode
             ),
+            risk_per_trade=self.config.max_risk_per_trade_pct / 100.0,
+            stop_loss_pct=self.config.stop_loss_pct,
+            take_profit_pct=self.config.take_profit_pct,
+            max_position_pct_of_balance=self.config.max_position_size_pct,
         )
         manager = risk_manager.RiskManager(
             balance=balance,

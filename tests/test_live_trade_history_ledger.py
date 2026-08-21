@@ -244,7 +244,7 @@ class TestLedgerUnit:
         assert rec["sell_order_id"] == "s3"
         assert _read_pending() == {}
 
-    def test_mixed_tp_then_sl_reason_is_last_exit(self, _live_env) -> None:
+    def test_mixed_tp_then_sl_reason_is_tpsl(self, _live_env) -> None:
         buy = _order_result(SYMBOL, "BUY", "b1", 1.0, 10.0, 0.0,
                             "2026-01-01T00:00:00+00:00")
         ltl.record_live_entry(buy)
@@ -256,7 +256,7 @@ class TestLedgerUnit:
         ltl.record_live_exit_fill(sl, reason="Stop Loss")
 
         rec = _read_ledger()[0]
-        assert rec["exit_reason"] == "Stop Loss"
+        assert rec["exit_reason"] == "TP/SL"
         assert rec["exit_price"] == pytest.approx((0.3 * 12 + 0.7 * 8))
         assert rec["gross_pnl"] == pytest.approx(0.3 * 12 + 0.7 * 8 - 10.0)
 
