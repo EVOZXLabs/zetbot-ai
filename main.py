@@ -351,6 +351,41 @@ _exit_reason_map = {
 }
 
 
+def _actual_fill_exit_price(symbol: str, fallback: float) -> float:
+    """Weighted-average exit price from actual exchange fills.
+
+    ``live_pending_closures.json`` accumulates every real TP/SL sell fill
+    while a position is still open.  Once the position is fully closed
+    those fills are the authoritative source of the exit price — the
+    ticker ``last`` price at the moment the pipeline noticed the closure
+    is NOT the actual fill price (Indodax market orders fill at the
+    order-book price, which can differ significantly).
+
+    Returns the weighted average of all recorded sell fills when
+    available, otherwise ``fallback``.
+    """
+    try:
+        with open("data/live_pending_closures.json") as f:
+            pending = json.load(f)
+        rec = pending.get(symbol) if isinstance(pending, dict) else None
+        if rec is None:
+            return fallback
+        fills = rec.get("sell_fills") or []
+        if not fills:
+            return fallback
+        total_qty = 0.0
+        total_value = 0.0
+        for fill in fills:
+            fq = float(fill.get("qty", 0) or 0)
+            fp = float(fill.get("price", 0) or 0)
+            if fq > 0 and fp > 0:
+                total_qty += fq
+                total_value += fq * fp
+        return round(total_value / total_qty, 8) if total_qty > 0 else fallback
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ZeroDivisionError):
+        return fallback
+
+
 def _holding_time_from_position(position: Any) -> "timedelta":
     """Holding duration for a close notification, from the entry timestamp.
 
@@ -1042,7 +1077,7 @@ def _monitor_positions(
                 notifier.notify_position_closed(
                     symbol=sym,
                     entry_price=reconciled.get("entry_price", 0),
-                    exit_price=current_price,
+                    exit_price=_actual_fill_exit_price(sym, current_price),
                     pnl=pnl,
                     pnl_pct=reconciled.get("floating_pnl_pct", 0),
                     balance=new_balance,
@@ -1207,7 +1242,7 @@ def _monitor_live_closure(
             notifier.notify_position_closed(
                 symbol=sym,
                 entry_price=reconciled.get("entry_price", 0),
-                exit_price=current_price,
+                exit_price=_actual_fill_exit_price(sym, current_price),
                 pnl=pnl,
                 pnl_pct=reconciled.get("floating_pnl_pct", 0),
                 balance=new_balance,

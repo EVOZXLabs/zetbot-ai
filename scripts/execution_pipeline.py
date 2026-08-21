@@ -328,9 +328,9 @@ class ExecutionPipeline:
 
         # --- Process TP hits sequentially ---
         tp_config = [
-            (tp1_hit, not position.get("tp1_hit", False), tp1, 0.30, "tp1_hit"),
-            (tp2_hit, not position.get("tp2_hit", False), tp2, 0.30, "tp2_hit"),
-            (tp3_hit, not position.get("tp3_hit", False), tp3, 0.40, "tp3_hit"),
+            (tp1_hit, not position.get("tp1_hit", False), tp1, TP1_SELL_PCT, "tp1_hit"),
+            (tp2_hit, not position.get("tp2_hit", False), tp2, TP2_SELL_PCT, "tp2_hit"),
+            (tp3_hit, not position.get("tp3_hit", False), tp3, TP3_SELL_PCT, "tp3_hit"),
         ]
 
         for is_hit, is_new, tp_price, fraction, hit_key in tp_config:

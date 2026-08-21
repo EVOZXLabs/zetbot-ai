@@ -1250,7 +1250,7 @@ class Pipeline:
                             self._notifier.notify_position_closed(
                                 symbol=sym,
                                 entry_price=reconciled.get("entry_price", 0),
-                                exit_price=current_price,
+                                exit_price=self._actual_fill_exit_price(sym, current_price),
                                 pnl=reconciled.get("total_pnl", 0),
                                 pnl_pct=reconciled.get("floating_pnl_pct", 0),
                                 balance=provider.get_balance(),
@@ -1380,6 +1380,37 @@ class Pipeline:
             pm.cancel_protection(symbol, reason="pipeline_reconciliation")
         except Exception as exc:
             self.logger.debug(f"Cancel protection for {symbol}: {exc}")
+
+    @staticmethod
+    def _actual_fill_exit_price(symbol: str, fallback: float) -> float:
+        """Weighted-average exit price from actual exchange fills.
+
+        ``live_pending_closures.json`` accumulates every real TP/SL sell
+        fill while a position is still open.  The ticker ``last`` price
+        at the moment the pipeline noticed the closure is NOT the actual
+        fill price (market orders fill at order-book price).
+        """
+        import json as _json  # noqa: PLC0415
+        try:
+            with open("data/live_pending_closures.json") as f:
+                pending = _json.load(f)
+            rec = pending.get(symbol) if isinstance(pending, dict) else None
+            if rec is None:
+                return fallback
+            fills = rec.get("sell_fills") or []
+            if not fills:
+                return fallback
+            total_qty = 0.0
+            total_value = 0.0
+            for fill in fills:
+                fq = float(fill.get("qty", 0) or 0)
+                fp = float(fill.get("price", 0) or 0)
+                if fq > 0 and fp > 0:
+                    total_qty += fq
+                    total_value += fq * fp
+            return round(total_value / total_qty, 8) if total_qty > 0 else fallback
+        except (FileNotFoundError, _json.JSONDecodeError, OSError, ZeroDivisionError):
+            return fallback
 
     @paper_state_writes
     def _persist_paper_state(self, provider: Any) -> None:

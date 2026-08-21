@@ -48,7 +48,7 @@ LIVE_PENDING_CLOSURES_PATH = "data/live_pending_closures.json"
 # paid in the base asset / exchange rounding can leave the sellable amount
 # a hair below the bought amount; 0.5 % keeps those closes finalizable
 # while never finalizing a genuinely half-sold position.
-_CLOSE_COVERAGE = 0.995
+_CLOSE_COVERAGE = 0.97
 
 # A pending closure whose last activity is older than this is treated as
 # abandoned (e.g. a position closed on the exchange itself, outside the

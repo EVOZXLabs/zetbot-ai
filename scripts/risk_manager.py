@@ -1024,9 +1024,13 @@ def _resolve_live_account_state() -> tuple[float | None, float | None]:
         )
         wallet = manager.get_provider().fetch_balance()
         cash = 0.0
-        for balance in wallet.values():
-            if isinstance(balance, dict) and quote in balance:
-                cash += float(balance[quote] or 0.0)
+        free_bucket = wallet.get("free")
+        if isinstance(free_bucket, dict) and quote in free_bucket:
+            cash = float(free_bucket[quote] or 0.0)
+        else:
+            per_currency = wallet.get(quote)
+            if isinstance(per_currency, dict) and "free" in per_currency:
+                cash = float(per_currency["free"] or 0.0)
         exposure = _existing_open_exposure()
         return cash, cash + exposure
     except Exception as exc:  # pragma: no cover - defensive network/credential path
