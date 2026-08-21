@@ -1002,7 +1002,7 @@ class ScannerReport:
             "relative_volume", "trend_alignment",
             "trend_score", "momentum_score", "volume_score",
             "volatility_score", "liquidity_score", "overall", "signal",
-            "venue",
+            "venue", "high_24h", "low_24h", "highest_high_20", "lowest_low_20",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
