@@ -224,6 +224,8 @@ class PairAnalysis:
     status: str = "ok"
     error: str = ""
     venue: str = "cex"
+    high_24h: float = 0.0
+    low_24h: float = 0.0
 
 
 @dataclass
@@ -251,6 +253,10 @@ class ScoredPair:
     signal: str
     rank: int
     venue: str = "cex"
+    high_24h: float = 0.0
+    low_24h: float = 0.0
+    highest_high_20: float = 0.0
+    lowest_low_20: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +511,7 @@ class PairAnalyzer:
                 status="skipped",
                 error=f"only {len(raw)} candles (< {MIN_CANDLES})",
                 venue=pair.venue,
+                high_24h=pair.high_24h, low_24h=pair.low_24h,
             )
 
         df = pd.DataFrame(raw, columns=NORMALIZED_COLUMNS)
@@ -528,6 +535,7 @@ class PairAnalyzer:
             candle_count=ind["candle_count"],
             status="ok",
             venue=pair.venue,
+            high_24h=pair.high_24h, low_24h=pair.low_24h,
         )
 
     @classmethod
@@ -562,6 +570,7 @@ class PairAnalyzer:
                 trend_alignment="", candle_count=0,
                 status="error", error=f"[{exchange_name}] {e}",
                 venue=pair.venue,
+                high_24h=pair.high_24h, low_24h=pair.low_24h,
             )
 
     @classmethod
@@ -587,6 +596,7 @@ class PairAnalyzer:
                 trend_alignment="", candle_count=0,
                 status="error", error=str(e),
                 venue=pair.venue,
+                high_24h=pair.high_24h, low_24h=pair.low_24h,
             )
 
 
@@ -908,6 +918,10 @@ def _score_and_rank(analyses: list[PairAnalysis]) -> list[ScoredPair]:
             signal=signal,
             rank=0,
             venue=a.venue,
+            high_24h=a.high_24h,
+            low_24h=a.low_24h,
+            highest_high_20=a.highest_high_20,
+            lowest_low_20=a.lowest_low_20,
         ))
 
     scored.sort(key=lambda s: s.overall, reverse=True)

@@ -61,6 +61,8 @@ MAX_RSI_ENTRY = float(os.getenv("MAX_RSI_ENTRY", "65.0"))
 MAX_24H_PUMP_PCT = float(os.getenv("MAX_24H_PUMP_PCT", "6.0"))
 MAX_EMA200_EXTENSION_PCT = float(os.getenv("MAX_EMA200_EXTENSION_PCT", "20.0"))
 MIN_TREND_ALIGNMENT = os.getenv("MIN_TREND_ALIGNMENT", "BULLISH")
+MAX_PRICE_POSITION_IN_RANGE_PCT = float(os.getenv("MAX_PRICE_POSITION_IN_RANGE_PCT", "85.0"))
+MAX_PRICE_VS_24H_HIGH_PCT = float(os.getenv("MAX_PRICE_VS_24H_HIGH_PCT", "97.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +94,10 @@ class ScannerPair:
     overall: float
     signal: str
     rank: int
+    high_24h: float = 0.0
+    low_24h: float = 0.0
+    highest_high_20: float = 0.0
+    lowest_low_20: float = 0.0
 
 
 @dataclass
@@ -461,6 +467,30 @@ def _gate_reasons(pair: ScannerPair) -> list[str]:
     if pair.ema200 and pair.ema200 > 0 and pair.price < pair.ema200:
         reasons.append("below EMA200 (structural downtrend)")
 
+    # Don't buy at the top of the recent range.  highest_high_20 and
+    # lowest_low_20 define the 20-candle trading range.  If price is in
+    # the top 15% of that range, the upside is limited and a reversion
+    # to the mean is likely.
+    hh = pair.highest_high_20
+    ll = pair.lowest_low_20
+    if hh > 0 and ll > 0 and hh > ll:
+        range_pos = (pair.price - ll) / (hh - ll) * 100.0
+        if range_pos > MAX_PRICE_POSITION_IN_RANGE_PCT:
+            reasons.append(
+                f"near range top ({range_pos:.0f}% of 20-candle range "
+                f"> {MAX_PRICE_POSITION_IN_RANGE_PCT:.0f}%)"
+            )
+
+    # Don't chase a coin at its 24h high.  Buying within the last few
+    # percent of the daily range is the #1 cause of immediate losses.
+    if pair.high_24h > 0:
+        pct_of_high = (pair.price / pair.high_24h) * 100.0
+        if pct_of_high > MAX_PRICE_VS_24H_HIGH_PCT:
+            reasons.append(
+                f"at 24h high ({pct_of_high:.1f}% of high "
+                f"> {MAX_PRICE_VS_24H_HIGH_PCT:.0f}%)"
+            )
+
     return reasons
 
 
@@ -572,6 +602,10 @@ class DecisionEngine:
                 overall=p.get("overall", 0.0),
                 signal=p.get("signal", "NEUTRAL"),
                 rank=p.get("rank", 0),
+                high_24h=p.get("high_24h", 0.0),
+                low_24h=p.get("low_24h", 0.0),
+                highest_high_20=p.get("highest_high_20", 0.0),
+                lowest_low_20=p.get("lowest_low_20", 0.0),
             ))
         self.pairs = pairs
         return pairs
