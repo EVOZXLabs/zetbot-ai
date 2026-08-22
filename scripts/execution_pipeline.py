@@ -451,6 +451,13 @@ class ExecutionPipeline:
                     remaining = 0
                     result["status"] = "STOPPED"
 
+                    # Block re-entry into this symbol for SL_COOLDOWN_MINUTES.
+                    try:
+                        from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
+                        record_close_cooldown(symbol)
+                    except Exception:
+                        pass
+
                     # LIVE mode: accumulate the ACTUAL SL sell fill toward the
                     # trade-history ledger (best-effort, never breaks trading).
                     if self._provider.mode == "LIVE":
@@ -498,6 +505,11 @@ class ExecutionPipeline:
                         )
                         remaining = 0
                         result["status"] = "STOPPED"
+                        try:
+                            from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
+                            record_close_cooldown(symbol)
+                        except Exception:
+                            pass
                     else:
                         _log.warning("SL sell failed for %s: %s — rolling back exit state", symbol, sl_result.error)
                         self._write_ahead(symbol, dict(result))

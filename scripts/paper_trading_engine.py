@@ -929,6 +929,12 @@ class PaperTradingEngine:
             vp.realized_pnl = round(realized_pnl, 2)
             vp.total_pnl = round(realized_pnl, 2)
 
+            try:
+                from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
+                record_close_cooldown(symbol)
+            except Exception:
+                pass
+
             exit_reason = self._resolve_exit_reason(
                 "Take Profit", pos_status, tp1_hit, tp2_hit, tp3_hit,
                 vp.total_pnl,
@@ -1002,6 +1008,13 @@ class PaperTradingEngine:
             vp.remaining_qty = 0.0
             vp.current_price = exit_price
             vp.realized_pnl = round(realized_pnl, 2)
+
+            # Block re-entry into this symbol for SL_COOLDOWN_MINUTES.
+            try:
+                from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
+                record_close_cooldown(symbol)
+            except Exception:
+                pass
             vp.unrealized_pnl = 0.0
             vp.total_pnl = round(realized_pnl, 2)
 

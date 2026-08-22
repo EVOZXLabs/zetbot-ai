@@ -38,6 +38,7 @@ SCANNER_PATH = "data/scanner_results.json"
 DECISION_PATH = "data/decision_results.json"
 PAPER_STATE_PATH = "data/paper_state.json"
 LIVE_POSITIONS_PATH = "data/live_positions.json"
+SL_COOLDOWN_PATH = "data/sl_cooldowns.json"
 
 # Account config (all overridable via module-level vars).
 #
@@ -93,6 +94,11 @@ MIN_TP1_PCT = float(os.getenv("MIN_TP1_PCT", "1.5"))
 MAX_POSITION_SIZE_PCT = 0.6
 STOP_ATR_MULTIPLIER = float(os.getenv("STOP_ATR_MULTIPLIER", "1.5"))   # ATR stop distance multiplier
 STOP_FIXED_PCT = float(os.getenv("STOP_FIXED_PCT", "3.0"))              # fallback fixed stop %
+SL_COOLDOWN_MINUTES = int(os.getenv("SL_COOLDOWN_MINUTES", "240"))     # block re-entry after SL (minutes)
+# Time after a position is closed (any reason) before the same symbol
+# can be re-entered.  Prevents the bot from repeatedly buying into a
+# falling coin immediately after being stopped out (SKYAI/IDR and
+# MYX/IDR lost ~70k IDR in 2 cycles because of this).
 
 # Optional equity-scaled concurrent-position tiers. NOT used by default
 # any more — SPECIFICATION.md §25/§47/§49 fixes "Maximum Open Position"
@@ -354,6 +360,61 @@ class TakeProfitCalculator:
 
 
 # -------------------------------------------------------------------
+#  SL Cooldown — block re-entry after a stop-loss
+# -------------------------------------------------------------------
+
+
+def record_close_cooldown(symbol: str) -> None:
+    """Record that *symbol* was just closed (SL or TP) so re-entry is
+    blocked for ``SL_COOLDOWN_MINUTES``.
+
+    Called by the pipeline reconciliation and the live monitor when a
+    position transitions to CLOSED/STOPPED.
+    """
+    import os as _os  # noqa: PLC0415
+    try:
+        data: dict[str, Any] = {}
+        if _os.path.exists(SL_COOLDOWN_PATH):
+            with open(SL_COOLDOWN_PATH) as f:
+                data = json.load(f)
+        data[symbol] = {
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "cooldown_until": time.time() + SL_COOLDOWN_MINUTES * 60,
+        }
+        _os.makedirs(_os.path.dirname(SL_COOLDOWN_PATH) or ".", exist_ok=True)
+        with open(SL_COOLDOWN_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def is_in_close_cooldown(symbol: str) -> tuple[bool, str]:
+    """Return ``(True, reason)`` if *symbol* is still in SL/TP cooldown.
+
+    Returns ``(False, "")`` when the cooldown has expired or no record
+    exists.
+    """
+    try:
+        with open(SL_COOLDOWN_PATH) as f:
+            data = json.load(f)
+        rec = data.get(symbol)
+        if rec is None:
+            return False, ""
+        remaining = rec.get("cooldown_until", 0) - time.time()
+        if remaining <= 0:
+            # Cooldown expired — clean up.
+            del data[symbol]
+            with open(SL_COOLDOWN_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+            return False, ""
+        mins = int(remaining // 60)
+        secs = int(remaining % 60)
+        return True, f"Cooldown {mins}m{secs:02d}s after recent close"
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False, ""
+
+
+# -------------------------------------------------------------------
 #  Trade Validator
 # -------------------------------------------------------------------
 
@@ -398,6 +459,11 @@ class TradeValidator:
     ) -> tuple[str, str]:
         """Return (approval, reason)."""
         reasons: list[str] = []
+
+        # 0. SL/TP cooldown — never re-enter a symbol that was just closed
+        in_cooldown, cooldown_msg = is_in_close_cooldown(scanner.symbol)
+        if in_cooldown:
+            reasons.append(cooldown_msg)
 
         # 1. Probability
         if decision.probability < self.min_prob:
