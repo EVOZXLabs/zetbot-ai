@@ -931,7 +931,7 @@ class PaperTradingEngine:
 
             try:
                 from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
-                record_close_cooldown(symbol)
+                record_close_cooldown(symbol, pnl=realized_pnl)
             except Exception:
                 pass
 
@@ -1009,10 +1009,10 @@ class PaperTradingEngine:
             vp.current_price = exit_price
             vp.realized_pnl = round(realized_pnl, 2)
 
-            # Block re-entry into this symbol for SL_COOLDOWN_MINUTES.
+            # Block re-entry into this symbol ONLY on loss.
             try:
                 from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
-                record_close_cooldown(symbol)
+                record_close_cooldown(symbol, pnl=realized_pnl)
             except Exception:
                 pass
             vp.unrealized_pnl = 0.0

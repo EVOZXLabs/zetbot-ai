@@ -364,13 +364,19 @@ class TakeProfitCalculator:
 # -------------------------------------------------------------------
 
 
-def record_close_cooldown(symbol: str) -> None:
-    """Record that *symbol* was just closed (SL or TP) so re-entry is
+def record_close_cooldown(symbol: str, *, pnl: float = 0.0) -> None:
+    """Record that *symbol* was just closed at a LOSS so re-entry is
     blocked for ``SL_COOLDOWN_MINUTES``.
+
+    Only records cooldown when ``pnl < 0`` (loss).  Winning trades
+    (TP exits) are NOT cooldown-blocked — the bot should be free to
+    re-enter profitable symbols immediately.
 
     Called by the pipeline reconciliation and the live monitor when a
     position transitions to CLOSED/STOPPED.
     """
+    if pnl >= 0:
+        return  # profit — no cooldown
     import os as _os  # noqa: PLC0415
     try:
         data: dict[str, Any] = {}
@@ -380,6 +386,7 @@ def record_close_cooldown(symbol: str) -> None:
         data[symbol] = {
             "closed_at": datetime.now(timezone.utc).isoformat(),
             "cooldown_until": time.time() + SL_COOLDOWN_MINUTES * 60,
+            "loss": pnl,
         }
         _os.makedirs(_os.path.dirname(SL_COOLDOWN_PATH) or ".", exist_ok=True)
         with open(SL_COOLDOWN_PATH, "w") as f:

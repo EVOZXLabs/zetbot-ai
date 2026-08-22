@@ -1229,16 +1229,17 @@ def _monitor_live_closure(
         and new_status in CLOSED_STATUSES
         and not prev.get("closure_notified", False)
     ):
-        # Block re-entry into this symbol for SL_COOLDOWN_MINUTES.
-        try:
-            from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
-            record_close_cooldown(sym)
-        except Exception:
-            pass
-
         exit_reason = _exit_reason_map.get(new_status, "Strategy Exit")
         quote = os.getenv("QUOTE_CURRENCY", "USDT").upper()
         pnl = float(reconciled.get("total_pnl", 0) or 0)
+
+        # Block re-entry into this symbol ONLY on loss.
+        try:
+            from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
+            record_close_cooldown(sym, pnl=pnl)
+        except Exception:
+            pass
+
         new_balance = _live_quote_balance(container)
         logger.info(
             f"Position {sym}: {old_status} → {new_status} "

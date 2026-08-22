@@ -451,10 +451,10 @@ class ExecutionPipeline:
                     remaining = 0
                     result["status"] = "STOPPED"
 
-                    # Block re-entry into this symbol for SL_COOLDOWN_MINUTES.
+                    # Block re-entry into this symbol ONLY on loss.
                     try:
                         from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
-                        record_close_cooldown(symbol)
+                        record_close_cooldown(symbol, pnl=close_pnl)
                     except Exception:
                         pass
 
@@ -507,7 +507,7 @@ class ExecutionPipeline:
                         result["status"] = "STOPPED"
                         try:
                             from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
-                            record_close_cooldown(symbol)
+                            record_close_cooldown(symbol, pnl=close_pnl)
                         except Exception:
                             pass
                     else:

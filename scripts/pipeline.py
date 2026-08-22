@@ -1233,10 +1233,11 @@ class Pipeline:
                 old_status = pos.get("status")
                 new_status = reconciled.get("status")
                 if old_status != new_status and new_status in CLOSED_STATUSES:
-                    # Record SL/TP cooldown so this symbol cannot be
+                    # Record cooldown ONLY on loss so this symbol cannot be
                     # re-entered until the cooldown period expires.
+                    _pnl = float(reconciled.get("total_pnl", 0) or 0)
                     from scripts.risk_manager import record_close_cooldown  # noqa: PLC0415
-                    record_close_cooldown(sym)
+                    record_close_cooldown(sym, pnl=_pnl)
                     if not pos.get("closure_notified", False) and self._notifier is not None:
                         try:
                             from datetime import datetime, timedelta
