@@ -153,7 +153,7 @@ def exit_triggered(position: dict[str, Any], current_price: float) -> bool:
             continue
         if current_price >= tp_price and qty * fraction > 0:
             return True
-    stop_loss = float(position.get("stop_loss", 0) or 0)
+    stop_loss = float(position.get("current_stop", 0) or position.get("stop_loss", 0) or 0)
     if stop_loss > 0 and current_price <= stop_loss:
         return True
     return False

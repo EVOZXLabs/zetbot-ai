@@ -36,6 +36,11 @@ TP1_SELL_PCT = float(os.getenv("TP1_SELL_PCT", "30.0")) / 100.0
 TP2_SELL_PCT = float(os.getenv("TP2_SELL_PCT", "30.0")) / 100.0
 TP3_SELL_PCT = float(os.getenv("TP3_SELL_PCT", "40.0")) / 100.0
 
+# Breakeven / trailing stop config — same env vars as position_manager.py
+# so both paper and live paths use the same thresholds.
+TRAIL_ATR_MULTIPLIER = float(os.getenv("TRAIL_ATR_MULTIPLIER", "2.0"))
+BREAKEVEN_ATR_MULTIPLIER = float(os.getenv("BREAKEVEN_ATR_MULTIPLIER", "1.0"))
+
 _POSITIONS_PATH = "data/positions.json"
 
 
@@ -319,8 +324,57 @@ class ExecutionPipeline:
         tp2_hit = bool(position.get("tp2_hit", False)) or (tp2 > 0 and current_price >= tp2)
         tp3_hit = bool(position.get("tp3_hit", False)) or (tp3 > 0 and current_price >= tp3)
 
-        # --- Determine SL hit ---
-        sl_hit = stop_loss > 0 and current_price <= stop_loss
+        # --- Breakeven + Trailing Stop ---
+        # Move current_stop up as the trade becomes profitable — without
+        # this, a rally that never reaches TP1 gives back ALL gains and
+        # hits the original stop for a full loss (the #1 source of
+        # "big loss, tiny win" on volatile Indodax pairs).
+        current_stop = position.get("current_stop", stop_loss)
+        breakeven_active = bool(position.get("breakeven_active", False))
+        trailing_active = bool(position.get("trailing_active", False))
+
+        # Look up ATR% for the symbol from the last scanner snapshot
+        # so breakeven/trailing can use ATR-scaled distances.
+        atr_pct = self._get_atr_pct(symbol)
+
+        if not (tp1_hit or tp2_hit or tp3_hit):
+            # Breakeven: once price ≥ entry + BREAKEVEN_ATR_MULTIPLIER × ATR,
+            # move stop to entry — locking in a no-loss exit.
+            if not breakeven_active and current_price > entry and atr_pct > 0:
+                atr_value = current_price * (atr_pct / 100.0)
+                if current_price >= entry + atr_value * BREAKEVEN_ATR_MULTIPLIER:
+                    current_stop = entry
+                    breakeven_active = True
+                    _log.info(
+                        "%s breakeven activated: stop moved to entry %.4f "
+                        "(price %.4f ≥ entry + %s×ATR)",
+                        symbol, entry, current_price,
+                        BREAKEVEN_ATR_MULTIPLIER,
+                    )
+            # TP1 as fallback backstop for breakeven
+            if tp1_hit and current_stop < entry:
+                current_stop = entry
+                breakeven_active = True
+
+            # Trailing: once in profit, trail stop using ATR.
+            # Before TP2: wider multiplier (1.5×) to tolerate normal noise.
+            # After TP2: tighter multiplier (0.75×) to protect profits.
+            if current_price > entry and atr_pct > 0:
+                multiplier = TRAIL_ATR_MULTIPLIER * (0.75 if tp2_hit else 1.5)
+                atr_value = current_price * (atr_pct / 100.0)
+                trail_stop = current_price - atr_value * multiplier
+                if trail_stop > current_stop:
+                    current_stop = trail_stop
+                    trailing_active = True
+                    _log.info(
+                        "%s trailing stop updated: %.4f → %.4f "
+                        "(price %.4f, ATR%% %.1f, mult %.1f)",
+                        symbol, position.get("current_stop", stop_loss),
+                        current_stop, current_price, atr_pct, multiplier,
+                    )
+
+        # --- Determine SL hit (uses current_stop, not original stop_loss) ---
+        sl_hit = current_stop > 0 and current_price <= current_stop
 
         # --- Build result ---
         result = dict(position)
@@ -517,6 +571,9 @@ class ExecutionPipeline:
         # --- Update position state ---
         result["remaining_qty"] = round(remaining, 8)
         result["realized_pnl"] = round(realized_pnl, 2)
+        result["current_stop"] = current_stop
+        result["breakeven_active"] = breakeven_active
+        result["trailing_active"] = trailing_active
 
         if remaining <= 0:
             # STOPPED (stop-loss) must survive here — the generic CLOSED
@@ -565,6 +622,23 @@ class ExecutionPipeline:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
+
+    def _get_atr_pct(self, symbol: str) -> float:
+        """Return the latest ATR% for *symbol* from scanner results.
+
+        Best-effort: returns 0.0 if the scanner file is missing or the
+        symbol is not found, so callers never break.
+        """
+        try:
+            scanner_path = os.getenv("SCANNER_PATH", "data/scanner_results.json")
+            with open(scanner_path) as f:
+                data = json.load(f)
+            for pair in data.get("pairs", []):
+                if pair.get("symbol") == symbol:
+                    return float(pair.get("atr_pct", 0.0))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, KeyError):
+            pass
+        return 0.0
 
     def _write_ahead(self, symbol: str, state: dict[str, Any]) -> None:
         """Persist ``state`` for ``symbol`` into positions.json (fail-soft).

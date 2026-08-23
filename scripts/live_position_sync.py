@@ -419,6 +419,8 @@ def merge_live_positions(
             k: rec.get(k) for k in (
                 # price levels
                 "entry_price", "stop_loss", "tp1", "tp2", "tp3",
+                # breakeven / trailing stop state
+                "current_stop", "breakeven_active", "trailing_active",
                 # exit-state: a sync knows only price/qty, never which TP
                 # levels already sold. Without this, a restart resets the
                 # position to its FULL current balance with every level
