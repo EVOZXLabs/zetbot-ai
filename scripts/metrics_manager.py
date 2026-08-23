@@ -774,6 +774,20 @@ class MetricsManager:
         wib_midnight = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
         return self.trades_since(wib_midnight.astimezone(timezone.utc))
 
+    def trades_of_previous_wib_day(self) -> list[dict[str, Any]]:
+        """Trades closed during the previous WIB calendar day.
+
+        Used by the daily report which fires at 00:00 WIB — at that
+        moment the current WIB day just started and has zero trades.
+        The useful window is the previous full WIB day
+        (00:00 WIB yesterday → 00:00 WIB today).
+        """
+        now_wib = datetime.now(_WIB_TZ)
+        yesterday_midnight = (now_wib - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        return self.trades_since(yesterday_midnight.astimezone(timezone.utc))
+
     def today_summary_wib(self) -> dict[str, Any]:
         """Today's trade summary using the WIB (UTC+7) day boundary.
 

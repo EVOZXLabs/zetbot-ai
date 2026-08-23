@@ -127,7 +127,9 @@ class DailyReportScheduler:
         try:
             from scripts.metrics_manager import MetricsManager  # noqa: PLC0415
             mm = MetricsManager(self._data_dir)
-            today = mm.today_summary_wib()
+            # At 00:00 WIB the current day just started — the useful
+            # window is the PREVIOUS full WIB day, not the current one.
+            today = mm._summarize_trades(mm.trades_of_previous_wib_day())
             return {
                 "total_trades": today.get("total_trades", 0),
                 "win_count": today.get("wins", 0),

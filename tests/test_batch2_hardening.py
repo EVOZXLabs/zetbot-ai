@@ -519,17 +519,18 @@ class TestDailyReportScheduler:
         assert balance == pytest.approx(50_000.0)
 
     def test_gather_stats_uses_wib_day_boundary(self) -> None:
-        """The 00:00 WIB report must read WIB-based stats, never the
+        """The 00:00 WIB report must read the previous WIB day's stats, never the
         UTC-based today_summary() (BUG-2 regression guard)."""
         from scripts.daily_report import DailyReportScheduler
 
         _write_json("data/paper_balance.json", {"final_balance": 100.0})
 
         mgr = MagicMock()
-        mgr.today_summary_wib.return_value = {
+        mgr._summarize_trades.return_value = {
             "total_trades": 4, "wins": 3, "losses": 1,
             "win_rate": 75.0, "pnl": 12.5,
         }
+        mgr.trades_of_previous_wib_day.return_value = [{"pnl": 1}]
         with patch("scripts.metrics_manager.MetricsManager", return_value=mgr):
             sched = DailyReportScheduler(notifier=MagicMock(), data_dir="data")
             stats, balance = sched._gather_stats()
@@ -539,7 +540,8 @@ class TestDailyReportScheduler:
         assert stats["loss_count"] == 1
         assert stats["win_rate"] == 75.0
         assert stats["total_profit"] == 12.5
-        mgr.today_summary_wib.assert_called_once()
+        mgr.trades_of_previous_wib_day.assert_called_once()
+        mgr.today_summary_wib.assert_not_called()
         mgr.today_summary.assert_not_called()
 
 
