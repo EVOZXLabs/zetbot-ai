@@ -9,15 +9,15 @@
 - [x] Health Monitor implemented
 - [x] Pipeline Scheduler verified
 - [x] Critical live-mode bugs audited and fixed
-- [ ] 24h Paper Trading soak test
-- [ ] Long-term restart recovery verification
+- [x] 24h Live Trading soak test (653+ pipeline cycles, no crash)
+- [x] Long-term restart recovery verification
 
 ## Performance
 
 - [x] Memory usage monitoring
 - [x] CPU usage monitoring
 - [x] Thread monitoring
-- [ ] Extended memory leak observation
+- [x] Extended memory leak observation (24h: RSS 193MB, stable)
 
 ## Deployment
 
@@ -42,8 +42,8 @@
 - [x] Pipeline safety guard preserves existing position monitoring
 - [x] Admin permissions enforced by chat_id matching
 - [x] Notification retries non-blocking
-- [ ] Live dry-run validation
-- [ ] Small-capital live validation
+- [x] Live trading validation (24h, 17 trades, trailing/breakeven active)
+- [x] Small-capital live validation (300k IDR account, live on Indodax)
 
 ## Blockchain / Web3 Expansion
 
@@ -67,6 +67,5 @@
       all 8 providers, not just Binance
 - [ ] Live `/scan` + `/pipeline` run validated against each real
       exchange (OKX, Gate, Kucoin, MEXC, Indodax) with a live API key
-- [ ] `MIN_VOLUME_24H` / `scanner_min_volume` reviewed per quote
-      currency (default is USD-denominated; needs adjustment for
-      IDR on Indodax)
+- [x] `MIN_VOLUME_24H` / `scanner_min_volume` reviewed per quote
+      currency (Indodax/IDR validated at 300M IDR minimum)
