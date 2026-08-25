@@ -496,7 +496,20 @@ class ExecutionPipeline:
                 pending["remaining_qty"] = 0.0
                 self._write_ahead(symbol, pending)
 
-                sl_result = self._sell(symbol, current_price, remaining, exit_level="sl")
+                # Use the REAL exchange balance for the final close sell,
+                # not the tracked `remaining` which can drift from the
+                # actual wallet due to fees/rounding on TP partial sells.
+                sell_qty = remaining
+                if hasattr(self._provider, "get_asset_balance"):
+                    actual_balance = self._provider.get_asset_balance(symbol)
+                    if actual_balance is not None and actual_balance > sell_qty:
+                        sell_qty = actual_balance
+                        _log.info(
+                            "%s SL: selling actual balance %.8f (tracked remaining %.8f)",
+                            symbol, actual_balance, remaining,
+                        )
+
+                sl_result = self._sell(symbol, current_price, sell_qty, exit_level="sl")
                 if sl_result.status == "FILLED":
                     emit_event(PipelineEvent("EXIT_SUBMITTED", symbol, side="SELL_SL", result=sl_result.to_dict()))
                     cost_part = cost_basis * (remaining / qty) if qty > 0 else 0
@@ -548,10 +561,12 @@ class ExecutionPipeline:
                         except Exception:
                             pass
                 else:
-                    if sl_result.error and str(sl_result.error).startswith("NO_BALANCE"):
-                        # Same meaning as the TP branch: the exchange no
-                        # longer holds the asset, so retrying the SL every
-                        # cycle can never succeed — mark it closed instead.
+                    err_msg = str(sl_result.error) if sl_result.error else ""
+                    if err_msg.startswith("NO_BALANCE") or "Minimum order" in err_msg:
+                        # Exchange no longer holds enough of the asset
+                        # (already closed manually / by sibling order, or
+                        # remaining dust is below exchange minimum order).
+                        # Mark it closed instead of retrying forever.
                         _log.warning(
                             "SL sell skipped for %s: %s — marking remaining "
                             "quantity as closed instead of retrying forever",
@@ -584,6 +599,26 @@ class ExecutionPipeline:
             result["remaining_qty"] = 0.0
             result["unrealized_pnl"] = 0.0
             result["total_pnl"] = round(realized_pnl, 2)
+
+            # Dust cleanup: if the exchange still holds a tiny amount
+            # of the base asset (from TP fee rounding / partial fills),
+            # sell it now so it never triggers a "Minimum order" error
+            # on the next cycle.  Best-effort — never breaks the close.
+            # Only trigger for actual dust (< 1% of original qty or < 1 unit)
+            # to avoid accidentally selling a meaningful leftover balance.
+            if self._provider.mode == "LIVE" and hasattr(self._provider, "get_asset_balance"):
+                try:
+                    dust = self._provider.get_asset_balance(symbol)
+                    dust_threshold = max(0.001, qty * 0.01) if qty > 0 else 0.001
+                    if dust is not None and 0 < dust < dust_threshold:
+                        _log.info(
+                            "%s dust cleanup: selling %.8f remaining %s",
+                            symbol, dust, symbol.split("/")[0],
+                        )
+                        self._sell(symbol, current_price, dust, exit_level="dust")
+                except Exception:
+                    pass
+
             emit_event(PipelineEvent("POSITION_CLOSED", symbol,
                        total_pnl=result["total_pnl"], exit_reason=result.get("status", "CLOSED")))
         else:
