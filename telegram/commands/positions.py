@@ -113,6 +113,16 @@ class PositionsCommand(BaseCommand):
         # in positions.json. Fall back to it so hold duration is stable
         # across resyncs instead of resetting every 5 minutes.
         from scripts.exit_gate import load_position  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+        import os as _os  # noqa: PLC0415
+
+        # Preload live_positions.json once for orphan fallback lookups.
+        _live_pos_cache: dict[str, dict] = {}
+        try:
+            with open("data/live_positions.json") as _lp:
+                _live_pos_cache = _json.load(_lp)
+        except (FileNotFoundError, _json.JSONDecodeError, OSError):
+            pass
 
         for p in positions:
             symbol = p.get("symbol", "")
@@ -136,9 +146,17 @@ class PositionsCommand(BaseCommand):
             holding = ""
             et = _parse_timestamp(p.get("entry_time") or "")
             managed_rec = load_position(symbol) if symbol else None
-            if managed_rec:
+            # Fallback: check live_positions.json (may still have SL/TP
+            # even after positions.json was closed/cleared).
+            orphan_rec = None
+            if not managed_rec and symbol in _live_pos_cache:
+                orphan_rec = _live_pos_cache[symbol]
+            display_rec = managed_rec or orphan_rec
+            if display_rec:
                 if et is None:
-                    et = _parse_timestamp(managed_rec.get("entry_time") or "")
+                    et = _parse_timestamp(display_rec.get("entry_time") or "")
+                if not managed and orphan_rec:
+                    badge = "  ·  _⚠️ orphan — not in active positions_"
             if et is not None:
                 secs = max(0, (datetime.now(timezone.utc) - et).total_seconds())
                 holding = f"  ·  ⏱ {fmt_holding(secs)}"
@@ -149,10 +167,13 @@ class PositionsCommand(BaseCommand):
                 f"📈 PnL {pnl_str}  ·  📦 {qty:.6f} {base}  ·  🏦 {p.get('exchange', '?')}"
                 f"{holding}"
             )
-            if managed_rec:
-                tp_line = _format_tp_levels(managed_rec)
+            if display_rec:
+                tp_line = _format_tp_levels(display_rec)
                 if tp_line:
                     card += f"\n🎯 {tp_line}"
+                sl = display_rec.get("current_stop") or display_rec.get("stop_loss")
+                if sl:
+                    card += f"  ·  🛑 SL {fmt_price(sl)}"
             cards.append(card)
 
         from scripts.live_position_sync import parse_exclude_symbols  # noqa: PLC0415
