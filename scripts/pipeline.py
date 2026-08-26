@@ -616,6 +616,17 @@ class Pipeline:
                     p for p in plan_data.get("plans", [])
                     if p.get("status") == "READY"
                 ]
+                # Deduplicate: at most ONE plan per symbol — the
+                # pipeline must never submit concurrent buys for
+                # the same coin.
+                _seen_bases: set[str] = set()
+                _deduped: list[dict] = []
+                for _p in ready_plans:
+                    _b = str(_p.get("symbol", "")).split("/")[0].upper()
+                    if _b not in _seen_bases:
+                        _seen_bases.add(_b)
+                        _deduped.append(_p)
+                ready_plans = _deduped
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -716,6 +727,7 @@ class Pipeline:
                         )
                         if status == "FILLED":
                             filled_symbols.add(symbol)
+                            open_held_bases.add(held_base)
                             if self._notifier is not None:
                                 try:
                                     sent = self._notifier.notify_buy_opened(
